@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "urban"
+version = "0.1.0"
+description = "URBAN city infrastructure platform: pilot demo (read-only, shadow Command Gateway)"
+requires-python = ">=3.11"
+dependencies = [
+  "eclipse-sumo",
+  "traci",
+  "sumolib",
+  "pyproj",
+  "fastapi",
+  "uvicorn[standard]",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+urban-prepare = "urban.pipeline.__main__:main"
+urban-serve = "urban.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["urban*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

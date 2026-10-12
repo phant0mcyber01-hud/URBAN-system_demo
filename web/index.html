@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>URBAN · Фергана · центр управления</title>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div id="top" class="glass">
+    <div id="brand">URBAN <span>· Фергана</span></div>
+    <nav id="tabs"></nav>
+    <div id="mode">
+      <span id="link" class="chip ok">связь с оборудованием</span>
+      <span class="chip shadow" title="Оборудование в демо смоделировано">ЭМУЛЯЦИЯ</span>
+      <span id="operator">
+        <button id="op-login">Войти оператором</button>
+        <input id="op-token" type="password" placeholder="токен оператора" autocomplete="off" hidden />
+        <span id="op-tools" hidden>
+          <span class="chip ok">оператор</span>
+          <button id="op-link" title="Имитация: платформа перестаёт продлевать команды">Отключить связь</button>
+          <button id="op-revoke" class="danger" title="Немедленно вернуть все светофоры к базовому плану">Отозвать всё</button>
+          <button id="op-logout">Выйти</button>
+        </span>
+      </span>
+      <span id="clock">0:00</span>
+    </div>
+  </div>
+
+  <div id="left">
+    <div id="search" class="glass">
+      <input id="q" type="search" placeholder="Поиск: улица, больница, камера…  ( / )" autocomplete="off" spellcheck="false" />
+      <ul id="results" hidden></ul>
+    </div>
+    <div id="place" class="glass" hidden></div>
+  </div>
+
+  <aside id="side" class="glass"><div id="panel"></div></aside>
+
+  <section id="cam" class="glass" hidden>
+    <header>
+      <b id="cam-title"></b>
+      <button id="cam-prev" title="Предыдущая камера">‹</button>
+      <button id="cam-next" title="Следующая камера">›</button>
+      <button id="cam-close" title="Закрыть">✕</button>
+    </header>
+    <div id="camview"></div>
+    <div id="cam-hud"></div>
+  </section>
+
+  <div id="layers" class="glass">
+    <button id="layers-btn">Слои</button>
+    <div id="layers-menu" hidden></div>
+  </div>
+  <div id="foot" class="glass">
+    <span>Демо на синтетических данных: трафик, автобусные линии, телеметрия, камеры и сами светофоры смоделированы; сеть и здания из OSM.</span>
+    <span id="perf"></span>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
