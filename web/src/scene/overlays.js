@@ -45,6 +45,13 @@ export function overlayLayers(scene, S, show, { main, pulse }) {
         getPolygon: (c) => cone(scene, c), getFillColor: [92, 200, 255, 55], material: false,
       }),
       new ScatterplotLayer({
+        id: 'detectors', data: scene.detectors, visible: on('cameras'), getPosition: (d) => d.p, radiusUnits: 'meters',
+        getRadius: 5, radiusMinPixels: 3.5, stroked: true, lineWidthMinPixels: 1.5, pickable: true,
+        getFillColor: (d) => CAM_FILL[S.camStatus[d.id]] ?? [16, 20, 27, 255 * d.v],
+        getLineColor: (d) => CAM_LINE[S.camStatus[d.id]] ?? [120, 150, 175, 255 * d.v],
+        updateTriggers: { getFillColor: S.camVersion, getLineColor: S.camVersion },
+      }),
+      new ScatterplotLayer({
         id: 'cams', data: scene.cams, visible: on('cameras'), getPosition: (d) => d.p, radiusUnits: 'meters', getRadius: 7,
         radiusMinPixels: 5,
         getFillColor: (d) => CAM_FILL[S.camStatus[d.id]] ?? (d.id === S.cam ? [92, 200, 255, 255] : [16, 20, 27, 255]),

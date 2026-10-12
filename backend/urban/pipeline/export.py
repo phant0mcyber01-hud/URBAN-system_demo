@@ -1,18 +1,66 @@
-"""SUMO network -> roads, stops, virtual cameras and scene metadata for the web layer."""
+"""SUMO network -> roads, stops, signalised junctions, virtual cameras and scene metadata."""
 import html
 import json
 import math
 import xml.etree.ElementTree as ET
+from collections import defaultdict
 
 from .. import config as c
 from .paths import NET, STOPS, dump
+
+MIN_GREEN_PHASE = 10  # seconds: shorter phases are transitions, not something to rebalance
+CAMERAS = 8
+CAMERA_SPACING = 380  # metres between cameras, so they spread over the district
+
+
+def signal_plans(net, ll):
+    """Every signalised junction with its approaches and green phases (which approaches each one serves).
+
+    This is the signal plan a real integration would get from the road authority.
+    """
+    out = []
+    for tls in net.getTrafficLights():
+        links, edges = defaultdict(list), {}
+        for in_lane, _out_lane, index in tls.getConnections():
+            edge = in_lane.getEdge()
+            links[edge.getID()].append(index)
+            edges[edge.getID()] = edge
+        approaches = [e for e in edges.values() if e.getLength() > 25 and e.allows("passenger")]
+        if not approaches:
+            continue
+
+        phases = []
+        for i, ph in enumerate(next(iter(tls.getPrograms().values())).getPhases()):
+            if "y" in ph.state or ph.duration < MIN_GREEN_PHASE or not set(ph.state) & set("Gg"):
+                continue
+            served = [e.getID() for e in approaches
+                      if 2 * sum(ph.state[j] in "Gg" for j in links[e.getID()] if j < len(ph.state)) >= len(links[e.getID()])]
+            phases.append({"index": i, "duration": ph.duration, "edges": served})
+        # an approach that is green in every phase conflicts with nobody: nothing to rebalance for it
+        always = set.intersection(*(set(p["edges"]) for p in phases)) if phases else set()
+        for p in phases:
+            p["edges"] = [e for e in p["edges"] if e not in always]
+            p["streets"] = [n for n in dict.fromkeys(html.unescape(edges[e].getName() or "") for e in p["edges"]) if n]
+        phases = [p for p in phases if p["edges"]]
+
+        xs = [e.getToNode().getCoord()[0] for e in approaches]
+        ys = [e.getToNode().getCoord()[1] for e in approaches]
+        x, y = sum(xs) / len(xs), sum(ys) / len(ys)
+        names = [n for n in dict.fromkeys(html.unescape(e.getName() or "") for e in approaches) if n]
+        out.append({
+            "tls": tls.getID(), "xy": (x, y), "target": ll(x, y), "name": " / ".join(names[:2]) or "перекрёсток",
+            "approaches": [{"id": e.getID(), "name": html.unescape(e.getName() or "")} for e in approaches],
+            "phases": phases, "lanes": sum(e.getLaneNumber() for e in approaches),
+            "main": max(approaches, key=lambda e: e.getLaneNumber()),
+        })
+    return out
 
 
 def export_network():
     import sumolib
     from sumolib.geomhelper import positionAtShapeOffset
 
-    net = sumolib.net.readNet(str(NET))
+    net = sumolib.net.readNet(str(NET), withPrograms=True)
 
     def ll(x, y):
         lon, lat = net.convertXY2LonLat(x, y)
@@ -42,30 +90,35 @@ def export_network():
     radius = min((e - w) * 111320 * math.cos(math.radians(lat)), (n - s_) * 111320) / 2
     (c.OUT / "meta.json").write_text(json.dumps({"center": [(w + e) / 2, lat], "radius": round(radius)}))
 
-    # virtual cameras: the busiest signalised junctions, spaced apart, looking along the main approach
+    # signal plans for every junction; virtual cameras on the busiest ones, spaced apart
+    plans = [p for p in signal_plans(net, ll) if len(p["phases"]) >= 2]
     cx, cy = net.convertLonLat2XY((w + e) / 2, lat)
-    cand = []
-    for nd in net.getNodes():
-        x, y = nd.getCoord()
-        inc = [ed for ed in nd.getIncoming() if ed.getLength() > 40]
-        if nd.getType() == "traffic_light" and inc and math.hypot(x - cx, y - cy) < radius * 0.72:
-            cand.append((sum(ed.getLaneNumber() for ed in inc), nd, max(inc, key=lambda ed: ed.getLaneNumber())))
     cams = []
-    for _, nd, ed in sorted(cand, key=lambda t: -t[0]):
-        x, y = nd.getCoord()
-        if len(cams) >= 8 or any(math.hypot(x - q[0], y - q[1]) < 380 for q in cams):
+    for p in sorted(plans, key=lambda p: -p["lanes"]):
+        x, y = p["xy"]
+        if len(cams) >= CAMERAS or math.hypot(x - cx, y - cy) > radius * 0.72 \
+                or any(math.hypot(x - q["xy"][0], y - q["xy"][1]) < CAMERA_SPACING for q in cams):
             continue
-        (ax, ay), (bx, by) = ed.getShape()[-2:]
+        cams.append(p)
+
+    def public(p, ident):
+        return {"id": ident, "name": p["name"], "target": p["target"], "tls": p["tls"],
+                "approaches": p["approaches"], "phases": p["phases"]}
+
+    features = []
+    for i, p in enumerate(cams, 1):
+        (ax, ay), (bx, by) = p["main"].getShape()[-2:]
         d = math.hypot(bx - ax, by - ay) or 1
         ux, uy = (bx - ax) / d, (by - ay) / d
-        names = [nm for nm in dict.fromkeys(html.unescape(i.getName() or "") for i in nd.getIncoming()) if nm]
-        approaches = [{"id": i.getID(), "name": html.unescape(i.getName() or "")}
-                      for i in nd.getIncoming() if i.getLength() > 25 and i.allows("passenger")]
-        cams.append((x, y, bx - ux * 35, by - uy * 35, math.degrees(math.atan2(ux, uy)) % 360,
-                     " / ".join(names[:2]), nd.getID(), approaches))
-    dump("cameras.geojson", [{
-        "type": "Feature",
-        "properties": {"id": f"CAM-{i:02d}", "name": nm or "перекрёсток", "bearing": round(b), "target": ll(x, y),
-                       "tls": tls, "approaches": appr},
-        "geometry": {"type": "Point", "coordinates": ll(px, py)},
-    } for i, (x, y, px, py, b, nm, tls, appr) in enumerate(cams, 1)])
+        features.append({
+            "type": "Feature",
+            "properties": {**public(p, f"CAM-{i:02d}"), "bearing": round(math.degrees(math.atan2(ux, uy)) % 360)},
+            "geometry": {"type": "Point", "coordinates": ll(bx - ux * 35, by - uy * 35)},
+        })
+    dump("cameras.geojson", features)
+
+    # all signalised junctions, for experiments with full camera coverage
+    with_cam = {p["tls"]: f"CAM-{i:02d}" for i, p in enumerate(cams, 1)}
+    signals = [public(p, with_cam.get(p["tls"], f"J-{i:02d}")) for i, p in enumerate(plans, 1)]
+    (c.OUT / "signals.json").write_text(json.dumps(signals, ensure_ascii=False), encoding="utf-8")
+    print(f"   signals.json: {len(signals)}")

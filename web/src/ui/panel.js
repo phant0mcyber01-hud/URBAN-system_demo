@@ -18,6 +18,8 @@ const END_REASON = {
   window: 'окно подтверждения закончилось, возврат к базовому плану',
   revoked: 'отозвано оператором, возврат к базовому плану',
   released: 'возврат к базовому плану', restart: 'перезапуск сценария',
+  relieved: 'очередь ушла, платформа сама вернула базовый план',
+  balance: 'начало загружаться направление, отдававшее зелёный: базовый план возвращён',
 };
 
 export function createPanel(scene, S, { onCamera, onAction }) {
@@ -42,13 +44,18 @@ export function createPanel(scene, S, { onCamera, onAction }) {
            <button data-act="reject" data-id="${c.id}">Отклонить</button></div>`
         : `<small class="muted">Решение принимает оператор: войдите по токену (вверху справа).</small>`)
       : '';
+    const both = (now, other, word) => `<div class="stat">
+        <div class="row"><span>Загруженное: было ${c.queue0}</span><b>${word} ${now ?? '—'}</b></div>
+        <div class="row"><span>Отдаёт зелёный: было ${c.other0}</span><b>${word} ${other ?? '—'}</b></div></div>`;
     return `<div class="item cmd ${c.status}">
       <div class="row"><b>${esc(c.street || c.cam)}</b>${chip(cls, label)}</div>
       <div>${esc(c.reason)}</div>
-      <small>Предложение платформы: продлить зелёный на ${c.seconds} с (светофор ${esc(c.cam)}). Пределы и откат задаёт контроллер.</small>
-      ${live ? `<div class="row stat"><span>Очередь: было ${c.queue0}</span><b>сейчас ${c.queue}</b></div>
-        <small>Действует до ${clock(c.until)} (осталось ${Math.max(0, c.until - S.t)} с), потом сам вернётся к плану</small>` : ''}
-      ${c.status === 'done' && c.result ? `<div class="row stat"><span>Очередь: было ${c.result.queue0}</span><b>к концу ${c.result.queue ?? '—'}</b></div>
+      <small>Предложение платформы: перенести ${c.seconds} с зелёного с «${esc(c.from_street)}» на «${esc(c.street)}»
+        (${esc(c.cam)}). Длина цикла не меняется; пределы и откат задаёт контроллер.</small>
+      ${live ? `${both(c.queue, c.other, 'сейчас')}
+        <small>Действует до ${clock(c.until)} (осталось ${Math.max(0, c.until - S.t)} с). Снимется раньше, если очередь уйдёт
+        или начнёт страдать направление, отдающее зелёный.</small>` : ''}
+      ${c.status === 'done' && c.result ? `${both(c.result.queue, c.result.other, 'к концу')}
         <small>${esc(END_REASON[c.result.reason] ?? c.result.reason)}</small>` : ''}
       ${buttons}</div>`;
   };
@@ -61,7 +68,7 @@ export function createPanel(scene, S, { onCamera, onAction }) {
           ? `${chip(e.status === 'active' ? 'bad' : 'ok', e.status === 'active' ? 'ДТП' : 'снято')} ${esc(e.street || e.edge)}`
           : `${chip('info', esc(e.unit))} ${UNIT_TEXT[e.status]} · от «${esc(e.from)}»` })),
         ...S.alerts.map((a) => ({ t: a.t, html: `${chip(a.level === 'alert' ? 'bad' : 'warn', 'прогноз')} ${esc(a.text)}` })),
-        ...S.cmd.map((c) => ({ t: c.t, html: `${chip('warn', 'пробка')} ${esc(c.street || c.cam)}: очередь ${c.queue0} ТС` })),
+        ...S.cmd.map((c) => ({ t: c.t, html: `${chip('warn', 'пробка')} ${esc(c.street || c.cam)}: в среднем стоит ${c.queue0} ТС` })),
       ].sort((a, b) => b.t - a.t).slice(0, 8);
       return `<div class="grid">
           ${kpi('проблем ждут решения', wait, wait ? 'warn' : '')}${kpi('активных происшествий', inc, inc ? 'bad' : '')}
@@ -80,13 +87,14 @@ export function createPanel(scene, S, { onCamera, onAction }) {
           ${kpi('ср. скорость, км/ч', S.stats?.mean_speed_kmh ?? '—')}${kpi('потери автобуса, с', S.stats?.bus_avg_loss ?? '—')}
           ${kpi('сегментов с затором', jam, jam ? 'warn' : '')}${kpi('команд передано, эмуляция', S.audit.applied ?? 0)}
         </div>
-        <h4>Проблемы, найденные камерами</h4>
-        ${cards.length ? cards.map(cmdCard).join('') : empty('камеры не видят устойчивых очередей')}
+        <h4>Проблемы, найденные камерами и детекторами</h4>
+        ${cards.length ? cards.map(cmdCard).join('') : empty('перекосов нет: нигде одно направление не стоит при свободном поперечном')}
         ${skipped ? `<p class="muted">Без решения или отклонено: ${skipped}</p>` : ''}
         <h4>Заторы сейчас</h4>
         ${streets.length ? streets.slice(0, 6).map(([n, c]) => `<div class="item row"><span>${esc(n)}</span><span>${c} сегм.</span></div>`).join('') : empty('заторов нет')}`;
     }],
-    cameras: ['Камеры', () => `<p class="muted">Виртуальные камеры цифрового двойника на регулируемых перекрёстках. Считают только поток и очереди: без лиц и номеров.</p>
+    cameras: ['Камеры', () => `<p class="muted">Очереди считаются на всех ${scene.cams.length + scene.detectors.length} регулируемых перекрёстках района.
+        У ${scene.cams.length} из них есть окно камеры; остальные показаны на карте кружками. Только поток и очереди: без лиц и номеров.</p>
         ${scene.cams.map((c) => {
           const [n, speed, queue] = S.cams[c.id] ?? [0, 0, 0];
           const st = S.camStatus[c.id];
@@ -119,7 +127,7 @@ export function createPanel(scene, S, { onCamera, onAction }) {
           ${S.link ? 'Платформа продлевает действующие команды.' : 'Продлений нет: светофоры возвращаются к своему плану сами.'}</div>
         <div class="item">${chip('ok', 'решает человек')} Платформа только предлагает. Без решения оператора команда не уходит.</div>
         <div class="item">${chip('ok', 'аренда')} Команда живёт 60 с и продлевается; пропала связь или платформа, оборудование само возвращается к плану.</div>
-        <div class="item">${chip('ok', 'пределы')} Не больше +15 с к фазе, одна команда на перекрёсток, пауза между командами. Контроллер проверяет это сам.</div>
+        <div class="item">${chip('ok', 'пределы')} Зелёный только переносится между фазами (до 15 с), цикл не удлиняется, каждой фазе остаётся не меньше 15 с. Контроллер проверяет это сам.</div>
         <div class="item">${chip('ok', 'приватность')} Камеры отдают счётчики. Лица, номера и треки жителей не обрабатываются.</div>
         <div class="item">${chip('shadow', 'эмуляция')} Реальные светофоры не затронуты: оборудование в демо смоделировано.</div>
         <h4>Журнал аудита (цепочка хэшей)</h4>

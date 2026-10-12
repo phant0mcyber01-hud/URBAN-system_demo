@@ -27,7 +27,7 @@ from .. import config as c
 from ..core.bus import PLATFORM_FRAME, SOURCE_FRAME, Bus
 from ..platform import Platform
 from ..sources import sumo
-from .cameras import load_cameras
+from .cameras import load_all_junctions, load_cameras
 
 OPERATOR_TOKEN = os.getenv("URBAN_OPERATOR_TOKEN") or secrets.token_urlsafe(9)
 ACTOR = "operator"
@@ -36,7 +36,8 @@ ACTOR = "operator"
 equipment: queue.Queue = queue.Queue()  # gateway -> emulated signal controllers
 bus = Bus()
 meta = json.loads((c.OUT / "meta.json").read_text())
-platform = Platform(meta["center"], meta["radius"], load_cameras(), send=equipment.put)
+# queue detectors on every signalised junction; 8 of them also have a camera window in the UI
+platform = Platform(meta["center"], meta["radius"], load_all_junctions() or load_cameras(), send=equipment.put)
 clients: set[WebSocket] = set()
 
 

@@ -7,7 +7,7 @@ import math
 
 from .analytics import traffic
 from .analytics.infra import Detector
-from .analytics.queues import HOLD, QueueMonitor
+from .analytics.queues import RELIEVED, WINDOW, QueueMonitor
 from .gateway import CommandGateway
 
 M_LAT = 111320.0
@@ -16,7 +16,7 @@ M_LAT = 111320.0
 class Platform:
     def __init__(self, center, radius, cameras=(), send=lambda msg: None):
         """center: [lon, lat], radius: metres,
-        cameras: [{id, lon, lat, tls, name, approaches: [{id, name}]}] watched junctions,
+        cameras: [{id, lon, lat, tls, name, approaches: [{id, name}], phases: [{index, duration, edges, streets}]}],
         send: delivers a gateway message to the (emulated) equipment."""
         self.center, self.radius = center, radius
         self.m_lon = M_LAT * math.cos(math.radians(center[1]))
@@ -74,16 +74,28 @@ class Platform:
             frame["events"].append(ev)
             shadow += self._respond(ev)
 
-        cams = {c["id"]: c for c in self.cameras}
+        # one direction is overloaded while another has green to spare -> propose moving green
         for pr in problems:
-            cam = cams[pr["cam"]]
-            seconds = 15 if pr["queue"] >= 10 else 10
             self.gateway.propose(
-                t, "tls.extend_green",
-                {"tls": pr["tls"], "approach": pr["approach"], "seconds": seconds, "cam": cam["id"]},
-                f"камера {cam['id']}: очередь {pr['queue']} ТС держится {HOLD} с", pr["queue"], street=pr["street"])
-        self.gateway.tick(t, {(c["tls"], a["id"]): queues[c["id"]][a["id"]]
-                              for c in self.cameras for a in c["approaches"]})
+                t, "tls.rebalance", pr,
+                f"{'камера' if pr['cam'].startswith('CAM') else 'детектор'} {pr['cam']}: "
+                f"в среднем стоит {pr['queue']} ТС, у поперечного направления {pr['other']}")
+        demand = {}
+        for cam in self.cameras:
+            for phase, value in self.monitor.demand(cam["id"]).items():
+                demand[(cam["tls"], phase)] = value
+        self.gateway.tick(t, demand)
+        # going back to the base plan needs nobody's approval: release as soon as it stops helping
+        for p in list(self.gateway.proposals.values()):
+            if p["status"] != "active" or t - p.get("applied_at", t) < WINDOW:
+                continue
+            loaded, donor = demand.get((p["tls"], p["give"])), demand.get((p["tls"], p["take"]))
+            if loaded is None or donor is None:
+                continue
+            if loaded < RELIEVED:
+                self.gateway.release(p["id"], "relieved", t)
+            elif donor >= loaded:
+                self.gateway.release(p["id"], "balance", t)
 
         if (samples := raw.get("telemetry")) is not None:
             self.infra, alerts = self.detector.update(t, samples)

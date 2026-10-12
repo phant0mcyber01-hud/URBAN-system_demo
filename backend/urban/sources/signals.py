@@ -3,19 +3,25 @@
 This is where the safety guarantees live, deliberately independent of the platform:
 - every change is a lease that expires on its own; no renewal means the base program returns;
 - the controller enforces its own hard bounds whatever the platform asks for;
+- the cycle length never changes: green is only moved from one phase to another;
 - the base program is restored exactly as it was before the first change.
 """
 import traci
-import traci.constants as tc
 from traci import _trafficlight as tl
 
-MAX_EXTENSION = 15   # seconds a phase may be lengthened, hard limit of the controller
+MAX_SHIFT = 15       # seconds of green that may be moved between two phases, hard limit
+MIN_GREEN = 15       # seconds of green every phase keeps whatever is asked
+MIN_SHIFT = 3        # below this the change is not worth making
 MAX_LEASE_TTL = 120  # seconds a single lease may live without renewal
+
+
+def _is_green(phase) -> bool:
+    return "y" not in phase.state and bool(set(phase.state) & set("Gg"))
 
 
 class SignalControl:
     def __init__(self):
-        self.leases = {}  # tls id -> {"id", "approach", "expires", "base"}
+        self.leases = {}  # tls id -> {"id", "expires", "base"}
 
     # ---- messages from the gateway ----
     def handle(self, msg: dict, now: int) -> list[dict]:
@@ -45,21 +51,25 @@ class SignalControl:
         if tls_id not in traci.trafficlight.getIDList():
             return [self._rejected(pid, tls_id, "unknown signal controller")]
 
-        seconds = min(int(msg["seconds"]), MAX_EXTENSION)
         logic = traci.trafficlight.getAllProgramLogics(tls_id)[0]
-        phase = self._serving_phase(tls_id, logic, msg["approach"])
-        if phase is None:
-            return [self._rejected(pid, tls_id, "approach is not served by any phase")]
+        give, take = msg.get("give"), msg.get("take")
+        valid = range(len(logic.phases))
+        if give not in valid or take not in valid or give == take \
+                or not _is_green(logic.phases[give]) or not _is_green(logic.phases[take]):
+            return [self._rejected(pid, tls_id, "phases must be two different green phases")]
+        seconds = min(int(msg["seconds"]), MAX_SHIFT, int(logic.phases[take].duration) - MIN_GREEN)
+        if seconds < MIN_SHIFT:
+            return [self._rejected(pid, tls_id, "the donor phase has no green to spare")]
 
+        delta = {give: seconds, take: -seconds}
         current = traci.trafficlight.getPhase(tls_id)
-        phases = [tl.Phase(p.duration + (seconds if i == phase else 0), p.state, p.minDur, p.maxDur, p.next, p.name)
+        phases = [tl.Phase(p.duration + delta.get(i, 0), p.state, p.minDur, p.maxDur, p.next, p.name)
                   for i, p in enumerate(logic.phases)]
         traci.trafficlight.setProgramLogic(
             tls_id, tl.Logic(logic.programID, logic.type, current, phases=phases, subParameter=logic.subParameter))
         traci.trafficlight.setPhase(tls_id, current)
-        self.leases[tls_id] = {"id": pid, "approach": msg["approach"], "expires": now + ttl,
-                               "base": logic, "phase": current}
-        return [{"type": "tls", "id": pid, "status": "applied", "tls": tls_id, "seconds": seconds, "phase": phase}]
+        self.leases[tls_id] = {"id": pid, "expires": now + ttl, "base": logic}
+        return [{"type": "tls", "id": pid, "status": "applied", "tls": tls_id, "seconds": seconds}]
 
     def _revert(self, pick, reason):
         events = []
@@ -76,15 +86,3 @@ class SignalControl:
     @staticmethod
     def _rejected(pid, tls_id, why):
         return {"type": "tls", "id": pid, "status": "rejected", "tls": tls_id, "reason": why}
-
-    @staticmethod
-    def _serving_phase(tls_id, logic, approach):
-        """The phase that gives green to most links coming from the approach edge."""
-        links = traci.trafficlight.getControlledLinks(tls_id)
-        best, best_count = None, 0
-        for i, p in enumerate(logic.phases):
-            count = sum(1 for j, ch in enumerate(p.state)
-                        if ch in "Gg" and j < len(links) and links[j] and links[j][0][0].rsplit("_", 1)[0] == approach)
-            if count > best_count:
-                best, best_count = i, count
-        return best

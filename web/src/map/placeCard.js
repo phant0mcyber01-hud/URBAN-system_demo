@@ -29,6 +29,14 @@ export function describe(kind, d, S) {
         rows: [[d.metric, `${d.value} ${d.unit}`], ['Порог', `${d.limit} ${d.unit}`],
           ['Состояние', { ok: 'норма', warn: 'отклонение', alert: 'порог превышен' }[d.status]]],
       };
+    case 'detectors': {
+      const [n, speed, queue] = S.cams[d.id] ?? [0, 0, 0];
+      return {
+        title: d.name, sub: `регулируемый перекрёсток · детектор очереди ${d.id}`,
+        action: { tab: 'transport', label: 'Открыть «Пробки и светофоры»' },
+        rows: [['Стоит на подъездах, макс.', queue], ['Машин рядом', n], ['Средняя скорость', `${speed} км/ч`]],
+      };
+    }
     case 'incidents':
       return {
         title: 'ДТП', sub: d.street || d.edge, action: { tab: 'emergency', label: 'Открыть в «Экстренных»' },

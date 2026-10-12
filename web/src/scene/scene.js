@@ -24,8 +24,8 @@ function inside(p, ring) {
 
 export async function loadScene() {
   const files = ['meta.json', 'roads.geojson', 'buildings.geojson', 'stops.geojson', 'areas.geojson',
-    'lines.geojson', 'points.geojson', 'cameras.geojson', 'pois.geojson'];
-  const [meta, roadsFc, buildingsFc, stopsFc, areasFc, linesFc, pointsFc, camsFc, poisFc] =
+    'lines.geojson', 'points.geojson', 'cameras.geojson', 'pois.geojson', 'signals.json'];
+  const [meta, roadsFc, buildingsFc, stopsFc, areasFc, linesFc, pointsFc, camsFc, poisFc, signals] =
     await Promise.all(files.map((f) => getJson(`/data/${f}`)));
 
   const C = meta?.center ?? [71.785, 40.385];
@@ -82,10 +82,13 @@ export async function loadScene() {
   const visible = (d) => d.v > 0.05;
   const points = feats(pointsFc).map(point).filter(visible);
   for (const t of points.filter((d) => d.kind === 'tree')) trees.push({ p: t.p, v: t.v, s: 1 });
-  const signals = points.filter((d) => d.kind === 'signal');
+  const signalDots = points.filter((d) => d.kind === 'signal');
   const stops = feats(stopsFc).map(point).filter(visible);
   const pois = feats(poisFc).map(point).filter(visible);
   const cams = feats(camsFc).map(point);
+  // signalised junctions that have a queue detector but no camera window
+  const detectors = (signals ?? []).filter((s) => !s.id.startsWith('CAM'))
+    .map((s) => ({ id: s.id, name: s.name, p: s.target, v: vis(s.target) })).filter(visible);
 
   // street names: one label per name every ~450 m, along the street direction
   const labels = [];
@@ -114,7 +117,7 @@ export async function loadScene() {
 
   return {
     C, R, mLon, mLat, toM, toLL, vis, visM, distM, circle,
-    roads, minor, buildings, areas, trees, signals, stops, pois, cams, labels, streets, plate,
+    roads, minor, buildings, areas, trees, signals: signalDots, stops, pois, cams, detectors, labels, streets, plate,
     rim: [{ path: circle(R * 1.03, 180) }],
     roadById: new Map(roads.map((r) => [r.id, r])),
   };
