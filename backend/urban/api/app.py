@@ -86,6 +86,15 @@ async def lifespan(_):
 app = FastAPI(lifespan=lifespan, title="URBAN platform API")
 app.add_middleware(GZipMiddleware, minimum_size=2000)
 
+
+@app.middleware("http")
+async def revalidate_data(request, call_next):
+    """Map layers are regenerated in place by the pipeline: browsers must revalidate them (ETag), not guess."""
+    response = await call_next(request)
+    if request.url.path.startswith("/data/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
 _failures: list[float] = []
 
 
