@@ -65,7 +65,9 @@ map.on('zoom', () => {
 const cameras = createCameraView(scene, { onChange: (id) => { S.cam = id; panel.render(); } });
 const panel = createPanel(scene, S, {
   onCamera: (id) => (id === S.cam ? cameras.close() : cameras.open(id)),
-  onAction: (act, id) => run(() => api.post(`/api/commands/${id}/${act}`)),
+  onAction: (act, id) => run(() => (act === 'revoke' || act === 'restore'
+    ? api.post(`/api/devices/${id}/status`, { status: act === 'revoke' ? 'revoked' : 'active' })
+    : api.post(`/api/commands/${id}/${act}`))),
 });
 
 // ---- operator: viewing is open, deciding needs the token ----
@@ -154,7 +156,7 @@ function onFrame(f) {
   renderOperator();
   if (S.cam) {
     const [n, speed, queue] = S.cams[S.cam] ?? [0, 0, 0];
-    cameras.setHud(`${clock(S.t)} · ТС в кадре: ${n} · очередь: ${queue} м · ср. скорость: ${speed} км/ч · обезличено`);
+    cameras.setHud(`${clock(S.t)} · ТС в кадре: ${n} · очередь: ${queue == null ? 'нет данных' : `${queue} м`} · ср. скорость: ${speed} км/ч · обезличено`);
   }
 }
 

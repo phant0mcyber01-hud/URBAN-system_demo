@@ -20,6 +20,7 @@ from ..core.events import Vehicle
 from ..equipment.edge import EdgeController
 from ..equipment.sumo_adapter import SumoAdapter
 from ..junctions import load_all_junctions, plan_tables
+from .field import ControllerBank
 from .measure import queue_lengths
 from .telemetry import Telemetry
 
@@ -51,10 +52,14 @@ def load_bases(net, kinds):
     return out
 
 
-def run(publish, commands=None, *, seed=42, incident_at=None, realtime=True, until=None, sumo_args=()):
+def run(publish, commands=None, *, field=None, seed=42, incident_at=None, realtime=True, until=None, sumo_args=()):
     """Run one pass of the scenario, calling publish(frame) every simulated second.
 
-    commands: optional queue.Queue of messages from the Command Gateway for the emulated equipment.
+    Two ways to connect URBAN Edge to this street:
+    - field: a sources.field.FieldEmulator. Edge units run as a separate process, read the queue
+      sensors and drive the controllers through it; nothing about queues or signals is in the frames.
+    - commands (no field): an Edge embedded in this process, fed by a queue.Queue of gateway
+      messages. Used by experiments and tests, where one deterministic process is what is wanted.
     seed: SUMO random seed (driver behaviour, insertion); incident_at: second of the scripted
     incident (default from config, math.inf disables it); realtime: pace to the wall clock;
     until: stop at this simulated second; sumo_args: extra command-line options for SUMO.
@@ -78,8 +83,10 @@ def run(publish, commands=None, *, seed=42, incident_at=None, realtime=True, unt
     traci.vehicletype.setSpeedFactor("emg", 1.5)
 
     junctions = load_all_junctions()
-    # URBAN Edge at every junction, talking to the emulated controllers through the same adapter interface
-    signals = EdgeController(SumoAdapter(plan_tables(junctions)))
+    controllers = SumoAdapter(plan_tables(junctions))
+    signals = EdgeController(controllers) if field is None else None  # embedded Edge
+    bank = ControllerBank(controllers)                                 # controllers behind the field link
+    first = True
     zones = {a["id"]: a["zone"] for j in junctions for a in j["approaches"] if "zone" in a}
     lane_length, lengths = {}, {}
     kinds = {}
@@ -92,9 +99,10 @@ def run(publish, commands=None, *, seed=42, incident_at=None, realtime=True, unt
             traci.simulationStep()
             now = int(traci.simulation.getTime())
             events = []
-            while commands is not None and not commands.empty():
-                events += signals.handle(commands.get_nowait(), now)
-            events += signals.tick(now)
+            if signals is not None:
+                while commands is not None and not commands.empty():
+                    events += signals.handle(commands.get_nowait(), now)
+                events += signals.tick(now)
 
             for vid in traci.simulation.getDepartedIDList():
                 cls = traci.vehicle.getVehicleClass(vid)
@@ -180,8 +188,14 @@ def run(publish, commands=None, *, seed=42, incident_at=None, realtime=True, unt
                     incident["status"] = "cleared"
                     events.append({**public(incident), "t": now, "duration": now - incident["t"]})
 
-            frame = {"t": now, "vehicles": vehicles, "bus_loss": bus_loss, "events": events,
-                     "queues": queue_lengths(samples, zones)}
+            frame = {"t": now, "vehicles": vehicles, "bus_loss": bus_loss, "events": events}
+            measured = queue_lengths(samples, zones)
+            if field is None:
+                frame["queues"] = measured
+            else:  # each unit sees only the approaches of its own junction
+                field.step(bank, now, {j["tls"]: {a["id"]: measured.get(a["id"], 0.0) for a in j["approaches"]}
+                                       for j in junctions}, reset=first)
+                first = False
             if now % 5 == 0:
                 frame["telemetry"] = telemetry.sample(now)
             publish(frame)

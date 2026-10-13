@@ -126,9 +126,9 @@ def test_command_is_released_early_when_the_queue_is_gone_but_not_before_it_sett
     feed(lambda t, v: p.handle(frame(t, v)), q(80, 5))
     cmd, _ = approve_and_apply(p, q(80, 5))
     feed(lambda t, v: p.handle(frame(t, v)), q(0, 0), start=p.t + 1, seconds=SETTLE - 2)
-    assert {"op": "release", "id": cmd["id"]} not in sent         # a controller needs a cycle or two to switch
+    assert {"op": "release", "id": cmd["id"], "tls": "J1"} not in sent         # a controller needs a cycle or two to switch
     feed(lambda t, v: p.handle(frame(t, v)), q(0, 0), start=p.t + 1, seconds=10)
-    assert {"op": "release", "id": cmd["id"]} in sent and cmd["end"] == "relieved"
+    assert {"op": "release", "id": cmd["id"], "tls": "J1"} in sent and cmd["end"] == "relieved"
 
 
 def test_command_is_released_early_when_the_donor_direction_starts_to_suffer():
@@ -137,7 +137,7 @@ def test_command_is_released_early_when_the_donor_direction_starts_to_suffer():
     feed(lambda t, v: p.handle(frame(t, v)), q(80, 5))
     cmd, _ = approve_and_apply(p, q(80, 5))
     feed(lambda t, v: p.handle(frame(t, v)), q(50, 90), start=p.t + 1, seconds=SETTLE + 10)
-    assert {"op": "release", "id": cmd["id"]} in sent and cmd["end"] == "balance"
+    assert {"op": "release", "id": cmd["id"], "tls": "J1"} in sent and cmd["end"] == "balance"
 
 
 def test_incident_dispatch_stays_shadow_only_and_restart_resets_state():

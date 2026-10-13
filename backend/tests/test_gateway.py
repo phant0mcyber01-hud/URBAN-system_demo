@@ -56,7 +56,7 @@ def test_approval_window_ends_with_release():
     gw.decide(p["id"], True, "operator", 0)
     applied(gw, p)
     gw.tick(POL.window, {})
-    assert sent[-1] == {"op": "release", "id": p["id"]}
+    assert sent[-1] == {"op": "release", "id": p["id"], "tls": "J1"}
 
 
 def test_only_approved_plans_of_known_commands_can_be_proposed():
@@ -115,7 +115,7 @@ def test_kill_switch_releases_everything_and_rejects_pending():
     a, b = propose(gw, tls="J1"), propose(gw, tls="J2")
     gw.decide(a["id"], True, "operator", 0)
     gw.revoke_all("operator", 5)
-    assert {"op": "release", "id": a["id"]} in sent
+    assert {"op": "release", "id": a["id"], "tls": "J1"} in sent
     assert b["status"] == "rejected" and a["status"] == "revoking"
     gw.keep_muted({"J2"})
     assert propose(gw, t=6, tls="J2") is None                     # the kill switch is a "no" for pending ones too
@@ -127,11 +127,38 @@ def test_early_release_needs_no_approval_and_keeps_its_reason():
     gw.decide(p["id"], True, "operator", 0)
     applied(gw, p)
     gw.release(p["id"], "relieved", 120)
-    assert sent[-1] == {"op": "release", "id": p["id"]}
+    assert sent[-1] == {"op": "release", "id": p["id"], "tls": "J1"}
     gw.on_equipment({"id": p["id"], "status": "reverted", "reason": "released"}, 121)
     assert p["status"] == "done" and p["result"]["reason"] == "relieved"
     gw.release(p["id"], "again", 130)                             # nothing left to release
     assert len([m for m in sent if m["op"] == "release"]) == 1
+
+
+def test_approval_is_refused_while_the_device_is_offline():
+    online = {"J1": False}
+    sent = []
+    gw = CommandGateway(sent.append, APPROVED, reachable=lambda tls: online[tls])
+    p = propose(gw)
+    assert gw.decide(p["id"], True, "operator", 1) is None and sent == []
+    online["J1"] = True
+    assert gw.decide(p["id"], True, "operator", 2) is not None and len(sent) == 1
+
+
+def test_a_device_that_goes_silent_is_not_renewed_and_its_command_is_closed_after_the_lease():
+    online = {"J1": True}
+    sent = []
+    gw = CommandGateway(sent.append, APPROVED, reachable=lambda tls: online[tls])
+    p = propose(gw)
+    gw.decide(p["id"], True, "operator", 0)
+    applied(gw, p)
+    online["J1"] = False
+    gw.tick(POL.lease_ttl // 3 + 5, {})
+    assert len(sent) == 1                                         # nothing is sent into the void
+    gw.tick(POL.lease_ttl + 20, {})
+    assert p["status"] == "active"                                # the lease may still be running on the device
+    gw.tick(POL.lease_ttl + 31, {})
+    assert p["status"] == "done" and p["result"]["reason"] == "expired"
+    assert gw.audit.records[-1]["event"] == "presumed-expired"
 
 
 def test_shadow_proposals_are_recorded_but_never_sent():

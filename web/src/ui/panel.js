@@ -34,6 +34,25 @@ export function createPanel(scene, S, { onCamera, onAction }) {
     return [...count.entries()].sort((a, b) => b[1] - a[1]);
   };
 
+  // URBAN Edge units: one per junction, each with its own key; a revoked one cannot connect any more
+  const deviceList = () => {
+    const all = Object.entries(S.dev);
+    if (!all.length) return empty('ожидание устройств');
+    const online = all.filter(([, d]) => d[0] === 1).length;
+    const row = ([junction, d]) => {
+      const revoked = d[1] === 'revoked';
+      const state = revoked ? chip('bad', 'отозвано') : d[0] === 1 ? chip('ok', 'на связи') : chip('warn', 'нет связи');
+      const button = S.operator
+        ? `<button data-act="${revoked ? 'restore' : 'revoke'}" data-id="edge-${junction}">${revoked ? 'Вернуть доверие' : 'Отозвать'}</button>` : '';
+      return `<div class="item row"><span><b>edge-${esc(junction)}</b> ${state}</span>${button}</div>`;
+    };
+    const bad = all.filter(([, d]) => d[0] !== 1 || d[1] === 'revoked');
+    return `<div class="item">${chip(online === all.length ? 'ok' : 'warn', `${online} из ${all.length} на связи`)}
+        У каждого свой ключ; команды подписаны шлюзом, канал TLS. Отдельный процесс от платформы.</div>
+      ${bad.map(row).join('')}
+      <details class="devices"><summary>Все устройства</summary>${all.map(row).join('')}</details>`;
+  };
+
   // one problem found by a camera, with what the platform suggests and what happened next
   const cmdCard = (c) => {
     const [cls, label] = CMD_STATUS[c.status] ?? ['info', c.status];
@@ -100,7 +119,7 @@ export function createPanel(scene, S, { onCamera, onAction }) {
           const st = S.camStatus[c.id];
           return `<button class="item cam ${c.id === S.cam ? 'sel' : ''}" data-cam="${c.id}">
             <span><b>${c.id}</b> ${esc(c.name)} ${st === 'problem' ? chip('warn', 'проблема') : st === 'control' ? chip('ok', 'коррекция') : ''}</span>
-            <span>очередь ${queue} м · ${n} ТС · ${speed} км/ч</span></button>`;
+            <span>${queue == null ? 'нет данных' : `очередь ${queue} м`} · ${n} ТС · ${speed} км/ч</span></button>`;
         }).join('')}`],
     emergency: ['Экстренные', () => {
       const inc = S.incidents(), dis = S.dispatches();
@@ -130,6 +149,8 @@ export function createPanel(scene, S, { onCamera, onAction }) {
         <div class="item">${chip('ok', 'пределы')} Можно только выбрать один из планов, утверждённых инженером для этого перекрёстка. Произвольных таймингов нет; цикл не удлиняется, минимальный зелёный учитывает время перехода пешеходов.</div>
         <div class="item">${chip('ok', 'приватность')} Камеры отдают счётчики. Лица, номера и треки жителей не обрабатываются.</div>
         <div class="item">${chip('shadow', 'эмуляция')} Реальные светофоры не затронуты: оборудование в демо смоделировано.</div>
+        <h4>Устройства URBAN Edge</h4>
+        ${deviceList()}
         <h4>Журнал аудита (цепочка хэшей)</h4>
         ${S.log.length ? S.log.slice(-8).reverse().map((r) => `<div class="item"><time>#${r.seq}</time> <b>${esc(r.event)}</b> <code>${esc(r.command)}</code>
           <br><small>${esc(r.actor)} · ${esc(r.target)}</small><br><small class="hash">${r.hash.slice(0, 32)}…</small></div>`).join('') : empty('записей нет')}`],

@@ -4,7 +4,7 @@ export function createState(scene) {
     t: 0, stats: null, events: [], shadow: [], alerts: [], infra: [], cams: {}, cmd: [], link: true, log: [],
     audit: { count: 0, head: '', applied: 0 },
     // derived, with stable identities between frames so map layers are not rebuilt needlessly
-    jamRoads: [], infraBad: [], activeIncidents: [], infraVersion: 0, camStatus: {}, camVersion: 0,
+    jamRoads: [], infraBad: [], activeIncidents: [], infraVersion: 0, camStatus: {}, camVersion: 0, dev: {}, devVersion: 0,
     // UI
     tab: 'overview', cam: null, pin: null, operator: false,
   };
@@ -29,6 +29,14 @@ export function createState(scene) {
     if (JSON.stringify(next) !== JSON.stringify(S.camStatus)) { S.camStatus = next; S.camVersion++; }
   }
 
+  // dev: junction id -> [online, status, temperature, version] of its URBAN Edge unit
+  function setDev(dev) {
+    const sig = (d) => Object.entries(d).map(([k, v]) => `${k}:${v[0]}${v[1]}`).join();
+    if (sig(dev) !== sig(S.dev)) S.devVersion++;
+    S.dev = dev;
+  }
+  S.online = (junction) => (S.dev[junction]?.[0] ?? 1) === 1;
+
   S.applySnapshot = (snap = {}) => {
     S.events = snap.events ?? [];
     S.shadow = snap.shadow ?? [];
@@ -38,6 +46,7 @@ export function createState(scene) {
     S.log = snap.log ?? S.log;
     setInfra(snap.infra ?? []);
     setCmd(snap.cmd ?? []);
+    if (snap.dev) setDev(snap.dev);
     derive();
   };
 
@@ -54,6 +63,7 @@ export function createState(scene) {
     if (f.alerts) S.alerts.push(...f.alerts);
     if (f.infra) setInfra(f.infra);
     if (f.cmd) setCmd(f.cmd);
+    if (f.dev) setDev(f.dev);
     if (f.log) S.log = S.log.concat(f.log).slice(-50);
     if (f.audit) S.audit = f.audit;
   };

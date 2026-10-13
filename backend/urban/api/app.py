@@ -1,18 +1,26 @@
-"""HTTP/WebSocket API and static UI.
+"""HTTP/WebSocket API, static UI and the device endpoint.
 
-    python -m urban   ->  http://localhost:8080
+    python -m urban   ->  UI on http://localhost:8080, devices on wss://localhost:8443
 
-Reading is open on this machine. Anything that changes state (approve or reject a proposed
-command, kill switch, cutting the demo link) needs the operator token printed at startup.
-Data flow: source thread -> bus(source.frame) -> Platform.handle -> bus(platform.frame) -> WebSocket.
-Operator actions go to the Command Gateway, the only path towards (emulated) equipment.
+Three kinds of clients, three levels of trust:
+- anyone on this machine may read (UI, /api/state, the read-only /ws);
+- an operator, with the token printed at startup, may decide on proposals, pull everything
+  back, cut the demo link and revoke a device;
+- an URBAN Edge unit connects to /device over TLS and is trusted only after it signs a
+  challenge with the key enrolled in the registry.
+
+Data flow up:   Edge units -> /device -> DeviceHub -> Platform (queue readings, lease events)
+                simulation -> bus -> Platform.handle -> /ws (vehicles for the twin, analysis)
+Data flow down: operator -> Command Gateway -> DeviceHub (signed) -> Edge unit -> controller
+The local /field socket stands for the cables in a cabinet: sensors and controller of the demo.
 """
 import asyncio
 import hmac
 import json
 import os
-import queue
 import secrets
+import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -25,24 +33,41 @@ from pydantic import BaseModel
 
 from .. import config as c
 from ..core.bus import PLATFORM_FRAME, SOURCE_FRAME, Bus
+from ..devices import crypto
+from ..devices.hub import DeviceHub
+from ..devices.registry import ACTIVE, REVOKED, Registry, provision
+from ..junctions import load_all_junctions, load_cameras
 from ..platform import Platform
 from ..sources import sumo
-from ..junctions import load_all_junctions, load_cameras
+from ..sources.field import FieldEmulator
 
 OPERATOR_TOKEN = os.getenv("URBAN_OPERATOR_TOKEN") or secrets.token_urlsafe(9)
 ACTOR = "operator"
+SPAWN_EDGE = os.getenv("URBAN_EDGE", "auto") != "manual"  # manual: start `python -m urban.edge` yourself
 
+junctions = load_all_junctions() or load_cameras()
+provision(junctions, c.PKI)  # demo convenience: a deployment enrols devices one by one
 
-equipment: queue.Queue = queue.Queue()  # gateway -> emulated signal controllers
 bus = Bus()
+field = FieldEmulator()
 meta = json.loads((c.OUT / "meta.json").read_text())
-# queue detectors on every signalised junction; 8 of them also have a camera window in the UI
-platform = Platform(meta["center"], meta["radius"], load_all_junctions() or load_cameras(), send=equipment.put)
+hub = DeviceHub(Registry(c.PKI / "devices.json"), crypto.load_private((c.PKI / "gateway.key").read_text()),
+                on_report=lambda rec, report: platform.on_report(rec["tls"], report), clock=lambda: platform.t)
+platform = Platform(meta["center"], meta["radius"], junctions, send=hub.send, reachable=hub.online)
 clients: set[WebSocket] = set()
 
 
+def devices_brief() -> dict:
+    """Per junction: [online, status, temperature, version] for the UI."""
+    return {d["junction"]: [int(d["online"]), d["status"], d["health"].get("temp"), d["health"].get("version")]
+            for d in hub.status()}
+
+
 async def analyse(raw: dict):
-    await bus.publish(PLATFORM_FRAME, platform.handle(raw))
+    frame = platform.handle(raw)
+    if raw["t"] % 5 == 0 or frame.get("reset"):
+        frame["dev"] = devices_brief()
+    await bus.publish(PLATFORM_FRAME, frame)
 
 
 async def broadcast(frame: dict):
@@ -66,7 +91,7 @@ def source_thread(loop: asyncio.AbstractEventLoop, stop: threading.Event):
 
     while not stop.is_set():  # loop the scenario for the demo
         try:
-            sumo.run(publish, equipment)
+            sumo.run(publish, field=field)
         except SystemExit:
             return
         except Exception:
@@ -77,21 +102,40 @@ def source_thread(loop: asyncio.AbstractEventLoop, stop: threading.Event):
 @asynccontextmanager
 async def lifespan(_):
     print(f"\n  Operator token: {OPERATOR_TOKEN}\n  (viewing needs no token; approving commands does)\n", flush=True)
+    field.loop = asyncio.get_running_loop()
     stop = threading.Event()
-    threading.Thread(target=source_thread, args=(asyncio.get_running_loop(), stop), daemon=True).start()
+    threading.Thread(target=source_thread, args=(field.loop, stop), daemon=True).start()
+    edge = subprocess.Popen([sys.executable, "-m", "urban.edge"]) if SPAWN_EDGE else None
     yield
     stop.set()
+    if edge is not None:
+        edge.terminate()
 
 
 app = FastAPI(lifespan=lifespan, title="URBAN platform API")
 app.add_middleware(GZipMiddleware, minimum_size=2000)
 
+# devices get their own listener (TLS, another port): nothing else is reachable through it
+device_app = FastAPI(title="URBAN device endpoint", docs_url=None, redoc_url=None, openapi_url=None)
+
+
+@device_app.websocket("/device")
+async def device_endpoint(ws: WebSocket):
+    await hub.serve(ws)
+
+
+@app.websocket("/field")
+async def field_endpoint(ws: WebSocket):
+    await field.serve(ws)
+
 
 @app.middleware("http")
 async def revalidate_data(request, call_next):
-    """Map layers are regenerated in place by the pipeline: browsers must revalidate them (ETag), not guess."""
+    """Map layers and the page itself are rebuilt in place: browsers must revalidate them (ETag), not guess.
+    Scripts and styles have hashed names and may be cached freely."""
     response = await call_next(request)
-    if request.url.path.startswith("/data/"):
+    path = request.url.path
+    if path.startswith("/data/") or path == "/" or path.endswith(".html"):
         response.headers["Cache-Control"] = "no-cache"
     return response
 
@@ -112,17 +156,22 @@ def operator(x_operator_token: str = Header(default="")):
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "t": platform.t}
+    return {"ok": True, "t": platform.t, "devices_online": len(hub.sessions)}
 
 
 @app.get("/api/state")
 def state():
-    return platform.snapshot()
+    return {**platform.snapshot(), "dev": devices_brief()}
 
 
 @app.get("/api/audit")
 def audit():
     return {**platform.audit(), "intact": platform.gateway.verify(), "records": platform.gateway.records[-50:]}
+
+
+@app.get("/api/devices")
+def devices():
+    return hub.status()
 
 
 @app.get("/api/me")
@@ -134,12 +183,16 @@ class Link(BaseModel):
     up: bool
 
 
+class DeviceStatus(BaseModel):
+    status: str
+
+
 # async handlers run on the event loop, the same thread that runs Platform.handle: no races on gateway state
 @app.post("/api/commands/{pid}/approve")
 async def approve(pid: str, who: str = Depends(operator)):
     p = platform.gateway.decide(pid, True, who, platform.t)
     if p is None:
-        raise HTTPException(409, "cannot approve: not pending, unknown, or the link is down")
+        raise HTTPException(409, "cannot approve: not pending, the link is down, or the device is offline")
     return p
 
 
@@ -161,6 +214,18 @@ async def revoke_all(who: str = Depends(operator)):
 async def link(body: Link, who: str = Depends(operator)):
     platform.gateway.set_link(body.up, who, platform.t)
     return {"link": platform.gateway.link_up}
+
+
+@app.post("/api/devices/{device}/status")
+async def device_status(device: str, body: DeviceStatus, who: str = Depends(operator)):
+    """Revoke a device (it is disconnected and can no longer authenticate) or trust it again."""
+    if body.status not in (ACTIVE, REVOKED):
+        raise HTTPException(400, "status must be active or revoked")
+    rec = await hub.set_status(device, body.status)
+    if rec is None:
+        raise HTTPException(404, "unknown device")
+    platform.gateway.audit.append(platform.t, f"device-{body.status}", "-", "-", device, "", actor=who, mode="approval")
+    return {"id": rec["id"], "status": rec["status"]}
 
 
 @app.websocket("/ws")

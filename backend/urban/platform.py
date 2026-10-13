@@ -12,12 +12,13 @@ from .gateway import CommandGateway
 from .junctions import approved_plans
 
 SETTLE = 2 * WINDOW  # seconds after a plan change before judging it: a controller needs a cycle to switch
+STALE = 5            # seconds without a report before a junction counts as "no data"
 
 M_LAT = 111320.0
 
 
 class Platform:
-    def __init__(self, center, radius, cameras=(), send=lambda msg: None):
+    def __init__(self, center, radius, cameras=(), send=lambda msg: None, reachable=lambda tls: True):
         """center: [lon, lat], radius: metres,
         cameras: junctions with a queue sensor, as loaded by urban.junctions
                  (camera: True when the junction also has a camera window),
@@ -26,7 +27,9 @@ class Platform:
         self.m_lon = M_LAT * math.cos(math.radians(center[1]))
         self.cameras = list(cameras)
         self.camera_xy = [(c["id"], *self.local(c["lon"], c["lat"])) for c in self.cameras]
-        self.gateway = CommandGateway(send, approved_plans(self.cameras))
+        self.gateway = CommandGateway(send, approved_plans(self.cameras), reachable)
+        self._by_tls = {c["tls"]: c for c in self.cameras}
+        self.sensors: dict[str, tuple[int, dict]] = {}  # junction id -> (report time, queues) from its Edge unit
         self.queues, self.last_cmd_version, self._logged = {}, -1, 0
         self._reset()
         self.t = -1
@@ -45,6 +48,7 @@ class Platform:
         frame = {"t": raw["t"]}
         if raw["t"] < self.t:  # the scenario restarted
             self._reset()
+            self.sensors.clear()
             frame["reset"] = True
         self.t = raw["t"]
         t = raw["t"]
@@ -62,10 +66,21 @@ class Platform:
         frame["stats"] = traffic.stats(raw["vehicles"], raw.get("bus_loss", []))
 
         # sensors: flow counters and queue length per approach (aggregates only)
-        queues, problems = self.monitor.update(t, raw.get("queues", {}))
+        if "queues" in raw:  # an Edge embedded in the source: readings arrive with the frame
+            readings, missing = raw["queues"], set()
+        else:                # separate Edge units: use what they reported, and only while it is fresh
+            readings, missing = {}, set()
+            for cam in self.cameras:
+                at, reported = self.sensors.get(cam["id"], (None, None))
+                if at is None or not 0 <= t - at <= STALE:
+                    missing.add(cam["id"])
+                else:
+                    readings.update(reported)
+        queues, problems = self.monitor.update(t, readings, missing)
         self.queues = queues
         counts = traffic.camera_counts(points, self.camera_xy)
-        frame["cams"] = {cid: [*counts[cid], round(max(queues[cid].values(), default=0))] for cid in counts}
+        frame["cams"] = {cid: [*counts[cid], None if queues[cid] is None else round(max(queues[cid].values(), default=0))]
+                         for cid in counts}
 
         shadow = []
         frame["events"] = []
@@ -123,6 +138,19 @@ class Platform:
             self.last_cmd_version = self.gateway.version
             frame["cmd"] = self.gateway.public()
         return frame
+
+    def on_report(self, tls: str, report: dict):
+        """A report from the Edge unit of a junction: queue readings and what happened to its leases."""
+        cam = self._by_tls.get(tls)
+        if cam is None:
+            return
+        self.sensors[cam["id"]] = (report.get("t", self.t), report.get("queues", {}))
+        for ev in report.get("events", []):
+            if ev.get("type") == "tls":
+                self.gateway.on_equipment(ev, self.t)
+            elif ev.get("type") == "edge":
+                self.gateway.audit.append(self.t, "device-refused", "-", "-", str(ev.get("device")),
+                                          str(ev.get("reason")), actor="equipment", mode="approval")
 
     def _respond(self, ev: dict) -> list[dict]:
         street = ev.get("street") or ev.get("edge", "")

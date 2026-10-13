@@ -67,10 +67,19 @@ class QueueMonitor:
             out[ph["index"]] = self._sum[key] / WINDOW
         return out
 
-    def update(self, t: int, queues_m: dict[str, float]) -> tuple[dict, list[dict]]:
-        """queues_m: {approach edge id: queue metres} as reported by the sensors this second."""
+    def update(self, t: int, queues_m: dict[str, float], missing=()) -> tuple[dict, list[dict]]:
+        """queues_m: {approach edge id: queue metres} as reported by the sensors this second.
+        missing: ids of junctions with no fresh reading. They get None instead of numbers, their
+        history is dropped, and nothing is proposed for them: no data is not the same as no queue."""
         queues, problems = {}, []
         for j in self.junctions:
+            if j["id"] in missing:
+                queues[j["id"]] = None
+                self.demands[j["id"]] = {}
+                for ph in j.get("phases", []):
+                    self._hist.pop((j["id"], ph["index"]), None)
+                    self._sum.pop((j["id"], ph["index"]), None)
+                continue
             queues[j["id"]] = {a["id"]: queues_m.get(a["id"], 0.0) for a in j["approaches"]}
             for ph in j.get("phases", []):
                 key = (j["id"], ph["index"])

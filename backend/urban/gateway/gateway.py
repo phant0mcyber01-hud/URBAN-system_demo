@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from .audit import AuditLog
 
 OPEN = ("pending", "approved", "active")
+SILENCE_MARGIN = 30  # seconds past the lease before a silent device is presumed to have reverted
 
 
 @dataclass(frozen=True)
@@ -34,10 +35,13 @@ POLICY = {"tls.select_plan": Policy(lease_ttl=180, window=900, cooldown=180, pen
 class CommandGateway:
     mode = "approval"
 
-    def __init__(self, send=lambda msg: None, plans: dict[str, set[int]] | None = None):
-        """plans: tls id -> approved plan ids. Without it every plan request is refused."""
+    def __init__(self, send=lambda msg: None, plans: dict[str, set[int]] | None = None,
+                 reachable=lambda tls: True):
+        """plans: tls id -> approved plan ids. Without it every plan request is refused.
+        reachable(tls): is the device of that junction connected right now."""
         self.send = send
         self.plans = plans or {}
+        self.reachable = reachable
         self.audit = AuditLog()
         self.proposals: dict[str, dict] = {}
         self.link_up = True
@@ -98,8 +102,10 @@ class CommandGateway:
 
     def decide(self, pid: str, approve: bool, actor: str, t: int) -> dict | None:
         p = self.proposals.get(pid)
-        if p is None or p["status"] != "pending" or (approve and not self.link_up):
+        if p is None or p["status"] != "pending":
             return None
+        if approve and not (self.link_up and self.reachable(p["tls"])):
+            return None  # nobody to send it to: approving would be a promise we cannot keep
         pol = POLICY[p["command"]]
         if not approve:
             p["status"] = "rejected"
@@ -119,7 +125,7 @@ class CommandGateway:
         p = self.proposals.get(pid)
         if p is None or p["status"] not in ("approved", "active"):
             return
-        self.send({"op": "release", "id": pid})
+        self.send({"op": "release", "id": pid, "tls": p["tls"]})
         p["status"], p["end"] = "revoking", why
         self.audit.append(t, "released", pid, p["command"], self._target(p), why, mode="approval")
         self.version += 1
@@ -128,7 +134,7 @@ class CommandGateway:
         """Kill switch: pull back everything now. Works even when the link is marked down."""
         for p in self.proposals.values():
             if p["status"] in ("approved", "active"):
-                self.send({"op": "release", "id": p["id"]})
+                self.send({"op": "release", "id": p["id"], "tls": p["tls"]})
                 p["status"], p["end"] = "revoking", "revoked"
             elif p["status"] == "pending":
                 p["status"] = "rejected"
@@ -163,12 +169,22 @@ class CommandGateway:
                 p["queue"] = round(demand.get((p["tls"], p["give"]), p["queue"]))
                 p["other"] = round(demand.get((p["tls"], p["take"]), p["other"]))
                 pol = POLICY[p["command"]]
+                connected = self.link_up and self.reachable(p["tls"])
                 if t >= p["until"]:
-                    self.send({"op": "release", "id": p["id"]})
+                    self.send({"op": "release", "id": p["id"], "tls": p["tls"]})
                     p["status"], p["end"] = "revoking", "window"
-                elif self.link_up and t - p["renewed"] >= pol.lease_ttl // 3:
+                elif connected and t - p["renewed"] >= pol.lease_ttl // 3:
                     p["renewed"] = t
                     self._lease(p, pol)
+                elif not connected and t - p["renewed"] > pol.lease_ttl + SILENCE_MARGIN:
+                    # nothing was renewed and nothing was heard: by now the lease has run out on the device
+                    p["status"] = "done"
+                    p["result"] = {"reason": "expired", "queue0": p["queue0"], "queue": p["queue"],
+                                   "other0": p["other0"], "other": p["other"], "t": t}
+                    self._last_done[p["tls"]] = t
+                    self.audit.append(t, "presumed-expired", p["id"], p["command"], self._target(p),
+                                      "device unreachable past its lease", mode="approval")
+                    self.version += 1
 
     def on_equipment(self, ev: dict, t: int):
         p = self.proposals.get(ev["id"])
