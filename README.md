@@ -182,7 +182,7 @@ docs/            архитектура, безопасность, замер
 ```
 
 Документы: [CONTEXT.md](CONTEXT.md) (замысел, решения, состояние) ·
-[docs/architecture.md](docs/architecture.md) · [docs/security.md](docs/security.md) ·
+[docs/architecture.md](docs/architecture.md) · [docs/hardware.md](docs/hardware.md) · [docs/security.md](docs/security.md) ·
 [docs/benchmark.md](docs/benchmark.md)
 
 ## Что дальше
