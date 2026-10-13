@@ -72,7 +72,7 @@ class Platform:
             readings, missing = {}, set()
             for cam in self.cameras:
                 at, reported = self.sensors.get(cam["id"], (None, None))
-                if at is None or not 0 <= t - at <= STALE:
+                if at is None or abs(t - at) > STALE:  # a report may run a second ahead of the frame
                     missing.add(cam["id"])
                 else:
                     readings.update(reported)
@@ -144,10 +144,26 @@ class Platform:
         cam = self._by_tls.get(tls)
         if cam is None:
             return
-        self.sensors[cam["id"]] = (report.get("t", self.t), report.get("queues", {}))
-        for ev in report.get("events", []):
+        # a device is trusted for its own approaches only, and only for numbers
+        queues = {}
+        raw_queues = report.get("queues")
+        if isinstance(raw_queues, dict):
+            for a in cam["approaches"]:
+                try:
+                    queues[a["id"]] = max(0.0, float(raw_queues[a["id"]]))
+                except (KeyError, TypeError, ValueError):
+                    pass
+        try:
+            at = int(report.get("t", self.t))
+        except (TypeError, ValueError):
+            at = self.t
+        self.sensors[cam["id"]] = (at, queues)
+        events = report.get("events")
+        for ev in events if isinstance(events, list) else []:
+            if not isinstance(ev, dict):
+                continue
             if ev.get("type") == "tls":
-                self.gateway.on_equipment(ev, self.t)
+                self.gateway.on_equipment(ev, self.t, tls)
             elif ev.get("type") == "edge":
                 self.gateway.audit.append(self.t, "device-refused", "-", "-", str(ev.get("device")),
                                           str(ev.get("reason")), actor="equipment", mode="approval")

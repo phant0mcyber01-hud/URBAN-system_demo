@@ -186,29 +186,39 @@ class CommandGateway:
                                       "device unreachable past its lease", mode="approval")
                     self.version += 1
 
-    def on_equipment(self, ev: dict, t: int):
-        p = self.proposals.get(ev["id"])
+    def on_equipment(self, ev: dict, t: int, tls: str | None = None):
+        """A report from equipment about one of our commands. tls: the junction the reporting device
+        is enrolled for; a device may only speak about commands at its own junction."""
+        p = self.proposals.get(ev.get("id"))
         if p is None:
             return
-        if ev["status"] == "applied":
+        if tls is not None and p["tls"] != tls:
+            self.audit.append(t, "device-ignored", p["id"], p["command"], tls,
+                              "report about another junction", actor="equipment", mode="approval")
+            return
+        status, reason = ev.get("status"), str(ev.get("reason", ""))
+        # a closed command stays closed: a late or repeated report must not reopen it
+        if status == "applied" and p["status"] == "approved":
             p["status"], p["applied_at"] = "active", t
             self.applied += 1
-            self.audit.append(t, "applied", p["id"], p["command"], self._target(p), f"plan {ev['plan']} running",
+            self.audit.append(t, "applied", p["id"], p["command"], self._target(p), f"plan {ev.get('plan')} running",
                               actor="equipment", executed=True, mode="approval")
-        elif ev["status"] == "reverted":
-            reason = p.get("end") if ev["reason"] == "released" and p.get("end") else ev["reason"]
+        elif status == "reverted" and p["status"] in ("approved", "active", "revoking"):
+            reason = p.get("end") if reason == "released" and p.get("end") else reason
             p["status"] = "done"
             p["result"] = {"reason": reason, "queue0": p["queue0"], "queue": p["queue"],
                            "other0": p["other0"], "other": p["other"], "t": t}
             self._last_done[p["tls"]] = t
             self.audit.append(t, "reverted", p["id"], p["command"], self._target(p), reason,
                               actor="equipment", executed=True, mode="approval")
-        elif ev["status"] == "rejected":
+        elif status == "rejected" and p["status"] in ("approved", "active"):
             p["status"] = "failed"
-            p["result"] = {"reason": ev["reason"]}
+            p["result"] = {"reason": reason}
             self._last_done[p["tls"]] = t
-            self.audit.append(t, "equipment-rejected", p["id"], p["command"], self._target(p), ev["reason"],
+            self.audit.append(t, "equipment-rejected", p["id"], p["command"], self._target(p), reason,
                               actor="equipment", mode="approval")
+        else:
+            return
         self.version += 1
 
     def reset(self):

@@ -4,10 +4,15 @@ A command is obeyed only if all of this holds:
 - it is signed by the gateway key this unit was provisioned with;
 - it is addressed to this unit and to its own junction;
 - its sequence number is higher than anything seen before (no replays);
-- it is fresh: issued within MAX_SKEW seconds of the clock of the unit.
+- it is fresh: issued within MAX_SKEW seconds of the wall clock of the unit.
 Everything else is refused and reported. Leases then run exactly as in EdgeController.
+
+The sequence high-water mark survives restarts (it is written to `state_path`), so a command
+captured before a restart cannot be replayed after it.
 """
 import random
+import time
+from pathlib import Path
 
 from ..devices import crypto
 from ..equipment.adapter import ControllerAdapter
@@ -18,10 +23,18 @@ MAX_SKEW = 30  # seconds between the issue time of a command and the clock of th
 
 
 class EdgeDevice:
-    def __init__(self, device_id: str, tls: str, key, gateway_public, adapter: ControllerAdapter):
+    def __init__(self, device_id: str, tls: str, key, gateway_public, adapter: ControllerAdapter,
+                 state_path: Path | None = None, wall=time.time):
+        """state_path: where the last accepted sequence number is kept; wall(): wall-clock seconds."""
         self.id, self.tls, self.key, self.gateway_public = device_id, tls, key, gateway_public
         self.controller = EdgeController(adapter)
+        self.state_path, self.wall = state_path, wall
         self.last_seq = 0
+        if state_path is not None and state_path.exists():
+            try:
+                self.last_seq = int(state_path.read_text())
+            except ValueError:
+                pass
         self.clock = 0
         self.outbox: list[dict] = []  # events waiting to be reported
         self._temp = 38.0 + random.random() * 6
@@ -38,6 +51,8 @@ class EdgeDevice:
             self.outbox.append({"type": "edge", "status": "refused", "device": self.id, "reason": why})
             return False
         self.last_seq = env["seq"]
+        if self.state_path is not None:
+            self.state_path.write_text(str(self.last_seq))
         self.outbox += self.controller.handle(env["body"], self.clock)
         return True
 
@@ -53,9 +68,9 @@ class EdgeDevice:
             return "addressed to another device"
         if not isinstance(signed["seq"], int) or signed["seq"] <= self.last_seq:
             return "replayed or out of order"
-        if abs(self.clock - signed["t"]) > MAX_SKEW:
+        if not isinstance(signed["t"], (int, float)) or abs(self.wall() - signed["t"]) > MAX_SKEW:
             return "stale command"
-        if body.get("op") != "revoke_all" and body.get("tls") != self.tls:
+        if not isinstance(body, dict) or body.get("tls") != self.tls:
             return "not my junction"
         return None
 

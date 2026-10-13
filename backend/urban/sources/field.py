@@ -2,13 +2,16 @@
 
 The simulation thread calls step() once a simulated second. Edge units connect to serve()
 over a local WebSocket: readings go out, controller operations come in. This stands for the
-cables inside a cabinet, so there is no authentication here and it listens on localhost only.
+cables inside a cabinet. It listens on localhost only, refuses browsers (any Origin header)
+and wants the field token the platform hands to the Edge process, so no other local client
+can pull on the cables.
 
 The controllers are emulated with their own loss-of-communication timer (the unitBackupTime
 of NTCIP): a plan that is not confirmed for BACKUP_TIME seconds is dropped by the controller
 itself, even if the Edge unit that asked for it has died.
 """
 import asyncio
+import hmac
 import json
 import queue
 
@@ -54,7 +57,8 @@ class ControllerBank:
 
 
 class FieldEmulator:
-    def __init__(self):
+    def __init__(self, token: str = ""):
+        self.token = token
         self.loop: asyncio.AbstractEventLoop | None = None
         self.ops: queue.Queue = queue.Queue()
         self.clients: set[WebSocket] = set()
@@ -84,7 +88,18 @@ class FieldEmulator:
                 self.clients.discard(ws)
 
     async def serve(self, ws: WebSocket):
+        if ws.headers.get("origin"):  # a web page is never a cable
+            await ws.close(code=4403)
+            return
         await ws.accept()
+        try:
+            hello = json.loads(await asyncio.wait_for(ws.receive_text(), 10))
+            token = str(hello.get("token", "")) if isinstance(hello, dict) else ""
+        except (WebSocketDisconnect, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError):
+            return
+        if not self.token or not hmac.compare_digest(token, self.token):
+            await ws.close(code=4401)
+            return
         self.loop = asyncio.get_running_loop()
         for other in list(self.clients):  # one set of units per street: the newest one wins
             self.clients.discard(other)
@@ -95,7 +110,9 @@ class FieldEmulator:
         self.clients.add(ws)
         try:
             while True:
-                self.ops.put(json.loads(await ws.receive_text()))
+                op = json.loads(await ws.receive_text())
+                if isinstance(op, dict):
+                    self.ops.put(op)
         except (WebSocketDisconnect, json.JSONDecodeError, RuntimeError):
             pass
         finally:

@@ -12,6 +12,7 @@ import asyncio
 import json
 import ssl
 import time
+import traceback
 
 import websockets
 
@@ -37,7 +38,9 @@ class Fleet:
         for j in junctions:
             ident = device_id(j["id"])
             key = crypto.load_private((c.PKI / "edge" / f"{ident}.key").read_text())
-            self.devices[j["tls"]] = EdgeDevice(ident, j["tls"], key, gateway_public, adapter)
+            self.devices[j["tls"]] = EdgeDevice(ident, j["tls"], key, gateway_public, adapter,
+                                                state_path=c.PKI / "edge" / f"{ident}.seq")
+        self.field_token = (c.PKI / "field.token").read_text().strip()  # the demo cable has a lock on it
         self.sessions: dict[str, object] = {}  # device id -> open websocket to the platform
         self.tls_context = ssl.create_default_context(cafile=str(c.PKI / "ca.pem"))  # pin our CA, nothing else
         self.field_seen = time.monotonic()
@@ -60,6 +63,7 @@ class Fleet:
         while True:
             try:
                 async with websockets.connect(url, max_size=None) as ws:
+                    await ws.send(json.dumps({"token": self.field_token}))
                     self.field_ws = ws
                     async for text in ws:
                         self.field_seen = time.monotonic()
@@ -69,6 +73,8 @@ class Fleet:
                         raise SystemExit
             except (OSError, websockets.WebSocketException):
                 pass
+            except Exception:  # a bad frame must not take every unit down
+                traceback.print_exc()
             finally:
                 self.field_ws = None
             if not keep_running and time.monotonic() - self.field_seen > FIELD_PATIENCE:
@@ -110,6 +116,8 @@ class Fleet:
                             dev.on_command(msg)
             except (OSError, websockets.WebSocketException, ConnectionError, json.JSONDecodeError, KeyError):
                 pass
+            except Exception:  # one unit's trouble stays its own
+                traceback.print_exc()
             finally:
                 self.sessions.pop(dev.id, None)
             await asyncio.sleep(RETRY)

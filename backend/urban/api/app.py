@@ -47,9 +47,11 @@ SPAWN_EDGE = os.getenv("URBAN_EDGE", "auto") != "manual"  # manual: start `pytho
 
 junctions = load_all_junctions() or load_cameras()
 provision(junctions, c.PKI)  # demo convenience: a deployment enrols devices one by one
+FIELD_TOKEN = secrets.token_urlsafe(24)  # new on every start; the Edge process reads it from the pki folder
+(c.PKI / "field.token").write_text(FIELD_TOKEN)
 
 bus = Bus()
-field = FieldEmulator()
+field = FieldEmulator(FIELD_TOKEN)
 meta = json.loads((c.OUT / "meta.json").read_text())
 hub = DeviceHub(Registry(c.PKI / "devices.json"), crypto.load_private((c.PKI / "gateway.key").read_text()),
                 on_report=lambda rec, report: platform.on_report(rec["tls"], report), clock=lambda: platform.t)
@@ -58,8 +60,8 @@ clients: set[WebSocket] = set()
 
 
 def devices_brief() -> dict:
-    """Per junction: [online, status, temperature, version] for the UI."""
-    return {d["junction"]: [int(d["online"]), d["status"], d["health"].get("temp"), d["health"].get("version")]
+    """Per junction: [online, status, temperature, version, device id] for the UI."""
+    return {d["junction"]: [int(d["online"]), d["status"], d["health"].get("temp"), d["health"].get("version"), d["id"]]
             for d in hub.status()}
 
 
@@ -105,11 +107,27 @@ async def lifespan(_):
     field.loop = asyncio.get_running_loop()
     stop = threading.Event()
     threading.Thread(target=source_thread, args=(field.loop, stop), daemon=True).start()
-    edge = subprocess.Popen([sys.executable, "-m", "urban.edge"]) if SPAWN_EDGE else None
+    watchdog = asyncio.create_task(edge_watchdog(stop)) if SPAWN_EDGE else None
     yield
     stop.set()
-    if edge is not None:
-        edge.terminate()
+    if watchdog is not None:
+        watchdog.cancel()
+
+
+async def edge_watchdog(stop: threading.Event):
+    """Keeps the demo Edge process alive: if it dies, start it again after a short pause."""
+    edge = None
+    try:
+        while not stop.is_set():
+            if edge is None or edge.poll() is not None:
+                if edge is not None:
+                    print(f"edge process exited with {edge.returncode}, restarting", flush=True)
+                    await asyncio.sleep(3)
+                edge = subprocess.Popen([sys.executable, "-m", "urban.edge", "--keep-running"])
+            await asyncio.sleep(2)
+    finally:
+        if edge is not None and edge.poll() is None:
+            edge.terminate()
 
 
 app = FastAPI(lifespan=lifespan, title="URBAN platform API")

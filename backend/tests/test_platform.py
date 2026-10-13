@@ -140,6 +140,69 @@ def test_command_is_released_early_when_the_donor_direction_starts_to_suffer():
     assert {"op": "release", "id": cmd["id"], "tls": "J1"} in sent and cmd["end"] == "balance"
 
 
+# ---------------------------------------------------------------- report mode: readings come from Edge units
+
+OTHER = {**CAM, "id": "J-02", "camera": False, "tls": "J2",
+         "approaches": [{"id": "e3", "name": "Third", "zone": 100.0}, {"id": "e4", "name": "Fourth", "zone": 100.0}],
+         "phases": [{"index": 0, "duration": 40, "min_green": 10, "edges": ["e3"], "streets": ["Third"]},
+                    {"index": 2, "duration": 40, "min_green": 10, "edges": ["e4"], "streets": ["Fourth"]}]}
+
+
+def report_frame(t, **extra):
+    return {"t": t, "vehicles": VEHICLES, "bus_loss": [], **extra}   # no "queues": the separate-Edge mode
+
+
+def test_readings_come_from_device_reports_and_go_stale_without_them():
+    p = Platform([71.785, 40.385], 1200, [CAM])
+    out = p.handle(report_frame(0))
+    assert out["cams"]["CAM-01"][2] is None                           # nothing reported yet
+    p.on_report("J1", {"t": 1, "queues": {"e1": 80.0, "e2": 5.0}, "events": []})
+    out = p.handle(report_frame(1))
+    assert out["cams"]["CAM-01"][2] == 80
+    out = p.handle(report_frame(1 + 10))                              # ten seconds of silence
+    assert out["cams"]["CAM-01"][2] is None and p.monitor.demand("CAM-01") == {}
+
+
+def test_a_report_one_second_ahead_of_the_frame_is_still_fresh():
+    p = Platform([71.785, 40.385], 1200, [CAM])
+    for t in range(1, 20):
+        p.on_report("J1", {"t": t + 1, "queues": {"e1": 80.0, "e2": 5.0}, "events": []})
+        assert p.handle(report_frame(t))["cams"]["CAM-01"][2] == 80
+
+
+def test_a_device_cannot_report_for_approaches_of_another_junction():
+    p = Platform([71.785, 40.385], 1200, [CAM, OTHER])
+    for t in range(WINDOW + 2):
+        p.on_report("J1", {"t": t, "queues": {"e1": 0.0, "e2": 0.0, "e3": 250.0, "e4": 0.0}, "events": []})
+        p.on_report("J2", {"t": t, "queues": {"e3": 0.0, "e4": 0.0}, "events": []})
+        out = p.handle(report_frame(t))
+    assert out["cams"]["J-02"][2] == 0 and p.gateway.public() == []  # J1's numbers for e3 never counted
+
+
+def test_junk_in_a_report_is_dropped_not_crashing():
+    p = Platform([71.785, 40.385], 1200, [CAM])
+    p.on_report("J1", {"t": "soon", "queues": ["nope"], "events": "none"})
+    p.on_report("J1", {"t": 3, "queues": {"e1": "many", "e2": -4}, "events": [None, {"type": "tls"}]})
+    out = p.handle(report_frame(3))
+    assert out["cams"]["CAM-01"][2] == 0
+
+
+def test_tls_events_in_a_report_only_touch_commands_of_that_junction():
+    sent = []
+    p = Platform([71.785, 40.385], 1200, [CAM, OTHER], send=sent.append)
+    for t in range(WINDOW + 2):
+        p.on_report("J1", {"t": t, "queues": {"e1": 80.0, "e2": 5.0}, "events": []})
+        p.on_report("J2", {"t": t, "queues": {"e3": 0.0, "e4": 0.0}, "events": []})
+        p.handle(report_frame(t))
+    cmd = p.gateway.public()[0]
+    assert cmd["tls"] == "J1"
+    p.gateway.decide(cmd["id"], True, "operator", p.t)
+    p.on_report("J2", {"t": p.t, "queues": {}, "events": [{"type": "tls", "id": cmd["id"], "status": "reverted", "reason": "released"}]})
+    assert cmd["status"] == "approved"                                # J2's unit may not close J1's command
+    p.on_report("J1", {"t": p.t, "queues": {}, "events": [{"type": "tls", "id": cmd["id"], "status": "applied", "plan": cmd["plan"]}]})
+    assert cmd["status"] == "active"
+
+
 def test_incident_dispatch_stays_shadow_only_and_restart_resets_state():
     p = Platform([71.785, 40.385], 1200)
     ev = {"id": "d1", "type": "dispatch", "status": "en_route", "t": 5, "unit": "Скорая", "from": "Клиника", "ref": "inc-5"}

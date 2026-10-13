@@ -23,8 +23,6 @@ class EdgeController:
             return self._lease(msg, now)
         if op == "release":
             return self._revert(lambda lease: lease["id"] == msg["id"], "released")
-        if op == "revoke_all":
-            return self._revert(lambda lease: True, "revoked")
         return []
 
     def tick(self, now: int) -> list[dict]:

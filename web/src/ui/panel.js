@@ -43,8 +43,8 @@ export function createPanel(scene, S, { onCamera, onAction }) {
       const revoked = d[1] === 'revoked';
       const state = revoked ? chip('bad', 'отозвано') : d[0] === 1 ? chip('ok', 'на связи') : chip('warn', 'нет связи');
       const button = S.operator
-        ? `<button data-act="${revoked ? 'restore' : 'revoke'}" data-id="edge-${junction}">${revoked ? 'Вернуть доверие' : 'Отозвать'}</button>` : '';
-      return `<div class="item row"><span><b>edge-${esc(junction)}</b> ${state}</span>${button}</div>`;
+        ? `<button data-act="${revoked ? 'restore' : 'revoke'}" data-id="${esc(d[4] ?? '')}">${revoked ? 'Вернуть доверие' : 'Отозвать'}</button>` : '';
+      return `<div class="item row"><span><b>${esc(d[4] ?? junction)}</b> ${state}</span>${button}</div>`;
     };
     const bad = all.filter(([, d]) => d[0] !== 1 || d[1] === 'revoked');
     return `<div class="item">${chip(online === all.length ? 'ok' : 'warn', `${online} из ${all.length} на связи`)}

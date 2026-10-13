@@ -44,8 +44,12 @@ class Registry:
         rec = self.devices.get(device)
         if rec is not None and status in (ACTIVE, REVOKED):
             rec["status"] = status
-            self.path.write_text(json.dumps(list(self.devices.values()), ensure_ascii=False, indent=1), encoding="utf-8")
+            save(self.path, self.devices)
         return rec
+
+
+def save(path: Path, devices: dict[str, dict]):
+    path.write_text(json.dumps(list(devices.values()), ensure_ascii=False, indent=1), encoding="utf-8")
 
 
 # ---------------------------------------------------------------- demo provisioning
@@ -102,5 +106,5 @@ def provision(junctions: list[dict], pki: Path) -> bool:
                           "public_key": crypto.public_hex(key), "status": ACTIVE}
         created = True
     if created:
-        path.write_text(json.dumps(list(devices.values()), ensure_ascii=False, indent=1), encoding="utf-8")
+        save(path, devices)
     return created

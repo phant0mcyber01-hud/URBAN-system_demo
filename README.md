@@ -8,7 +8,7 @@
 
 ![статус](https://img.shields.io/badge/статус-демо--макет-8a63d2)
 ![python](https://img.shields.io/badge/python-3.11+-3776ab)
-![tests](https://img.shields.io/badge/тесты-61%20проходят-2ea44f)
+![tests](https://img.shields.io/badge/тесты-68%20проходят-2ea44f)
 ![пилот](https://img.shields.io/badge/пилот-Фергана-5cc8ff)
 
 ![Центр управления: платформа нашла перекос на перекрёстке, оператор применил перенос зелёного](docs/img/control.png)
@@ -191,7 +191,7 @@ backend/urban/
   api/           HTTP/WebSocket, токен оператора
   pipeline/      подготовка данных из OSM
   experiments/   замер эффекта управления
-backend/tests/   61 тест
+backend/tests/   68 тестов
 web/src/         интерфейс: scene/ (3D-сцена), map/ (навигация, камера, поиск), ui/ (панель)
 docs/            архитектура, безопасность, замер
 ```

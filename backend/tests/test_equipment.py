@@ -75,12 +75,13 @@ def test_edge_keeps_one_lease_per_junction_and_caps_its_lifetime():
     assert e.tick(MAX_LEASE_TTL - 1) == [] and e.tick(MAX_LEASE_TTL)[0]["reason"] == "expired"
 
 
-def test_edge_release_and_kill_switch_return_the_base_plan():
+def test_edge_release_returns_the_base_plan_and_unknown_ops_do_nothing():
     e, ctl = edge()
     e.handle(lease(), 0)
     assert e.handle({"op": "release", "id": "cmd-1"}, 5)[0]["reason"] == "released"
     e.handle(lease(pid="cmd-3"), 10)
-    assert e.handle({"op": "revoke_all"}, 11)[0]["reason"] == "revoked"
+    assert e.handle({"op": "revoke_all"}, 11) == []                   # the kill switch releases per command
+    assert e.handle({"op": "release", "id": "cmd-3"}, 12)[0]["reason"] == "released"
     assert [c for c in ctl.calls if c[0] == "base"] == [("base", "J1"), ("base", "J1")]
 
 

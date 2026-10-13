@@ -19,9 +19,10 @@ HELLO_TIMEOUT = 10  # seconds a connection may stay unauthenticated
 
 
 class DeviceHub:
-    def __init__(self, registry: Registry, gateway_key, on_report, clock=lambda: 0):
-        """on_report(device record, report dict); clock(): platform time put into every command."""
-        self.registry, self.key, self.on_report, self.clock = registry, gateway_key, on_report, clock
+    def __init__(self, registry: Registry, gateway_key, on_report, clock=lambda: 0, wall=time.time):
+        """on_report(device record, report dict); clock(): platform time sent in the welcome;
+        wall(): wall-clock seconds stamped into every command, so a device can refuse stale ones."""
+        self.registry, self.key, self.on_report, self.clock, self.wall = registry, gateway_key, on_report, clock, wall
         self.sessions: dict[str, WebSocket] = {}
         self.seen: dict[str, dict] = {}  # device id -> {"at": wall time, "health": {...}}
         self._seq = time.time_ns() // 1_000_000  # survives restarts without going backwards
@@ -33,22 +34,19 @@ class DeviceHub:
 
     def envelope(self, device: str, body: dict) -> dict:
         self._seq += 1
-        env = {"device": device, "seq": self._seq, "t": self.clock(), "body": body}
+        env = {"device": device, "seq": self._seq, "t": int(self.wall()), "body": body}
         return {**env, "sig": crypto.sign(self.key, env)}
 
     def send(self, msg: dict):
-        """Deliver a gateway message to the device of that junction (or to all for revoke_all).
+        """Deliver a gateway message to the device of that junction.
 
         A device that is not connected simply does not get it: its lease runs out by itself.
         """
-        if msg.get("op") == "revoke_all":
-            targets = list(self.sessions)
-        else:
-            rec = self.registry.by_tls(msg.get("tls", ""))
-            targets = [rec["id"]] if rec and rec["id"] in self.sessions else []
-        for device in targets:
-            text = json.dumps({"type": "cmd", **self.envelope(device, msg)}, ensure_ascii=False)
-            asyncio.ensure_future(self._deliver(device, text))
+        rec = self.registry.by_tls(msg.get("tls", ""))
+        if rec is None or rec["id"] not in self.sessions:
+            return
+        text = json.dumps({"type": "cmd", **self.envelope(rec["id"], msg)}, ensure_ascii=False)
+        asyncio.ensure_future(self._deliver(rec["id"], text))
 
     async def _deliver(self, device: str, text: str):
         ws = self.sessions.get(device)
@@ -67,6 +65,8 @@ class DeviceHub:
         try:
             await ws.send_text(json.dumps({"type": "challenge", "nonce": nonce}))
             hello = json.loads(await asyncio.wait_for(ws.receive_text(), HELLO_TIMEOUT))
+            if not isinstance(hello, dict):
+                hello = {}
             rec = self.registry.authenticate(str(hello.get("device")), nonce, str(hello.get("sig")))
             if rec is None:
                 await ws.close(code=4401)
@@ -80,10 +80,11 @@ class DeviceHub:
             await ws.send_text(json.dumps({"type": "welcome", "t": self.clock()}))
             while True:
                 report = json.loads(await ws.receive_text())
-                if report.get("type") == "report":
+                if isinstance(report, dict) and report.get("type") == "report":
                     self.seen[device] = {"at": time.time(), "health": report.get("health", {})}
                     self.on_report(rec, report)
-        except (WebSocketDisconnect, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError):
+        except (WebSocketDisconnect, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError, AttributeError,
+                TypeError, ValueError):
             pass
         finally:
             if device is not None and self.sessions.get(device) is ws:

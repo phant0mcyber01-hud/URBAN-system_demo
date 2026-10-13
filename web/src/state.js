@@ -29,7 +29,7 @@ export function createState(scene) {
     if (JSON.stringify(next) !== JSON.stringify(S.camStatus)) { S.camStatus = next; S.camVersion++; }
   }
 
-  // dev: junction id -> [online, status, temperature, version] of its URBAN Edge unit
+  // dev: junction id -> [online, status, temperature, version, device id] of its URBAN Edge unit
   function setDev(dev) {
     const sig = (d) => Object.entries(d).map(([k, v]) => `${k}:${v[0]}${v[1]}`).join();
     if (sig(dev) !== sig(S.dev)) S.devVersion++;

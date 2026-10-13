@@ -161,6 +161,21 @@ def test_a_device_that_goes_silent_is_not_renewed_and_its_command_is_closed_afte
     assert gw.audit.records[-1]["event"] == "presumed-expired"
 
 
+def test_late_or_foreign_equipment_reports_do_not_reopen_or_touch_a_command():
+    gw, sent = make()
+    p = propose(gw)
+    gw.decide(p["id"], True, "operator", 0)
+    gw.on_equipment({"id": p["id"], "status": "applied", "plan": 2}, 1, tls="J2")   # another junction's device
+    assert p["status"] == "approved" and gw.audit.records[-1]["event"] == "device-ignored"
+    applied(gw, p)
+    gw.on_equipment({"id": p["id"], "status": "reverted", "reason": "released"}, 100, tls="J1")
+    assert p["status"] == "done"
+    gw.on_equipment({"id": p["id"], "status": "applied", "plan": 2}, 101, tls="J1")   # a late duplicate
+    assert p["status"] == "done" and gw.applied == 1
+    gw.on_equipment({"status": "applied"}, 102)                                        # malformed
+    assert p["status"] == "done"
+
+
 def test_shadow_proposals_are_recorded_but_never_sent():
     gw, sent = make()
     rec = gw.propose_shadow(1, "ref", "tls.preempt", "route", "note")

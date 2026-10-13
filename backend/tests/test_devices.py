@@ -36,15 +36,20 @@ def pki(tmp_path):
     return tmp_path
 
 
-def make(pki, tls="T1", junction="J-01"):
+WALL = {"now": 1_700_000_000}  # one wall clock shared by hub and devices in a test
+
+
+def make(pki, tls="T1", junction="J-01", state_path=None):
     """A registry, a hub and the Edge unit of one junction, wired as in the real setup."""
     registry = Registry(pki / "devices.json")
     gateway_key = crypto.load_private((pki / "gateway.key").read_text())
-    hub = DeviceHub(registry, gateway_key, on_report=lambda rec, report: None, clock=lambda: 100)
+    hub = DeviceHub(registry, gateway_key, on_report=lambda rec, report: None, clock=lambda: 100,
+                    wall=lambda: WALL["now"])
     ident = device_id(junction)
     ctl = FakeController({tls: {0, 1, 2}})
     dev = EdgeDevice(ident, tls, crypto.load_private((pki / "edge" / f"{ident}.key").read_text()),
-                     crypto.load_public((pki / "gateway.pub").read_text()), ctl)
+                     crypto.load_public((pki / "gateway.pub").read_text()), ctl,
+                     state_path=state_path, wall=lambda: WALL["now"])
     dev.tick(100)
     return registry, hub, dev, ctl
 
@@ -101,7 +106,8 @@ def refused(dev, env):
 
 def test_device_refuses_forged_tampered_and_misaddressed_commands(pki):
     _, hub, dev, ctl = make(pki)
-    stranger = DeviceHub(Registry(pki / "devices.json"), crypto.new_key(), lambda *a: None, clock=lambda: 100)
+    stranger = DeviceHub(Registry(pki / "devices.json"), crypto.new_key(), lambda *a: None, clock=lambda: 100,
+                         wall=lambda: WALL["now"])
     assert refused(dev, stranger.envelope(dev.id, lease())) == "bad signature"
     tampered = hub.envelope(dev.id, lease(plan=1))
     tampered["body"]["plan"] = 2
@@ -117,20 +123,35 @@ def test_device_refuses_replayed_and_stale_commands(pki):
     first = hub.envelope(dev.id, lease())
     assert dev.on_command(first) is True
     assert refused(dev, first) == "replayed or out of order"
-    dev.tick(100 + MAX_SKEW + 1)
-    assert refused(dev, hub.envelope(dev.id, {"op": "release", "id": "cmd-1", "tls": "T1"})) == "stale command"
+    late = hub.envelope(dev.id, {"op": "release", "id": "cmd-1", "tls": "T1"})
+    WALL["now"] += MAX_SKEW + 1                                      # the unit looks at it too late
+    try:
+        assert refused(dev, late) == "stale command"
+    finally:
+        WALL["now"] -= MAX_SKEW + 1
     assert len(ctl.calls) == 1
 
 
-def test_kill_switch_reaches_every_device_and_the_lease_still_expires_without_the_platform(pki):
+def test_sequence_high_water_mark_survives_a_restart(pki):
+    state = pki / "edge" / "edge-J-01.seq"
+    _, hub, dev, ctl = make(pki, state_path=state)
+    captured = hub.envelope(dev.id, lease())
+    assert dev.on_command(captured) is True
+    _, _, reborn, ctl2 = make(pki, state_path=state)                 # same unit after a power cycle
+    assert reborn.last_seq == captured["seq"]
+    assert refused(reborn, captured) == "replayed or out of order"
+    assert ctl2.calls == []
+
+
+def test_release_reaches_the_device_and_the_lease_still_expires_without_the_platform(pki):
     _, hub, dev, ctl = make(pki)
     dev.on_command(hub.envelope(dev.id, lease()))
-    assert dev.on_command(hub.envelope(dev.id, {"op": "revoke_all"})) is True
+    assert dev.on_command(hub.envelope(dev.id, {"op": "release", "id": "cmd-1", "tls": "T1"})) is True
     assert ctl.calls[-1] == ("base", "T1")
     dev.on_command(hub.envelope(dev.id, lease()))
     dev.tick(100 + 180)                                            # no session, no renewals: the unit acts alone
     assert ctl.calls[-1] == ("base", "T1") and dev.controller.leases == {}
-    assert [e["reason"] for e in dev.outbox if e.get("status") == "reverted"] == ["revoked", "expired"]   # kept until a session comes back
+    assert [e["reason"] for e in dev.outbox if e.get("status") == "reverted"] == ["released", "expired"]   # kept until a session comes back
 
 
 def test_reports_carry_aggregates_and_health_but_nothing_else(pki):
