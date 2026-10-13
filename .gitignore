@@ -6,3 +6,4 @@ web/dist/
 *.egg-info/
 .pytest_cache/
 .env
+.claude/
