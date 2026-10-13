@@ -42,6 +42,7 @@ class CommandGateway:
         self.applied = 0  # commands that actually reached (emulated) equipment
         self._n = 0
         self._last_done: dict[str, int] = {}  # tls -> time its last command or proposal finished
+        self.muted: set[str] = set()  # junctions an operator said no to, until their problem clears
         self.version = 0
 
     # ---- compatibility with the audit view ----
@@ -75,7 +76,7 @@ class CommandGateway:
         if params.get("give") is None or params.get("give") == params.get("take"):
             self.audit.append(t, "denied", "-", command, str(tls), "needs two different phases")
             return None
-        if any(p["status"] in OPEN and p["tls"] == tls for p in self.proposals.values()):
+        if tls in self.muted or any(p["status"] in OPEN and p["tls"] == tls for p in self.proposals.values()):
             return None
         if t - self._last_done.get(tls, -10**9) < pol.cooldown:
             return None
@@ -101,6 +102,7 @@ class CommandGateway:
         if not approve:
             p["status"] = "rejected"
             self._last_done[p["tls"]] = t
+            self.muted.add(p["tls"])
             self.audit.append(t, "rejected", pid, p["command"], self._target(p), "", actor=actor, mode="approval")
         else:
             p["status"], p["until"], p["renewed"] = "approved", t + pol.window, t
@@ -128,6 +130,8 @@ class CommandGateway:
                 p["status"], p["end"] = "revoking", "revoked"
             elif p["status"] == "pending":
                 p["status"] = "rejected"
+                self._last_done[p["tls"]] = t
+                self.muted.add(p["tls"])
         self.audit.append(t, "revoked", "*", "*", "all active leases", "kill switch", actor=actor, mode="approval")
         self.version += 1
 
@@ -140,6 +144,10 @@ class CommandGateway:
         self.version += 1
 
     # ---- driven by the platform every frame ----
+    def keep_muted(self, still_raised: set[str]):
+        """A rejection holds only while the problem it answered is still there."""
+        self.muted &= still_raised
+
     def tick(self, t: int, demand: dict):
         """demand: {(tls, phase index): mean standing vehicles}. Renews leases, expires stale proposals."""
         for p in self.proposals.values():
@@ -193,6 +201,7 @@ class CommandGateway:
                 p["result"] = {"reason": "restart", "queue0": p["queue0"], "queue": p["queue"],
                                "other0": p["other0"], "other": p["other"]}
         self._last_done.clear()
+        self.muted.clear()
         self.version += 1
 
     def public(self) -> list[dict]:

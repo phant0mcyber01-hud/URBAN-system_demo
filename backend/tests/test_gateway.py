@@ -77,7 +77,20 @@ def test_cooldown_after_finish_reject_or_expiry():
     assert propose(gw, t=120) is None
     q = propose(gw, t=100 + POL.cooldown)
     gw.decide(q["id"], False, "operator", 200)
-    assert propose(gw, t=210) is None                             # a rejected junction is left alone for a while
+    assert propose(gw, t=210) is None                             # a rejected junction is left alone
+    r = propose(gw, t=100 + POL.cooldown, tls="J9")
+    gw.tick(100 + POL.cooldown + POL.pending_ttl + 1, {})
+    assert r["status"] == "expired" and propose(gw, t=r["t"] + POL.pending_ttl + 2, tls="J9") is None
+
+
+def test_rejection_holds_until_the_problem_clears():
+    gw, _ = make()
+    p = propose(gw)
+    gw.decide(p["id"], False, "operator", 10)
+    gw.keep_muted({"J1"})                                         # the imbalance is still there
+    assert propose(gw, t=10 + POL.cooldown + 1) is None
+    gw.keep_muted(set())                                          # it cleared: the junction may be raised again
+    assert propose(gw, t=10 + POL.cooldown + 2) is not None
 
 
 def test_cannot_approve_while_link_is_down_or_twice():
@@ -98,6 +111,8 @@ def test_kill_switch_releases_everything_and_rejects_pending():
     gw.revoke_all("operator", 5)
     assert {"op": "release", "id": a["id"]} in sent
     assert b["status"] == "rejected" and a["status"] == "revoking"
+    gw.keep_muted({"J2"})
+    assert propose(gw, t=6, tls="J2") is None                     # the kill switch is a "no" for pending ones too
 
 
 def test_early_release_needs_no_approval_and_keeps_its_reason():

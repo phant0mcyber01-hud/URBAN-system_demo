@@ -75,6 +75,7 @@ class Platform:
             shadow += self._respond(ev)
 
         # one direction is overloaded while another has green to spare -> propose moving green
+        self.gateway.keep_muted({pr["tls"] for pr in problems})
         for pr in problems:
             self.gateway.propose(
                 t, "tls.rebalance", pr,

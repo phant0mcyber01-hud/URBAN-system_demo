@@ -63,6 +63,13 @@ def test_shift_grows_with_imbalance_and_stays_in_range():
     assert shift_seconds(100, 0, 40, 40) == 15 and shift_seconds(5.1, 1.5, 40, 40) >= 5
 
 
+def test_shift_never_asks_more_than_the_donor_phase_can_give():
+    assert shift_seconds(100, 0, 40, 22) == 7      # 22 s donor keeps 15 s
+    assert shift_seconds(100, 0, 40, 17) == 0      # could give only 2 s: not worth a command
+    short = {**CAM, "phases": [dict(CAM["phases"][0]), {**CAM["phases"][1], "duration": 12}]}
+    assert feed(QueueMonitor([short]).update, standing(10, 1))[1] == []
+
+
 def test_platform_turns_imbalance_into_a_pending_proposal_and_sends_nothing():
     sent = []
     p = Platform([71.785, 40.385], 1200, [CAM], send=sent.append)

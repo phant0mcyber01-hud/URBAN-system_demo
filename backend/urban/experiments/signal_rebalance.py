@@ -45,10 +45,11 @@ def run_arm(task: tuple) -> dict:
     platform = Platform(meta["center"], meta["radius"], cameras, send=equipment.put)
     trips = c.DATA / f"tripinfo-{coverage}-{scale}-{int(control)}-{seed}.xml"
     standing = []
+    warmup = min(WARMUP, horizon // 2)
 
     def publish(raw):
         platform.handle(raw)
-        if raw["t"] >= WARMUP:
+        if raw["t"] >= warmup:
             standing.append(sum(sum(q.values()) for q in platform.queues.values()))
         if control:
             for p in list(platform.gateway.proposals.values()):

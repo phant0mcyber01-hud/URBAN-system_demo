@@ -17,13 +17,20 @@ LOADED_MIN = 5.0      # mean standing vehicles before a phase counts as overload
 RATIO, MARGIN = 2.0, 2.0  # overloaded means: demand >= RATIO * spare demand + MARGIN
 RELIEVED = 2.0        # demand below this: the queue is gone
 SHIFT_MIN, SHIFT_MAX = 5, 15  # seconds of green that may be moved
+DONOR_MIN_GREEN = 15  # seconds a controller keeps for any phase (sources/signals.MIN_GREEN): never ask for more
 
 
 def shift_seconds(loaded: float, spare: float, green_loaded: float, green_spare: float) -> int:
-    """Half of the way towards green shared in proportion to demand, within the allowed range."""
+    """Half of the way towards green shared in proportion to demand, within what may be moved.
+
+    Returns 0 when the donor phase cannot give at least SHIFT_MIN without dropping below DONOR_MIN_GREEN.
+    """
+    available = min(SHIFT_MAX, green_spare - DONOR_MIN_GREEN)
+    if available < SHIFT_MIN:
+        return 0
     total = green_loaded + green_spare
     target = total * loaded / (loaded + spare) if loaded + spare else green_loaded
-    return max(SHIFT_MIN, min(SHIFT_MAX, round(0.5 * (target - green_loaded))))
+    return max(SHIFT_MIN, min(available, round(0.5 * (target - green_loaded))))
 
 
 class QueueMonitor:
@@ -69,11 +76,15 @@ class QueueMonitor:
                 continue
             phases = {ph["index"]: ph for ph in cam["phases"]}
             give = max(demand, key=demand.get)
-            take = min(demand, key=demand.get)
-            if demand[give] >= LOADED_MIN and demand[give] >= RATIO * demand[take] + MARGIN:
+            # the donor is the least loaded phase that still has green to give
+            donors = [i for i in demand if i != give and phases[i]["duration"] >= DONOR_MIN_GREEN + SHIFT_MIN]
+            if not donors:
+                continue
+            take = min(donors, key=demand.get)
+            seconds = shift_seconds(demand[give], demand[take], phases[give]["duration"], phases[take]["duration"])
+            if seconds and demand[give] >= LOADED_MIN and demand[give] >= RATIO * demand[take] + MARGIN:
                 problems.append({
-                    "cam": cam["id"], "tls": cam["tls"], "give": give, "take": take,
-                    "seconds": shift_seconds(demand[give], demand[take], phases[give]["duration"], phases[take]["duration"]),
+                    "cam": cam["id"], "tls": cam["tls"], "give": give, "take": take, "seconds": seconds,
                     "street": ", ".join(phases[give]["streets"]) or cam["name"],
                     "from_street": ", ".join(phases[take]["streets"]) or cam["name"],
                     "queue": round(demand[give], 1), "other": round(demand[take], 1),
