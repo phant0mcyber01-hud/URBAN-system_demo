@@ -22,7 +22,7 @@ const END_REASON = {
   balance: 'начало загружаться направление, отдававшее зелёный: базовый план возвращён',
 };
 
-export function createPanel(scene, S, { onCamera, onAction }) {
+export function createPanel(scene, S, { onCamera, onAction, onFly }) {
   const shadowList = (filter, n = 6) => {
     const list = S.shadow.filter(filter).slice(-n).reverse();
     return list.length ? list.map((p) => `<div class="item">${chip('shadow', 'ТОЛЬКО ЗАПИСЬ')} <code>${esc(p.command)}</code>
@@ -34,23 +34,54 @@ export function createPanel(scene, S, { onCamera, onAction }) {
     return [...count.entries()].sort((a, b) => b[1] - a[1]);
   };
 
-  // URBAN Edge units: one per junction, each with its own key; a revoked one cannot connect any more
-  const deviceList = () => {
+  // URBAN Edge units: the registry with live health, one row per junction
+  const devState = (d) => (d.s === 'revoked' ? chip('bad', 'отозвано') : d.lock ? chip('bad', 'заблокирован')
+    : d.o ? (d.al.length ? chip(d.al[0][0] === 'alert' ? 'bad' : 'warn', d.al[0][1]) : chip('ok', 'норма')) : chip('warn', 'нет связи'));
+  const devButton = (d) => (S.operator
+    ? `<button data-act="${d.s === 'revoked' ? 'restore' : 'revoke'}" data-id="${esc(d.id)}">${d.s === 'revoked' ? 'Доверять' : 'Отозвать'}</button>` : '');
+  const age = (s) => (s == null ? '—' : s < 60 ? `${s} с` : `${Math.floor(s / 60)} мин`);
+  const deviceSummary = () => {
+    const all = Object.values(S.dev);
+    if (!all.length) return empty('ожидание устройств');
+    const online = all.filter((d) => d.o).length;
+    const bad = all.filter((d) => !d.o || d.lock || d.al.length || d.s === 'revoked');
+    return `<div class="item">${chip(online === all.length && !bad.length ? 'ok' : 'warn', `${online} из ${all.length} на связи`)}
+        ${bad.length ? `${bad.length} с замечаниями, подробности во вкладке «Устройства».` : 'Замечаний нет.'}</div>`;
+  };
+  const devicesTab = () => {
     const all = Object.entries(S.dev);
     if (!all.length) return empty('ожидание устройств');
-    const online = all.filter(([, d]) => d[0] === 1).length;
-    const row = ([junction, d]) => {
-      const revoked = d[1] === 'revoked';
-      const state = revoked ? chip('bad', 'отозвано') : d[0] === 1 ? chip('ok', 'на связи') : chip('warn', 'нет связи');
-      const button = S.operator
-        ? `<button data-act="${revoked ? 'restore' : 'revoke'}" data-id="${esc(d[4] ?? '')}">${revoked ? 'Вернуть доверие' : 'Отозвать'}</button>` : '';
-      return `<div class="item row"><span><b>${esc(d[4] ?? junction)}</b> ${state}</span>${button}</div>`;
-    };
-    const bad = all.filter(([, d]) => d[0] !== 1 || d[1] === 'revoked');
-    return `<div class="item">${chip(online === all.length ? 'ok' : 'warn', `${online} из ${all.length} на связи`)}
-        У каждого свой ключ; команды подписаны шлюзом, канал TLS. Отдельный процесс от платформы.</div>
-      ${bad.map(row).join('')}
-      <details class="devices"><summary>Все устройства</summary>${all.map(row).join('')}</details>`;
+    const online = all.filter(([, d]) => d.o).length;
+    const alerts = all.filter(([, d]) => d.al.some((a) => a[0] === 'alert') || d.lock || d.s === 'revoked').length;
+    const warns = all.filter(([, d]) => d.al.length && !d.al.some((a) => a[0] === 'alert') && !d.lock && d.s !== 'revoked').length;
+    const hot = all.map(([, d]) => d.t).filter((t) => typeof t === 'number');
+    const rows = all
+      .sort(([, a], [, b]) => (b.lock - a.lock) || (b.al.length - a.al.length) || (a.o - b.o))
+      .map(([junction, d]) => `<div class="item dev" data-fly="${esc(junction)}">
+        <div class="row"><span><b>${esc(d.id)}</b> <small>${esc(junction)}${d.serial ? ` · ${esc(d.serial)}` : ''}</small></span>${devState(d)}</div>
+        <div class="row meta">
+          <span title="температура в шкафу">${d.t == null ? '—' : `${d.t} °C`}</span>
+          <span title="дверь шкафа">${d.d === 'open' ? 'дверь открыта' : d.d === 'closed' ? 'дверь закрыта' : '—'}</span>
+          <span title="связь с контроллером">${d.c == null ? '—' : d.c === 'ok' ? 'контроллер ок' : esc(d.c)}</span>
+          <span title="действующих аренд">${d.l ?? 0} аренд</span>
+          <span title="версия ПО">${esc(d.v ?? '—')}</span>
+          <span title="последний отчёт">${age(d.a)} назад</span>
+          ${devButton(d)}
+        </div>
+        ${d.al.length > 1 ? `<small>${d.al.slice(1).map((a) => esc(a[1])).join(' · ')}</small>` : ''}
+      </div>`).join('');
+    const recent = [...S.devAlerts].reverse().slice(0, 6);
+    return `<div class="grid">
+        ${kpi('на связи', `${online} / ${all.length}`, online === all.length ? 'ok' : 'warn')}
+        ${kpi('тревог', alerts, alerts ? 'bad' : 'ok')}${kpi('предупреждений', warns, warns ? 'warn' : '')}
+        ${kpi('макс. температура, °C', hot.length ? Math.max(...hot) : '—')}
+      </div>
+      <p class="muted">Реестр устройств URBAN Edge: у каждого свой ключ, команды подписаны шлюзом. Вскрытый шкаф или
+        потеря контроллера блокируют перекрёсток: команды снимаются, новые не принимаются.</p>
+      ${recent.length ? `<h4>Последние события</h4>${recent.map((a) => `<div class="item"><time>${clock(a.t)}</time>
+        ${chip(a.level === 'alert' ? 'bad' : 'warn', esc(a.kind))} ${esc(a.device)}: ${esc(a.text)}</div>`).join('')}` : ''}
+      <h4>Все устройства</h4>
+      ${rows}`;
   };
 
   // one problem found by a camera, with what the platform suggests and what happened next
@@ -88,6 +119,7 @@ export function createPanel(scene, S, { onCamera, onAction }) {
           : `${chip('info', esc(e.unit))} ${UNIT_TEXT[e.status]} · от «${esc(e.from)}»` })),
         ...S.alerts.map((a) => ({ t: a.t, html: `${chip(a.level === 'alert' ? 'bad' : 'warn', 'прогноз')} ${esc(a.text)}` })),
         ...S.cmd.map((c) => ({ t: c.t, html: `${chip('warn', 'пробка')} ${esc(c.street || c.cam)}: очередь в среднем ${c.queue0} м` })),
+        ...S.devAlerts.map((a) => ({ t: a.t, html: `${chip(a.level === 'alert' ? 'bad' : 'warn', 'устройство')} ${esc(a.device)}: ${esc(a.text)}` })),
       ].sort((a, b) => b.t - a.t).slice(0, 8);
       return `<div class="grid">
           ${kpi('проблем ждут решения', wait, wait ? 'warn' : '')}${kpi('активных происшествий', inc, inc ? 'bad' : '')}
@@ -139,6 +171,7 @@ export function createPanel(scene, S, { onCamera, onAction }) {
           ${a.eta ? `<small>прогноз достижения порога: ~${Math.max(1, Math.round(a.eta / 60))} мин</small>` : ''}</div>`).join('') : empty('ожидание телеметрии')}
         <h4>Заявки на обслуживание (пока только запись)</h4>
         ${shadowList((p) => p.command === 'workorder.create')}`],
+    devices: ['Устройства', devicesTab],
     security: ['Безопасность', () => `<div class="grid">
           ${kpi('команд передано оборудованию (эмуляция)', S.audit.applied ?? 0, 'ok')}${kpi('записей в журнале аудита', S.audit.count)}
         </div>
@@ -150,7 +183,7 @@ export function createPanel(scene, S, { onCamera, onAction }) {
         <div class="item">${chip('ok', 'приватность')} Камеры отдают счётчики. Лица, номера и треки жителей не обрабатываются.</div>
         <div class="item">${chip('shadow', 'эмуляция')} Реальные светофоры не затронуты: оборудование в демо смоделировано.</div>
         <h4>Устройства URBAN Edge</h4>
-        ${deviceList()}
+        ${deviceSummary()}
         <h4>Журнал аудита (цепочка хэшей)</h4>
         ${S.log.length ? S.log.slice(-8).reverse().map((r) => `<div class="item"><time>#${r.seq}</time> <b>${esc(r.event)}</b> <code>${esc(r.command)}</code>
           <br><small>${esc(r.actor)} · ${esc(r.target)}</small><br><small class="hash">${r.hash.slice(0, 32)}…</small></div>`).join('') : empty('записей нет')}`],
@@ -166,8 +199,9 @@ export function createPanel(scene, S, { onCamera, onAction }) {
       if (html !== last) { panel.innerHTML = html; last = html; }
       $('clock').textContent = clock(S.t);
       const wait = S.pending().length;
-      const badge = tabs.querySelector('[data-tab=transport]');
-      badge.dataset.badge = wait || '';
+      tabs.querySelector('[data-tab=transport]').dataset.badge = wait || '';
+      const devBad = Object.values(S.dev).filter((d) => !d.o || d.lock || d.al.length || d.s === 'revoked').length;
+      tabs.querySelector('[data-tab=devices]').dataset.badge = devBad || '';
     },
     setTab(tab) {
       S.tab = tab;
@@ -182,7 +216,9 @@ export function createPanel(scene, S, { onCamera, onAction }) {
     const cam = e.target.closest('[data-cam]');
     if (cam) return onCamera(cam.dataset.cam);
     const act = e.target.closest('[data-act]');
-    if (act && !act.disabled) onAction(act.dataset.act, act.dataset.id);
+    if (act && !act.disabled) return onAction(act.dataset.act, act.dataset.id);
+    const fly = e.target.closest('[data-fly]');
+    if (fly && onFly) onFly(fly.dataset.fly);
   };
   return api;
 }

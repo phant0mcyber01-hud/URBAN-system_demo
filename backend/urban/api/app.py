@@ -59,16 +59,13 @@ platform = Platform(meta["center"], meta["radius"], junctions, send=hub.send, re
 clients: set[WebSocket] = set()
 
 
-def devices_brief() -> dict:
-    """Per junction: [online, status, temperature, version, device id] for the UI."""
-    return {d["junction"]: [int(d["online"]), d["status"], d["health"].get("temp"), d["health"].get("version"), d["id"]]
-            for d in hub.status()}
-
-
 async def analyse(raw: dict):
     frame = platform.handle(raw)
-    if raw["t"] % 5 == 0 or frame.get("reset"):
-        frame["dev"] = devices_brief()
+    if raw["t"] % 2 == 0 or frame.get("reset"):
+        new = platform.devices(hub.status(), raw["t"])
+        frame["dev"] = platform.dev
+        if new:
+            frame["devalerts"] = new
     await bus.publish(PLATFORM_FRAME, frame)
 
 
@@ -179,7 +176,7 @@ def health():
 
 @app.get("/api/state")
 def state():
-    return {**platform.snapshot(), "dev": devices_brief()}
+    return platform.snapshot()
 
 
 @app.get("/api/audit")
@@ -189,7 +186,9 @@ def audit():
 
 @app.get("/api/devices")
 def devices():
-    return hub.status()
+    """The registry with live health: enrolment data, session, last report and alerts per unit."""
+    from ..devices.health import assess
+    return [{**row, "alerts": assess(row)} for row in hub.status()]
 
 
 @app.get("/api/me")

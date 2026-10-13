@@ -24,10 +24,14 @@ MAX_SKEW = 30  # seconds between the issue time of a command and the clock of th
 
 class EdgeDevice:
     def __init__(self, device_id: str, tls: str, key, gateway_public, adapter: ControllerAdapter,
-                 state_path: Path | None = None, wall=time.time):
-        """state_path: where the last accepted sequence number is kept; wall(): wall-clock seconds."""
+                 state_path: Path | None = None, wall=time.time, script: dict | None = None):
+        """state_path: where the last accepted sequence number is kept; wall(): wall-clock seconds;
+        script: demo faults, e.g. {"heat": (120, 540)} or {"door": (420, 500)} in simulation seconds."""
         self.id, self.tls, self.key, self.gateway_public = device_id, tls, key, gateway_public
+        self.adapter = adapter
         self.controller = EdgeController(adapter)
+        self.script = script or {}
+        self.started = time.monotonic()
         self.state_path, self.wall = state_path, wall
         self.last_seq = 0
         if state_path is not None and state_path.exists():
@@ -81,12 +85,21 @@ class EdgeDevice:
         self.outbox += self.controller.tick(now)
 
     def report(self, queues: dict) -> dict:
-        """What goes up to the platform: aggregates and events only."""
+        """What goes up to the platform: aggregates, lease events and the unit's own health."""
         self._temp += random.uniform(-0.2, 0.2)
+        heat = self.script.get("heat")
+        if heat is not None:  # demo: a cabinet in the sun for a while, then it cools down again
+            if heat[0] <= self.clock < heat[1]:
+                self._temp += 0.08
+            elif self.clock >= heat[1] and self._temp > 42:
+                self._temp -= 0.06
+        door = self.script.get("door")
+        door_open = door is not None and door[0] <= self.clock < door[1]
         events, self.outbox = self.outbox, []
         return {"type": "report", "t": self.clock, "queues": queues, "events": events,
-                "health": {"version": VERSION, "temp": round(self._temp, 1), "door": "closed",
-                           "leases": len(self.controller.leases)}}
+                "health": {"version": VERSION, "temp": round(self._temp, 1), "door": "open" if door_open else "closed",
+                           "controller": getattr(self.adapter, "last_error", None) or "ok",
+                           "leases": len(self.controller.leases), "uptime": round(time.monotonic() - self.started)}}
 
     def reset(self):
         """The street was reset (scenario restart in the demo): nothing is leased any more."""

@@ -35,11 +35,16 @@ class Fleet:
         self.field_ws = None
         adapter = FieldAdapter(self.field_send, approved_plans(junctions))
         self.devices = {}
+        # demo faults so the health view has something to show: one cabinet overheats, one gets opened
+        scripts = {junctions[3]["tls"]: {"heat": (120, 540)}} if len(junctions) > 3 else {}
+        if len(junctions) > 7:
+            scripts[junctions[7]["tls"]] = {"door": (420, 500)}
         for j in junctions:
             ident = device_id(j["id"])
             key = crypto.load_private((c.PKI / "edge" / f"{ident}.key").read_text())
             self.devices[j["tls"]] = EdgeDevice(ident, j["tls"], key, gateway_public, adapter,
-                                                state_path=c.PKI / "edge" / f"{ident}.seq")
+                                                state_path=c.PKI / "edge" / f"{ident}.seq",
+                                                script=scripts.get(j["tls"]))
         self.field_token = (c.PKI / "field.token").read_text().strip()  # the demo cable has a lock on it
         self.sessions: dict[str, object] = {}  # device id -> open websocket to the platform
         self.tls_context = ssl.create_default_context(cafile=str(c.PKI / "ca.pem"))  # pin our CA, nothing else

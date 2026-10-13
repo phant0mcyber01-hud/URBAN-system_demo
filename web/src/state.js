@@ -4,7 +4,7 @@ export function createState(scene) {
     t: 0, stats: null, events: [], shadow: [], alerts: [], infra: [], cams: {}, cmd: [], link: true, log: [],
     audit: { count: 0, head: '', applied: 0 },
     // derived, with stable identities between frames so map layers are not rebuilt needlessly
-    jamRoads: [], infraBad: [], activeIncidents: [], infraVersion: 0, camStatus: {}, camVersion: 0, dev: {}, devVersion: 0,
+    jamRoads: [], infraBad: [], activeIncidents: [], infraVersion: 0, camStatus: {}, camVersion: 0, dev: {}, devVersion: 0, devAlerts: [],
     // UI
     tab: 'overview', cam: null, pin: null, operator: false,
   };
@@ -29,13 +29,19 @@ export function createState(scene) {
     if (JSON.stringify(next) !== JSON.stringify(S.camStatus)) { S.camStatus = next; S.camVersion++; }
   }
 
-  // dev: junction id -> [online, status, temperature, version, device id] of its URBAN Edge unit
+  // dev: junction id -> brief of its URBAN Edge unit: {id, o: online, s: status, v, t, d, c, l, u, a, n, al, lock}
   function setDev(dev) {
-    const sig = (d) => Object.entries(d).map(([k, v]) => `${k}:${v[0]}${v[1]}`).join();
+    const sig = (d) => Object.entries(d).map(([k, v]) => `${k}:${v.o}${v.s}${v.lock}${v.al.length}`).join();
     if (sig(dev) !== sig(S.dev)) S.devVersion++;
     S.dev = dev;
   }
-  S.online = (junction) => (S.dev[junction]?.[0] ?? 1) === 1;
+  S.online = (junction) => (S.dev[junction]?.o ?? 1) === 1;
+  S.devLevel = (junction) => {
+    const d = S.dev[junction];
+    if (!d) return null;
+    if (d.lock || d.s === 'revoked') return 'alert';
+    return d.al.length ? d.al[0][0] : d.o ? null : 'warn';
+  };
 
   S.applySnapshot = (snap = {}) => {
     S.events = snap.events ?? [];
@@ -47,6 +53,7 @@ export function createState(scene) {
     setInfra(snap.infra ?? []);
     setCmd(snap.cmd ?? []);
     if (snap.dev) setDev(snap.dev);
+    S.devAlerts = snap.devalerts ?? S.devAlerts;
     derive();
   };
 
@@ -64,6 +71,7 @@ export function createState(scene) {
     if (f.infra) setInfra(f.infra);
     if (f.cmd) setCmd(f.cmd);
     if (f.dev) setDev(f.dev);
+    if (f.devalerts) S.devAlerts = S.devAlerts.concat(f.devalerts).slice(-100);
     if (f.log) S.log = S.log.concat(f.log).slice(-50);
     if (f.audit) S.audit = f.audit;
   };

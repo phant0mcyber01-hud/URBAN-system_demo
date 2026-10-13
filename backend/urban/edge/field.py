@@ -12,6 +12,7 @@ class FieldAdapter(ControllerAdapter):
 
     def __init__(self, send, plans: dict[str, set[int]]):
         self.send, self._plans = send, plans
+        self.last_error: str | None = None  # what the unit reports as its controller link state
 
     def plans(self, tls):
         return set(self._plans.get(tls, ()))
@@ -19,7 +20,9 @@ class FieldAdapter(ControllerAdapter):
     def _op(self, op, tls, **extra):
         try:
             self.send({"op": op, "tls": tls, **extra})
+            self.last_error = None
         except ConnectionError as err:
+            self.last_error = str(err)
             raise AdapterError(f"controller link: {err}") from err
 
     def select(self, tls, plan):

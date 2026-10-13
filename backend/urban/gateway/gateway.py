@@ -49,6 +49,7 @@ class CommandGateway:
         self._n = 0
         self._last_done: dict[str, int] = {}  # tls -> time its last command or proposal finished
         self.muted: set[str] = set()  # junctions an operator said no to, until their problem clears
+        self.locked: set[str] = set()  # junctions whose device cannot be trusted right now (opened cabinet, dead controller)
         self.version = 0
 
     # ---- compatibility with the audit view ----
@@ -83,7 +84,8 @@ class CommandGateway:
         if not plan or plan not in self.plans.get(tls, ()):  # plan 0 is the base plan: nothing to propose
             self.audit.append(t, "denied", "-", command, str(tls), "plan is not in the approved table")
             return None
-        if tls in self.muted or any(p["status"] in OPEN and p["tls"] == tls for p in self.proposals.values()):
+        if tls in self.muted or tls in self.locked or any(
+                p["status"] in OPEN and p["tls"] == tls for p in self.proposals.values()):
             return None
         if t - self._last_done.get(tls, -10**9) < pol.cooldown:
             return None
@@ -104,8 +106,8 @@ class CommandGateway:
         p = self.proposals.get(pid)
         if p is None or p["status"] != "pending":
             return None
-        if approve and not (self.link_up and self.reachable(p["tls"])):
-            return None  # nobody to send it to: approving would be a promise we cannot keep
+        if approve and (p["tls"] in self.locked or not (self.link_up and self.reachable(p["tls"]))):
+            return None  # nobody to send it to, or nobody we trust: approving would be a promise we cannot keep
         pol = POLICY[p["command"]]
         if not approve:
             p["status"] = "rejected"
@@ -141,6 +143,27 @@ class CommandGateway:
                 self._last_done[p["tls"]] = t
                 self.muted.add(p["tls"])
         self.audit.append(t, "revoked", "*", "*", "all active leases", "kill switch", actor=actor, mode="approval")
+        self.version += 1
+
+    def set_locked(self, tls: str, locked: bool, why: str, t: int):
+        """A unit stops being trustworthy (cabinet opened, controller link dead) or becomes so again.
+        Locking returns the junction to its base plan at once and blocks new commands there."""
+        if locked == (tls in self.locked):
+            return
+        if locked:
+            self.locked.add(tls)
+            for p in list(self.proposals.values()):
+                if p["tls"] != tls:
+                    continue
+                if p["status"] in ("approved", "active"):
+                    self.release(p["id"], "locked", t)
+                elif p["status"] == "pending":
+                    p["status"] = "rejected"
+                    self._last_done[tls] = t
+            self.audit.append(t, "junction-locked", "-", "-", tls, why, actor="equipment", mode="approval")
+        else:
+            self.locked.discard(tls)
+            self.audit.append(t, "junction-unlocked", "-", "-", tls, why, actor="equipment", mode="approval")
         self.version += 1
 
     def set_link(self, up: bool, actor: str, t: int):
@@ -230,6 +253,7 @@ class CommandGateway:
                                "other0": p["other0"], "other": p["other"]}
         self._last_done.clear()
         self.muted.clear()
+        self.locked.clear()
         self.version += 1
 
     def public(self) -> list[dict]:

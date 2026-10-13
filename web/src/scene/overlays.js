@@ -5,7 +5,12 @@ import { STATUS } from '../config.js';
 import { fadeColors, roadWidth } from './staticLayers.js';
 
 const CAM_FILL = { problem: [255, 190, 70, 255], control: [70, 190, 150, 255] };
-const OFFLINE = [255, 90, 90, 255]; // the Edge unit of this junction is not connected
+const OFFLINE = [255, 90, 90, 255]; // the Edge unit of this junction is not connected or not trusted
+const WARN = [255, 190, 70, 255];   // the unit reports a warning (heat, silence, version)
+const ring = (S, d, normal) => {
+  const level = S.devLevel(d.id);
+  return level === 'alert' ? OFFLINE : level === 'warn' ? WARN : normal;
+};
 const CAM_LINE = { problem: [255, 225, 160, 255], control: [170, 240, 210, 255] };
 
 function cone(scene, cam) {
@@ -49,14 +54,14 @@ export function overlayLayers(scene, S, show, { main, pulse }) {
         id: 'detectors', data: scene.detectors, visible: on('cameras'), getPosition: (d) => d.p, radiusUnits: 'meters',
         getRadius: 5, radiusMinPixels: 3.5, stroked: true, lineWidthMinPixels: 1.5, pickable: true,
         getFillColor: (d) => CAM_FILL[S.camStatus[d.id]] ?? [16, 20, 27, 255 * d.v],
-        getLineColor: (d) => (S.online(d.id) ? CAM_LINE[S.camStatus[d.id]] ?? [120, 150, 175, 255 * d.v] : OFFLINE),
+        getLineColor: (d) => ring(S, d, CAM_LINE[S.camStatus[d.id]] ?? [120, 150, 175, 255 * d.v]),
         updateTriggers: { getFillColor: S.camVersion, getLineColor: [S.camVersion, S.devVersion] },
       }),
       new ScatterplotLayer({
         id: 'cams', data: scene.cams, visible: on('cameras'), getPosition: (d) => d.p, radiusUnits: 'meters', getRadius: 7,
         radiusMinPixels: 5,
         getFillColor: (d) => CAM_FILL[S.camStatus[d.id]] ?? (d.id === S.cam ? [92, 200, 255, 255] : [16, 20, 27, 255]),
-        getLineColor: (d) => (S.online(d.id) ? CAM_LINE[S.camStatus[d.id]] ?? [92, 200, 255, 255] : OFFLINE),
+        getLineColor: (d) => ring(S, d, CAM_LINE[S.camStatus[d.id]] ?? [92, 200, 255, 255]),
         stroked: true, lineWidthMinPixels: 2, pickable: true,
         updateTriggers: { getFillColor: [S.cam, S.camVersion], getLineColor: [S.camVersion, S.devVersion] },
       }),

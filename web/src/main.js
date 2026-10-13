@@ -64,6 +64,12 @@ map.on('zoom', () => {
 
 const cameras = createCameraView(scene, { onChange: (id) => { S.cam = id; panel.render(); } });
 const panel = createPanel(scene, S, {
+  onFly: (junction) => {
+    const target = scene.cams.find((c) => c.id === junction) ?? scene.detectors.find((d) => d.id === junction);
+    if (!target) return;
+    flyTo(target.p, 17);
+    select('detectors', target, target.p);
+  },
   onCamera: (id) => (id === S.cam ? cameras.close() : cameras.open(id)),
   onAction: (act, id) => run(() => (act === 'revoke' || act === 'restore'
     ? api.post(`/api/devices/${id}/status`, { status: act === 'revoke' ? 'revoked' : 'active' })

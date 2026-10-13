@@ -25,6 +25,7 @@ class DeviceHub:
         self.registry, self.key, self.on_report, self.clock, self.wall = registry, gateway_key, on_report, clock, wall
         self.sessions: dict[str, WebSocket] = {}
         self.seen: dict[str, dict] = {}  # device id -> {"at": wall time, "health": {...}}
+        self.connects: dict[str, int] = {}  # device id -> sessions since the platform started
         self._seq = time.time_ns() // 1_000_000  # survives restarts without going backwards
 
     # ---- towards devices: this is gateway.send
@@ -76,12 +77,14 @@ class DeviceHub:
             if old is not None:  # the same unit reconnected: one session per device
                 await _close(old)
             self.sessions[device] = ws
+            self.connects[device] = self.connects.get(device, 0) + 1
             self.seen[device] = {"at": time.time(), "health": {"version": hello.get("version")}}
             await ws.send_text(json.dumps({"type": "welcome", "t": self.clock()}))
             while True:
                 report = json.loads(await ws.receive_text())
                 if isinstance(report, dict) and report.get("type") == "report":
-                    self.seen[device] = {"at": time.time(), "health": report.get("health", {})}
+                    health = report.get("health")
+                    self.seen[device] = {"at": time.time(), "health": health if isinstance(health, dict) else {}}
                     self.on_report(rec, report)
         except (WebSocketDisconnect, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError, AttributeError,
                 TypeError, ValueError):
@@ -104,8 +107,10 @@ class DeviceHub:
         out = []
         for rec in self.registry.devices.values():
             seen = self.seen.get(rec["id"], {})
-            out.append({"id": rec["id"], "junction": rec["junction"], "name": rec.get("name", ""),
+            out.append({"id": rec["id"], "junction": rec["junction"], "tls": rec["tls"], "name": rec.get("name", ""),
+                        "serial": rec.get("serial", ""), "enrolled": rec.get("enrolled", ""),
                         "status": rec["status"], "online": rec["id"] in self.sessions,
+                        "connects": self.connects.get(rec["id"], 0),
                         "age": round(now - seen["at"]) if "at" in seen else None,
                         "health": seen.get("health", {})})
         return out

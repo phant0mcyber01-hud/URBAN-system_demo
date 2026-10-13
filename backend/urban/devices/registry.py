@@ -7,6 +7,7 @@ here everything is generated on one machine and kept under data/pki, which is no
 import datetime
 import ipaddress
 import json
+import secrets
 from pathlib import Path
 
 from cryptography import x509
@@ -99,11 +100,18 @@ def provision(junctions: list[dict], pki: Path) -> bool:
     for j in junctions:
         ident = device_id(j["id"])
         if ident in devices and (pki / "edge" / f"{ident}.key").exists():
+            rec = devices[ident]
+            if not rec.get("serial") or not rec.get("enrolled"):  # enrolled before these fields existed
+                rec.setdefault("serial", f"URB-{secrets.token_hex(3).upper()}")
+                rec.setdefault("enrolled", datetime.date.today().isoformat())
+                created = True
             continue
         key = crypto.new_key()
         (pki / "edge" / f"{ident}.key").write_text(crypto.private_hex(key))
         devices[ident] = {"id": ident, "junction": j["id"], "tls": j["tls"], "name": j["name"],
-                          "public_key": crypto.public_hex(key), "status": ACTIVE}
+                          "public_key": crypto.public_hex(key), "status": ACTIVE,
+                          "serial": f"URB-{secrets.token_hex(3).upper()}",  # what is printed on the box
+                          "enrolled": datetime.date.today().isoformat()}
         created = True
     if created:
         save(path, devices)

@@ -8,6 +8,7 @@ import math
 from .analytics import traffic
 from .analytics.infra import Detector
 from .analytics.queues import RELIEVED, WINDOW, QueueMonitor
+from .devices import health
 from .gateway import CommandGateway
 from .junctions import approved_plans
 
@@ -30,6 +31,9 @@ class Platform:
         self.gateway = CommandGateway(send, approved_plans(self.cameras), reachable)
         self._by_tls = {c["tls"]: c for c in self.cameras}
         self.sensors: dict[str, tuple[int, dict]] = {}  # junction id -> (report time, queues) from its Edge unit
+        self.dev: dict[str, dict] = {}        # junction id -> brief of its Edge unit, for the UI
+        self.dev_alerts: list[dict] = []      # health alerts as they appeared, for the feed and the audit log
+        self._dev_state: dict[str, set] = {}  # device id -> alert kinds currently raised
         self.queues, self.last_cmd_version, self._logged = {}, -1, 0
         self._reset()
         self.t = -1
@@ -139,6 +143,38 @@ class Platform:
             frame["cmd"] = self.gateway.public()
         return frame
 
+    def devices(self, rows: list[dict], t: int) -> list[dict]:
+        """Take the hub's view of the fleet, judge each unit, lock junctions whose unit cannot be trusted.
+        Returns the alerts that are new since the last call; the brief for the UI is in self.dev."""
+        new = []
+        for row in rows:
+            alerts = health.assess(row)
+            kinds = {(a["kind"], a["level"]) for a in alerts}
+            before = self._dev_state.get(row["id"], set())
+            for a in alerts:
+                if (a["kind"], a["level"]) not in before:  # new, or the same trouble got worse
+                    rec = {"t": t, "device": row["id"], "junction": row["junction"], "level": a["level"],
+                           "kind": a["kind"], "text": a["text"]}
+                    self.dev_alerts.append(rec)
+                    new.append(rec)
+                    self.gateway.audit.append(t, f"device-{a['level']}", "-", "-", row["id"], a["text"],
+                                              actor="equipment", mode="approval")
+            for kind in {k for k, _ in before} - {k for k, _ in kinds}:
+                self.gateway.audit.append(t, "device-clear", "-", "-", row["id"], kind, actor="equipment", mode="approval")
+            self._dev_state[row["id"]] = kinds
+            blocking = [a["text"] for a in alerts if a["kind"] in health.BLOCKING]
+            if row.get("tls"):
+                self.gateway.set_locked(row["tls"], bool(blocking), "; ".join(blocking) or "unit trusted again", t)
+            h = row.get("health") or {}
+            self.dev[row["junction"]] = {
+                "id": row["id"], "serial": row.get("serial", ""), "o": int(row["online"]), "s": row["status"],
+                "v": h.get("version"), "t": h.get("temp"), "d": h.get("door"), "c": h.get("controller"),
+                "l": h.get("leases"), "u": h.get("uptime"), "a": row.get("age"), "n": row.get("connects", 0),
+                "al": [[a["level"], a["text"]] for a in alerts], "lock": row.get("tls") in self.gateway.locked,
+            }
+        self.dev_alerts = self.dev_alerts[-200:]
+        return new
+
     def on_report(self, tls: str, report: dict):
         """A report from the Edge unit of a junction: queue readings and what happened to its leases."""
         cam = self._by_tls.get(tls)
@@ -183,4 +219,4 @@ class Platform:
         return {"t": self.t, "events": self.events[-100:], "shadow": self.shadow[-100:],
                 "alerts": self.alerts[-100:], "infra": self.infra, "audit": self.audit(),
                 "cmd": self.gateway.public(), "link": self.gateway.link_up,
-                "log": self.gateway.records[-20:]}
+                "log": self.gateway.records[-20:], "dev": self.dev, "devalerts": self.dev_alerts[-50:]}
