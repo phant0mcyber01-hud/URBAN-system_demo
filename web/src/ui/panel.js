@@ -37,7 +37,7 @@ export function createPanel(scene, S, { onCamera, onAction, onFly }) {
   // URBAN Edge units: the registry with live health, one row per junction
   const devState = (d) => (d.s === 'revoked' ? chip('bad', 'отозвано') : d.lock ? chip('bad', 'заблокирован')
     : d.o ? (d.al.length ? chip(d.al[0][0] === 'alert' ? 'bad' : 'warn', d.al[0][1]) : chip('ok', 'норма')) : chip('warn', 'нет связи'));
-  const devButton = (d) => (S.operator
+  const devButton = (d) => (S.can('admin')
     ? `<button data-act="${d.s === 'revoked' ? 'restore' : 'revoke'}" data-id="${esc(d.id)}">${d.s === 'revoked' ? 'Доверять' : 'Отозвать'}</button>` : '');
   const age = (s) => (s == null ? '—' : s < 60 ? `${s} с` : `${Math.floor(s / 60)} мин`);
   const deviceSummary = () => {
@@ -89,10 +89,10 @@ export function createPanel(scene, S, { onCamera, onAction, onFly }) {
     const [cls, label] = CMD_STATUS[c.status] ?? ['info', c.status];
     const live = ['approved', 'active', 'revoking'].includes(c.status);
     const buttons = c.status === 'pending'
-      ? (S.operator
+      ? (S.can('operator')
         ? `<div class="btns"><button class="go" data-act="approve" data-id="${c.id}" ${S.link ? '' : 'disabled'}>Применить</button>
            <button data-act="reject" data-id="${c.id}">Отклонить</button></div>`
-        : `<small class="muted">Решение принимает оператор: войдите по токену (вверху справа).</small>`)
+        : `<small class="muted">Решение принимает оператор; у вашей учётной записи роль «наблюдатель».</small>`)
       : '';
     const both = (now, other, word) => `<div class="stat">
         <div class="row"><span>Очередь загруженного: было ${c.queue0} м</span><b>${word} ${now ?? '—'} м</b></div>

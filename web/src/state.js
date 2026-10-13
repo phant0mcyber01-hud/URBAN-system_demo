@@ -1,4 +1,6 @@
 // Client-side copy of the platform state: a snapshot from /api/state, then live frames.
+const RANK = { viewer: 0, operator: 1, admin: 2 }; // the server enforces this; the UI only hides buttons
+
 export function createState(scene) {
   const S = {
     t: 0, stats: null, events: [], shadow: [], alerts: [], infra: [], cams: {}, cmd: [], link: true, log: [],
@@ -6,7 +8,9 @@ export function createState(scene) {
     // derived, with stable identities between frames so map layers are not rebuilt needlessly
     jamRoads: [], infraBad: [], activeIncidents: [], infraVersion: 0, camStatus: {}, camVersion: 0, dev: {}, devVersion: 0, devAlerts: [],
     // UI
-    tab: 'overview', cam: null, pin: null, operator: false,
+    tab: 'overview', cam: null, pin: null,
+    user: null, // {name, role} of the signed-in account
+    can: (role) => (RANK[S.user?.role] ?? -1) >= RANK[role],
   };
 
   function derive() {

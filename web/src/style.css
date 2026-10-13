@@ -104,15 +104,36 @@ button.cam span:last-child { color: var(--muted); white-space: nowrap; }
 }
 
 /* operator controls and command cards */
-#operator, #op-tools { display: flex; align-items: center; gap: 6px; }
-#operator[hidden], #op-tools[hidden] { display: none; }
+#op-tools { display: flex; align-items: center; gap: 6px; }
+#op-tools[hidden] { display: none; }
 #mode button, .btns button { background: #17222e; border: 1px solid var(--line); border-radius: 7px; padding: 4px 10px; cursor: pointer; white-space: nowrap; }
 #mode button:hover, .btns button:hover { border-color: var(--accent); }
 #mode button.danger { background: #3a1818; border-color: #6b2a2a; color: #ff9d9d; }
 #mode button.danger:hover { border-color: var(--bad); }
 #mode button.on { background: #3a2d12; border-color: #6b5320; color: var(--warn); }
-#op-token { background: #0e1319; border: 1px solid var(--line); border-radius: 7px; padding: 4px 8px; color: var(--text); width: 130px; font: inherit; }
-#op-token.bad { border-color: var(--bad); }
+/* sign-in and accounts */
+#login { position: absolute; z-index: 6; inset: 0; display: flex; align-items: center; justify-content: center;
+         background: rgba(6,8,12,.6); backdrop-filter: blur(5px); }
+#login form { position: relative; width: 340px; max-width: calc(100% - 24px); padding: 22px; display: grid; gap: 10px; }
+#login label, #users label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+#login input, #users input, #users select { background: #0e1319; border: 1px solid var(--line); border-radius: 7px; padding: 7px 9px;
+                                           color: var(--text); font: inherit; width: 100%; }
+#login input:focus, #users input:focus { outline: 0; border-color: var(--accent); }
+#login button, #users button { background: #17222e; border: 1px solid var(--line); border-radius: 7px; padding: 7px 12px; cursor: pointer; }
+#login button:hover, #users button:hover { border-color: var(--accent); }
+#login button[type=submit] { background: #143328; border-color: #1f5a43; color: var(--ok); font-weight: 600; }
+.err { color: var(--bad); min-height: 1.2em; }
+#users { top: 68px; left: 50%; transform: translateX(-50%); z-index: 4; width: 440px; max-width: calc(100% - 24px);
+         max-height: calc(100% - 100px); overflow: auto; }
+#users header { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+#users header b { flex: 1; }
+#users header button { background: none; border: 0; color: var(--muted); font-size: 15px; cursor: pointer; padding: 0 4px; }
+#users-body { padding: 8px 12px 12px; }
+#users form { display: grid; gap: 8px; margin-top: 8px; }
+#users .item.row .chip { margin-left: 6px; }
+#users .item.row small { display: block; }
+#users .acts { display: flex; gap: 6px; }
+#users .off { opacity: .55; }
 #link.bad { background: #431c1c; color: #ff8a8a; }
 .btns { display: flex; gap: 6px; margin-top: 8px; }
 .btns button.go { background: #143328; border-color: #1f5a43; color: var(--ok); font-weight: 600; }

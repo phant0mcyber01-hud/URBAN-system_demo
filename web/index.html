@@ -14,15 +14,12 @@
     <div id="mode">
       <span id="link" class="chip ok">связь с оборудованием</span>
       <span class="chip shadow" title="Оборудование в демо смоделировано">ЭМУЛЯЦИЯ</span>
-      <span id="operator">
-        <button id="op-login">Войти оператором</button>
-        <input id="op-token" type="password" placeholder="токен оператора" autocomplete="off" hidden />
-        <span id="op-tools" hidden>
-          <span class="chip ok">оператор</span>
-          <button id="op-link" title="Имитация: платформа перестаёт продлевать команды">Отключить связь</button>
-          <button id="op-revoke" class="danger" title="Немедленно вернуть все светофоры к базовому плану">Отозвать всё</button>
-          <button id="op-logout">Выйти</button>
-        </span>
+      <span id="op-tools" hidden>
+        <span id="op-user" class="chip ok"></span>
+        <button id="op-link" title="Имитация: платформа перестаёт продлевать команды">Отключить связь</button>
+        <button id="op-revoke" class="danger" title="Немедленно вернуть все светофоры к базовому плану">Отозвать всё</button>
+        <button id="op-users">Учётные записи</button>
+        <button id="op-logout">Выйти</button>
       </span>
       <span id="clock">0:00</span>
     </div>
@@ -48,6 +45,22 @@
     <div id="camview"></div>
     <div id="cam-hud"></div>
   </section>
+
+  <section id="users" class="glass" hidden>
+    <header><b id="users-title">Учётные записи</b><button id="users-close" title="Закрыть">✕</button></header>
+    <div id="users-body"></div>
+  </section>
+
+  <div id="login" hidden>
+    <form id="login-form" class="glass" autocomplete="on">
+      <div id="brand">URBAN <span>· Фергана · центр управления</span></div>
+      <p class="muted">Вход только по учётной записи. Роли: наблюдатель, оператор, администратор.</p>
+      <label>Имя <input id="login-name" autocomplete="username" required autofocus /></label>
+      <label>Пароль <input id="login-pass" type="password" autocomplete="current-password" required /></label>
+      <button type="submit">Войти</button>
+      <small id="login-err" class="err"></small>
+    </form>
+  </div>
 
   <div id="layers" class="glass">
     <button id="layers-btn">Слои</button>

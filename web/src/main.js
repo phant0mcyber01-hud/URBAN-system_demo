@@ -1,7 +1,7 @@
 // Entry point: loads the scene, wires map, camera window, search, place card and the panel,
 // then runs one animation loop that only updates what moves.
 import './style.css';
-import { loadScene, getJson } from './scene/scene.js';
+import { loadScene } from './scene/scene.js';
 import { staticLayers } from './scene/staticLayers.js';
 import { overlayLayers } from './scene/overlays.js';
 import { Live } from './scene/live.js';
@@ -76,7 +76,8 @@ const panel = createPanel(scene, S, {
     : api.post(`/api/commands/${id}/${act}`))),
 });
 
-// ---- operator: viewing is open, deciding needs the token ----
+// ---- accounts: everything needs a sign-in; what the buttons do depends on the role ----
+const ROLE_TEXT = { viewer: 'наблюдатель', operator: 'оператор', admin: 'администратор' };
 function toast(text) {
   let el = $('toast');
   if (!el) { el = document.createElement('div'); el.id = 'toast'; el.className = 'glass'; document.body.append(el); }
@@ -86,12 +87,16 @@ function toast(text) {
   toast.timer = setTimeout(() => { el.hidden = true; }, 3500);
 }
 async function run(action) {
-  try { await action(); } catch (e) { toast(e.message); }
+  try { await action(); } catch (e) { toast(e.message); if (e.message === 'нужно войти заново') signedOut(); }
 }
 function renderOperator() {
-  $('op-login').hidden = S.operator || !$('op-token').hidden;
-  $('op-tools').hidden = !S.operator;
-  if (S.operator) $('op-token').hidden = true;
+  $('op-tools').hidden = !S.user;
+  if (S.user) {
+    $('op-user').textContent = `${S.user.name} · ${ROLE_TEXT[S.user.role] ?? S.user.role}`;
+    $('op-user').className = `chip ${S.user.role === 'viewer' ? 'info' : 'ok'}`;
+  }
+  $('op-link').hidden = $('op-revoke').hidden = !S.can('operator');
+  $('op-users').textContent = S.can('admin') ? 'Учётные записи' : 'Мой пароль';
   const link = $('link');
   link.textContent = S.link ? 'связь с оборудованием' : 'связь отключена';
   link.className = `chip ${S.link ? 'ok' : 'bad'}`;
@@ -99,20 +104,99 @@ function renderOperator() {
   $('op-link').classList.toggle('on', !S.link);
   panel.render();
 }
-$('op-login').onclick = () => { $('op-token').hidden = false; $('op-login').hidden = true; $('op-token').focus(); };
-$('op-token').onkeydown = async (e) => {
-  if (e.key === 'Escape') { $('op-token').hidden = true; renderOperator(); }
-  if (e.key !== 'Enter') return;
-  S.operator = await api.verify($('op-token').value.trim());
-  $('op-token').value = '';
-  $('op-token').classList.toggle('bad', !S.operator);
-  if (!S.operator) toast('токен не подошёл');
+function signedOut() {
+  S.user = null;
+  if (ws) { const w = ws; ws = null; w.close(); }
+  $('users').hidden = true;
+  $('login').hidden = false;
+  $('login-pass').value = '';
+  $('login-name').focus();
   renderOperator();
+}
+$('login-form').onsubmit = async (e) => {
+  e.preventDefault();
+  $('login-err').textContent = '';
+  try {
+    S.user = await api.login($('login-name').value.trim(), $('login-pass').value);
+  } catch (err) { $('login-err').textContent = err.message; return; }
+  $('login').hidden = true;
+  $('login-pass').value = '';
+  renderOperator();
+  connect();
 };
-$('op-logout').onclick = () => { api.logout(); S.operator = false; renderOperator(); };
+$('op-logout').onclick = async () => { await api.logout(); signedOut(); };
 $('op-revoke').onclick = () => run(() => api.post('/api/revoke-all'));
 $('op-link').onclick = () => run(() => api.post('/api/link', { up: !S.link }));
-S.operator = await api.verify();
+
+// accounts dialog: admins manage everyone, others change their own password
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+async function renderUsers() {
+  const body = $('users-body');
+  const own = `<form data-form="password"><h4>Мой пароль</h4>
+      <label>Новый пароль (от 10 символов) <input name="password" type="password" autocomplete="new-password" required minlength="10" /></label>
+      <button type="submit">Сменить пароль</button></form>`;
+  if (!S.can('admin')) { body.innerHTML = own; return; }
+  let users = [];
+  try { users = await api.get('/api/users'); } catch (e) { body.innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  body.innerHTML = `<p class="muted">Наблюдатель смотрит, оператор решает, администратор ещё управляет устройствами и учётными записями.
+      Пароль хранится как scrypt-хэш в <code>data/users.json</code>; то же можно делать из консоли: <code>python -m urban.users</code>.</p>
+    ${users.map((u) => `<div class="item row ${u.enabled ? '' : 'off'}">
+      <span><b>${esc(u.name)}</b>${chipHtml(u.role)}${u.enabled ? '' : chipHtml('off')}<small>с ${esc(u.created)}</small></span>
+      <span class="acts">
+        <button data-reset="${esc(u.name)}">Пароль</button>
+        ${u.name === S.user.name ? '' : `<button data-enable="${esc(u.name)}" data-to="${u.enabled ? 0 : 1}">${u.enabled ? 'Отключить' : 'Включить'}</button>`}
+      </span></div>`).join('')}
+    <form data-form="create"><h4>Новая учётная запись</h4>
+      <label>Имя <input name="name" required maxlength="40" pattern="[A-Za-z0-9._\\-]+" autocomplete="off" /></label>
+      <label>Пароль (от 10 символов) <input name="password" type="password" autocomplete="new-password" required minlength="10" /></label>
+      <label>Роль <select name="role"><option value="viewer">наблюдатель</option><option value="operator" selected>оператор</option><option value="admin">администратор</option></select></label>
+      <button type="submit">Добавить</button></form>
+    ${own}`;
+}
+const chipHtml = (role) => (role === 'off' ? '<span class="chip bad">отключена</span>'
+  : `<span class="chip ${role === 'viewer' ? 'info' : 'ok'}">${ROLE_TEXT[role] ?? esc(role)}</span>`);
+$('op-users').onclick = () => { $('users').hidden = !$('users').hidden; if (!$('users').hidden) renderUsers(); };
+$('users-close').onclick = () => { $('users').hidden = true; };
+$('users-body').onsubmit = (e) => {
+  e.preventDefault();
+  const form = e.target, data = Object.fromEntries(new FormData(form));
+  run(async () => {
+    if (form.dataset.form === 'create') {
+      await api.post('/api/users', data);
+      toast(`учётная запись ${data.name} создана`);
+    } else {
+      await api.post(`/api/users/${encodeURIComponent(S.user.name)}/password`, { password: data.password });
+      toast('пароль изменён, войдите заново');
+      signedOut();
+      return;
+    }
+    renderUsers();
+  });
+};
+$('users-body').onclick = (e) => {
+  const reset = e.target.closest('[data-reset]'), enable = e.target.closest('[data-enable]');
+  if (reset) {
+    const row = reset.closest('.item');
+    if (row.querySelector('form')) return;
+    row.insertAdjacentHTML('beforeend', `<form data-form="reset" data-name="${reset.dataset.reset}">
+      <label>Новый пароль для ${esc(reset.dataset.reset)} <input name="password" type="password" autocomplete="new-password" required minlength="10" /></label>
+      <button type="submit">Сбросить</button></form>`);
+    row.querySelector('input').focus();
+    row.querySelector('form').onsubmit = (ev) => {
+      ev.preventDefault();
+      run(async () => {
+        await api.post(`/api/users/${encodeURIComponent(reset.dataset.reset)}/password`, { password: ev.target.password.value });
+        toast(`пароль ${reset.dataset.reset} сброшен`);
+        renderUsers();
+      });
+    };
+  } else if (enable) {
+    run(async () => {
+      await api.post(`/api/users/${encodeURIComponent(enable.dataset.enable)}/enabled`, { enabled: enable.dataset.to === '1' });
+      renderUsers();
+    });
+  }
+};
 
 createSearch(scene, {
   getAssets: () => S.infra,
@@ -166,11 +250,24 @@ function onFrame(f) {
   }
 }
 
+// the live socket: the first message carries the session token, a stale one closes it with 4401
+let ws = null;
 function connect() {
-  const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
-  ws.onopen = async () => { S.applySnapshot((await getJson('/api/state')) ?? {}); renderOperator(); };
+  if (ws || !S.user) return;
+  ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
+  ws.onopen = async () => {
+    ws.send(JSON.stringify({ token: api.wsToken() }));
+    try { S.applySnapshot(await api.get('/api/state')); } catch { /* the socket will tell us if the session is gone */ }
+    renderOperator();
+  };
   ws.onmessage = (m) => onFrame(JSON.parse(m.data));
-  ws.onclose = () => setTimeout(connect, 1500);
+  ws.onclose = (e) => {
+    ws = null;
+    if (e.code === 4401) signedOut();
+    else if (S.user) setTimeout(connect, 1500);
+  };
 }
 panel.setTab('overview');
-connect();
+S.user = await api.whoami();
+if (S.user) connect(); else signedOut();
+renderOperator();

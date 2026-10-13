@@ -1,27 +1,49 @@
-// Operator actions. Reading needs no credentials; everything that changes state sends the
-// operator token, which is kept for the browser session only.
-const KEY = 'urban-operator';
+// Session with the platform. The bearer token comes from /api/login and is kept for the browser
+// tab only; the server forgets it after 12 hours, on restart, or when the account is disabled.
+const KEY = 'urban-session';
 let token = '';
-try { token = sessionStorage.getItem(KEY) ?? ''; } catch { /* storage blocked: stay in view mode */ }
+try { token = sessionStorage.getItem(KEY) ?? ''; } catch { /* storage blocked: sign in each time */ }
 
-const headers = () => ({ 'X-Operator-Token': token, 'Content-Type': 'application/json' });
+const remember = (t) => {
+  token = t;
+  try { t ? sessionStorage.setItem(KEY, t) : sessionStorage.removeItem(KEY); } catch { /* ignore */ }
+};
+export const wsToken = () => token;
 
-export async function verify(candidate = token) {
-  if (!candidate) return false;
-  const r = await fetch('/api/me', { headers: { 'X-Operator-Token': candidate } }).catch(() => null);
-  const ok = !!r?.ok;
-  token = ok ? candidate : '';
-  try { ok ? sessionStorage.setItem(KEY, token) : sessionStorage.removeItem(KEY); } catch { /* ignore */ }
-  return ok;
-}
+const ERRORS = {
+  400: 'проверьте данные: имя до 40 символов (буквы, цифры, . - _), пароль от 10 символов',
+  401: 'нужно войти заново', 403: 'недостаточно прав', 404: 'не найдено',
+  409: 'действие сейчас невозможно', 429: 'слишком много попыток, подождите минуту',
+};
 
-export function logout() {
-  token = '';
-  try { sessionStorage.removeItem(KEY); } catch { /* ignore */ }
-}
-
-export async function post(path, body) {
-  const r = await fetch(path, { method: 'POST', headers: headers(), body: body ? JSON.stringify(body) : undefined });
-  if (!r.ok) throw new Error(r.status === 401 ? 'нет прав оператора' : r.status === 409 ? 'действие сейчас невозможно' : `ошибка ${r.status}`);
+async function call(method, path, body) {
+  const r = await fetch(path, {
+    method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (r.status === 401) remember('');
+  if (!r.ok) throw new Error(ERRORS[r.status] ?? `ошибка ${r.status}`);
   return r.json();
+}
+export const get = (path) => call('GET', path);
+export const post = (path, body) => call('POST', path, body);
+
+/** The signed-in account {name, role}, or null when the stored token is gone or stale. */
+export async function whoami() {
+  if (!token) return null;
+  try { return await get('/api/me'); } catch { return null; }
+}
+
+export async function login(name, password) {
+  let s;
+  try { s = await post('/api/login', { name, password }); } catch (e) {
+    throw new Error(e.message === ERRORS[401] ? 'неверное имя или пароль' : e.message);
+  }
+  remember(s.token);
+  return { name: s.name, role: s.role };
+}
+
+export async function logout() {
+  try { await post('/api/logout'); } catch { /* the server may already have forgotten us */ }
+  remember('');
 }

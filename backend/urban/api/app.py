@@ -2,12 +2,14 @@
 
     python -m urban   ->  UI on http://localhost:8080, devices on wss://localhost:8443
 
-Three kinds of clients, three levels of trust:
-- anyone on this machine may read (UI, /api/state, the read-only /ws);
-- an operator, with the token printed at startup, may decide on proposals, pull everything
-  back, cut the demo link and revoke a device;
+Who may do what:
+- nobody without an account: only /api/health and the login page are open;
+- viewer: everything that reads (UI, /api/state, the read-only /ws);
+- operator: also decides on proposals, pulls everything back, cuts the demo link;
+- admin: also manages devices (revoke, restore) and accounts;
 - an URBAN Edge unit connects to /device over TLS and is trusted only after it signs a
   challenge with the key enrolled in the registry.
+The first start with no accounts creates `admin` and prints its one-time password.
 
 Data flow up:   Edge units -> /device -> DeviceHub -> Platform (queue readings, lease events)
                 simulation -> bus -> Platform.handle -> /ws (vehicles for the twin, analysis)
@@ -15,23 +17,22 @@ Data flow down: operator -> Command Gateway -> DeviceHub (signed) -> Edge unit -
 The local /field socket stands for the cables in a cabinet: sensors and controller of the demo.
 """
 import asyncio
-import hmac
 import json
 import os
 import secrets
 import subprocess
 import sys
 import threading
-import time
 import traceback
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .. import config as c
+from ..accounts import Accounts, allows
 from ..core.bus import PLATFORM_FRAME, SOURCE_FRAME, Bus
 from ..devices import crypto
 from ..devices.hub import DeviceHub
@@ -41,14 +42,15 @@ from ..platform import Platform
 from ..sources import sumo
 from ..sources.field import FieldEmulator
 
-OPERATOR_TOKEN = os.getenv("URBAN_OPERATOR_TOKEN") or secrets.token_urlsafe(9)
-ACTOR = "operator"
 SPAWN_EDGE = os.getenv("URBAN_EDGE", "auto") != "manual"  # manual: start `python -m urban.edge` yourself
 
 junctions = load_all_junctions() or load_cameras()
 provision(junctions, c.PKI)  # demo convenience: a deployment enrols devices one by one
 FIELD_TOKEN = secrets.token_urlsafe(24)  # new on every start; the Edge process reads it from the pki folder
 (c.PKI / "field.token").write_text(FIELD_TOKEN)
+
+accounts = Accounts(c.USERS)
+FIRST_PASSWORD = accounts.bootstrap()
 
 bus = Bus()
 field = FieldEmulator(FIELD_TOKEN)
@@ -100,7 +102,11 @@ def source_thread(loop: asyncio.AbstractEventLoop, stop: threading.Event):
 
 @asynccontextmanager
 async def lifespan(_):
-    print(f"\n  Operator token: {OPERATOR_TOKEN}\n  (viewing needs no token; approving commands does)\n", flush=True)
+    if FIRST_PASSWORD:
+        print(f"\n  First start: account 'admin' created, password: {FIRST_PASSWORD}\n"
+              f"  Change it after signing in. More accounts: python -m urban.users add <name> --role operator\n", flush=True)
+    else:
+        print(f"\n  Accounts: {len(accounts.users)} (manage with python -m urban.users)\n", flush=True)
     field.loop = asyncio.get_running_loop()
     stop = threading.Event()
     threading.Thread(target=source_thread, args=(field.loop, stop), daemon=True).start()
@@ -154,19 +160,113 @@ async def revalidate_data(request, call_next):
         response.headers["Cache-Control"] = "no-cache"
     return response
 
-_failures: list[float] = []
+def _session(authorization: str) -> dict:
+    scheme, _, token = (authorization or "").partition(" ")
+    session = accounts.session(token) if scheme.lower() == "bearer" else None
+    if session is None:
+        raise HTTPException(401, "sign in required")
+    return session
 
 
-def operator(x_operator_token: str = Header(default="")):
-    """Operator authentication with a simple lockout against guessing."""
-    now = time.time()
-    _failures[:] = [f for f in _failures if now - f < 60]
-    if len(_failures) >= 5:
-        raise HTTPException(429, "too many failed attempts, wait a minute")
-    if not hmac.compare_digest(x_operator_token.encode(), OPERATOR_TOKEN.encode()):
-        _failures.append(now)
-        raise HTTPException(401, "operator token required")
-    return ACTOR
+def role(needed: str):
+    """Dependency: a signed-in account with at least this role. Returns the account name."""
+    def check(authorization: str = Header(default="")):
+        session = _session(authorization)
+        if not allows(session["role"], needed):
+            raise HTTPException(403, f"{needed} role required")
+        return session["name"]
+    return check
+
+
+viewer, operator, admin = role("viewer"), role("operator"), role("admin")
+
+
+class Credentials(BaseModel):
+    name: str
+    password: str
+
+
+class NewUser(BaseModel):
+    name: str
+    password: str
+    role: str
+
+
+class Password(BaseModel):
+    password: str
+
+
+class Enabled(BaseModel):
+    enabled: bool
+
+
+@app.post("/api/login")
+async def login(body: Credentials, request: Request):
+    session = accounts.sign_in(body.name, body.password, request.client.host if request.client else "")
+    if session is None:
+        platform.gateway.audit.append(platform.t, "login-failed", "-", "-", body.name[:40], "", actor="-", mode="approval")
+        raise HTTPException(401, "wrong name or password, or too many attempts")
+    platform.gateway.audit.append(platform.t, "login", "-", "-", session["name"], session["role"],
+                                  actor=session["name"], mode="approval")
+    return {"token": session["token"], "name": session["name"], "role": session["role"]}
+
+
+@app.post("/api/logout")
+async def logout(authorization: str = Header(default="")):
+    session = accounts.session(authorization.partition(" ")[2])
+    if session:
+        accounts.sign_out(session["token"])
+        platform.gateway.audit.append(platform.t, "logout", "-", "-", session["name"], "", actor=session["name"], mode="approval")
+    return {"ok": True}
+
+
+@app.get("/api/me")
+def me(authorization: str = Header(default="")):
+    s = _session(authorization)
+    return {"name": s["name"], "role": s["role"]}
+
+
+@app.get("/api/users")
+def users(who: str = Depends(admin)):
+    return [accounts.public(n) for n in accounts.users]
+
+
+@app.post("/api/users")
+async def create_user(body: NewUser, who: str = Depends(admin)):
+    try:
+        rec = accounts.create(body.name, body.password, body.role, by=who)
+    except ValueError as err:
+        raise HTTPException(400, str(err))
+    platform.gateway.audit.append(platform.t, "user-created", "-", "-", rec["name"], rec["role"], actor=who, mode="approval")
+    return rec
+
+
+@app.post("/api/users/{name}/password")
+async def user_password(name: str, body: Password, who: str = Depends(viewer)):
+    """Admins may reset anyone; everyone may change their own."""
+    session_name = who
+    if name != session_name and not allows(accounts.session_role(session_name), "admin"):
+        raise HTTPException(403, "admin role required")
+    if name not in accounts.users:
+        raise HTTPException(404, "unknown user")
+    try:
+        accounts.set_password(name, body.password)
+    except ValueError as err:
+        raise HTTPException(400, str(err))
+    platform.gateway.audit.append(platform.t, "password-changed", "-", "-", name, "", actor=who, mode="approval")
+    return {"ok": True}
+
+
+@app.post("/api/users/{name}/enabled")
+async def user_enabled(name: str, body: Enabled, who: str = Depends(admin)):
+    if name not in accounts.users:
+        raise HTTPException(404, "unknown user")
+    if name == who and not body.enabled:
+        raise HTTPException(400, "you cannot disable yourself")
+    accounts.set_enabled(name, body.enabled)
+    platform.gateway.audit.append(platform.t, "user-enabled" if body.enabled else "user-disabled", "-", "-", name, "",
+                                  actor=who, mode="approval")
+    return accounts.public(name)
 
 
 @app.get("/api/health")
@@ -175,25 +275,20 @@ def health():
 
 
 @app.get("/api/state")
-def state():
+def state(who: str = Depends(viewer)):
     return platform.snapshot()
 
 
 @app.get("/api/audit")
-def audit():
+def audit(who: str = Depends(viewer)):
     return {**platform.audit(), "intact": platform.gateway.verify(), "records": platform.gateway.records[-50:]}
 
 
 @app.get("/api/devices")
-def devices():
+def devices(who: str = Depends(viewer)):
     """The registry with live health: enrolment data, session, last report and alerts per unit."""
     from ..devices.health import assess
     return [{**row, "alerts": assess(row)} for row in hub.status()]
-
-
-@app.get("/api/me")
-def me(who: str = Depends(operator)):
-    return {"operator": True}
 
 
 class Link(BaseModel):
@@ -234,7 +329,7 @@ async def link(body: Link, who: str = Depends(operator)):
 
 
 @app.post("/api/devices/{device}/status")
-async def device_status(device: str, body: DeviceStatus, who: str = Depends(operator)):
+async def device_status(device: str, body: DeviceStatus, who: str = Depends(admin)):
     """Revoke a device (it is disconnected and can no longer authenticate) or trust it again."""
     if body.status not in (ACTIVE, REVOKED):
         raise HTTPException(400, "status must be active or revoked")
@@ -248,11 +343,25 @@ async def device_status(device: str, body: DeviceStatus, who: str = Depends(oper
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
+    try:
+        hello = json.loads(await asyncio.wait_for(ws.receive_text(), 10))
+        token = str(hello.get("token", "")) if isinstance(hello, dict) else ""
+        if accounts.session(token) is None:
+            await ws.close(code=4401)
+            return
+    except (WebSocketDisconnect, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError):
+        return
     clients.add(ws)
     try:
-        while True:
-            await ws.receive_text()  # ignored: the socket is read-only
-    except WebSocketDisconnect:
+        while True:  # the socket is read-only; it only closes when the session ends
+            try:
+                await asyncio.wait_for(ws.receive_text(), 30)
+            except asyncio.TimeoutError:
+                if accounts.session(token) is None:
+                    clients.discard(ws)
+                    await ws.close(code=4401)
+                    return
+    except (WebSocketDisconnect, RuntimeError):
         clients.discard(ws)
 
 
