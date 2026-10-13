@@ -154,7 +154,7 @@ function onFrame(f) {
   renderOperator();
   if (S.cam) {
     const [n, speed, queue] = S.cams[S.cam] ?? [0, 0, 0];
-    cameras.setHud(`${clock(S.t)} · ТС в кадре: ${n} · очередь: ${queue} · ср. скорость: ${speed} км/ч · обезличено`);
+    cameras.setHud(`${clock(S.t)} · ТС в кадре: ${n} · очередь: ${queue} м · ср. скорость: ${speed} км/ч · обезличено`);
   }
 }
 

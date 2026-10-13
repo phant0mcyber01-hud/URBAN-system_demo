@@ -19,23 +19,25 @@ OPEN = ("pending", "approved", "active")
 
 @dataclass(frozen=True)
 class Policy:
-    max_seconds: int    # largest allowed shift of green between two phases
     lease_ttl: int      # seconds equipment keeps a change without renewal
     window: int         # seconds an approval stays valid in total
     cooldown: int       # seconds before the same junction may be touched again
     pending_ttl: int    # seconds a proposal waits for an operator
 
 
-# tls.rebalance: move green time from a phase with spare capacity to an overloaded one.
-# The cycle length never changes.
-POLICY = {"tls.rebalance": Policy(max_seconds=15, lease_ttl=60, window=300, cooldown=90, pending_ttl=120)}
+# tls.select_plan: switch a junction to one of the plans its traffic engineer approved.
+# Timings follow the real signal cycle (about 90 s): a controller changes plan at a cycle
+# boundary, so a lease has to outlive a cycle and the effect needs a few cycles to show.
+POLICY = {"tls.select_plan": Policy(lease_ttl=180, window=900, cooldown=180, pending_ttl=120)}
 
 
 class CommandGateway:
     mode = "approval"
 
-    def __init__(self, send=lambda msg: None):
+    def __init__(self, send=lambda msg: None, plans: dict[str, set[int]] | None = None):
+        """plans: tls id -> approved plan ids. Without it every plan request is refused."""
         self.send = send
+        self.plans = plans or {}
         self.audit = AuditLog()
         self.proposals: dict[str, dict] = {}
         self.link_up = True
@@ -67,30 +69,30 @@ class CommandGateway:
         return self.audit.append(t, "proposed", ref, command, target, note, executed=False, mode="shadow")
 
     def propose(self, t, command, params: dict, reason: str) -> dict | None:
-        """params: tls, cam, give, take (phase indexes), seconds, street, from_street, queue, other."""
+        """params: tls, cam, plan (approved plan id), shift, give, take, street, from_street, queue, other."""
         pol = POLICY.get(command)
         tls = params.get("tls")
         if pol is None or not tls:
             self.audit.append(t, "denied", "-", command, str(tls), "command is not in the policy")
             return None
-        if params.get("give") is None or params.get("give") == params.get("take"):
-            self.audit.append(t, "denied", "-", command, str(tls), "needs two different phases")
+        plan = params.get("plan")
+        if not plan or plan not in self.plans.get(tls, ()):  # plan 0 is the base plan: nothing to propose
+            self.audit.append(t, "denied", "-", command, str(tls), "plan is not in the approved table")
             return None
         if tls in self.muted or any(p["status"] in OPEN and p["tls"] == tls for p in self.proposals.values()):
             return None
         if t - self._last_done.get(tls, -10**9) < pol.cooldown:
             return None
-        seconds = max(1, min(int(params.get("seconds", 10)), pol.max_seconds))
         self._n += 1
         p = {"id": f"cmd-{self._n}", "t": t, "command": command, "tls": tls, "cam": params.get("cam"),
-             "give": params["give"], "take": params["take"], "seconds": seconds,
+             "plan": plan, "shift": params.get("shift", 0), "give": params.get("give"), "take": params.get("take"),
              "street": params.get("street", ""), "from_street": params.get("from_street", ""),
              "status": "pending", "reason": reason,
              "queue0": params.get("queue", 0), "other0": params.get("other", 0),
              "queue": params.get("queue", 0), "other": params.get("other", 0),
              "until": None, "result": None}
         self.proposals[p["id"]] = p
-        self.audit.append(t, "proposed", p["id"], command, self._target(p), f"{seconds} s; {reason}", mode="approval")
+        self.audit.append(t, "proposed", p["id"], command, self._target(p), reason, mode="approval")
         self.version += 1
         return p
 
@@ -149,7 +151,7 @@ class CommandGateway:
         self.muted &= still_raised
 
     def tick(self, t: int, demand: dict):
-        """demand: {(tls, phase index): mean standing vehicles}. Renews leases, expires stale proposals."""
+        """demand: {(tls, phase index): mean queue metres}. Renews leases, expires stale proposals."""
         for p in self.proposals.values():
             st = p["status"]
             if st == "pending" and t - p["t"] > POLICY[p["command"]].pending_ttl:
@@ -158,8 +160,8 @@ class CommandGateway:
                 self.audit.append(t, "expired", p["id"], p["command"], p["tls"], "no operator decision", mode="approval")
                 self.version += 1
             elif st in ("approved", "active"):
-                p["queue"] = round(demand.get((p["tls"], p["give"]), p["queue"]), 1)
-                p["other"] = round(demand.get((p["tls"], p["take"]), p["other"]), 1)
+                p["queue"] = round(demand.get((p["tls"], p["give"]), p["queue"]))
+                p["other"] = round(demand.get((p["tls"], p["take"]), p["other"]))
                 pol = POLICY[p["command"]]
                 if t >= p["until"]:
                     self.send({"op": "release", "id": p["id"]})
@@ -173,9 +175,9 @@ class CommandGateway:
         if p is None:
             return
         if ev["status"] == "applied":
-            p["status"], p["applied_at"], p["seconds"] = "active", t, ev["seconds"]
+            p["status"], p["applied_at"] = "active", t
             self.applied += 1
-            self.audit.append(t, "applied", p["id"], p["command"], self._target(p), f"{ev['seconds']} s moved",
+            self.audit.append(t, "applied", p["id"], p["command"], self._target(p), f"plan {ev['plan']} running",
                               actor="equipment", executed=True, mode="approval")
         elif ev["status"] == "reverted":
             reason = p.get("end") if ev["reason"] == "released" and p.get("end") else ev["reason"]
@@ -209,8 +211,7 @@ class CommandGateway:
 
     @staticmethod
     def _target(p: dict) -> str:
-        return f"{p['tls']}: phase {p['take']} -> phase {p['give']}"
+        return f"{p['tls']}: plan {p['plan']}"
 
     def _lease(self, p: dict, pol: Policy):
-        self.send({"op": "lease", "id": p["id"], "tls": p["tls"], "give": p["give"], "take": p["take"],
-                   "seconds": p["seconds"], "ttl": pol.lease_ttl})
+        self.send({"op": "lease", "id": p["id"], "tls": p["tls"], "plan": p["plan"], "ttl": pol.lease_ttl})

@@ -16,5 +16,6 @@ class SourceFrame(TypedDict, total=False):
     t: int                  # source time, seconds
     vehicles: list[Vehicle]
     bus_loss: list[float]   # seconds lost per bus on the line
+    queues: dict[str, float]  # approach edge id -> standing queue in metres, as the sensors report it
     events: list[dict]      # incident / dispatch events from city services
     telemetry: list[dict]   # utility asset readings (every few seconds)

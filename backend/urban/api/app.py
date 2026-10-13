@@ -27,7 +27,7 @@ from .. import config as c
 from ..core.bus import PLATFORM_FRAME, SOURCE_FRAME, Bus
 from ..platform import Platform
 from ..sources import sumo
-from .cameras import load_all_junctions, load_cameras
+from ..junctions import load_all_junctions, load_cameras
 
 OPERATOR_TOKEN = os.getenv("URBAN_OPERATOR_TOKEN") or secrets.token_urlsafe(9)
 ACTOR = "operator"

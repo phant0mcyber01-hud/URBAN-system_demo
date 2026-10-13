@@ -17,7 +17,10 @@ import traci.constants as tc
 
 from .. import config as c
 from ..core.events import Vehicle
-from .signals import SignalControl
+from ..equipment.edge import EdgeController
+from ..equipment.sumo_adapter import SumoAdapter
+from ..junctions import load_all_junctions, plan_tables
+from .measure import queue_lengths
 from .telemetry import Telemetry
 
 UNITS = [  # (unit label, OSM amenity kinds used as base, fallback base label)
@@ -74,7 +77,11 @@ def run(publish, commands=None, *, seed=42, incident_at=None, realtime=True, unt
     traci.vehicletype.setVehicleClass("emg", "emergency")
     traci.vehicletype.setSpeedFactor("emg", 1.5)
 
-    signals = SignalControl()
+    junctions = load_all_junctions()
+    # URBAN Edge at every junction, talking to the emulated controllers through the same adapter interface
+    signals = EdgeController(SumoAdapter(plan_tables(junctions)))
+    zones = {a["id"]: a["zone"] for j in junctions for a in j["approaches"] if "zone" in a}
+    lane_length, lengths = {}, {}
     kinds = {}
     bus_edges = set()
     incident = None   # dict while active/cleared
@@ -92,13 +99,16 @@ def run(publish, commands=None, *, seed=42, incident_at=None, realtime=True, unt
             for vid in traci.simulation.getDepartedIDList():
                 cls = traci.vehicle.getVehicleClass(vid)
                 kinds[vid] = "bus" if cls == "bus" else "emg" if cls == "emergency" else "car"
-                traci.vehicle.subscribe(vid, [tc.VAR_POSITION, tc.VAR_ANGLE, tc.VAR_SPEED, tc.VAR_ROAD_ID])
+                lengths[vid] = traci.vehicle.getLength(vid)
+                traci.vehicle.subscribe(vid, [tc.VAR_POSITION, tc.VAR_ANGLE, tc.VAR_SPEED, tc.VAR_ROAD_ID,
+                                              tc.VAR_LANE_ID, tc.VAR_LANEPOSITION])
                 if kinds[vid] == "emg":
                     traci.vehicle.setSpeedMode(vid, 7)  # may pass red lights, still keeps safe gaps
             for vid in traci.simulation.getArrivedIDList():
                 kinds.pop(vid, None)
+                lengths.pop(vid, None)
 
-            vehicles, bus_loss, where = [], [], {}
+            vehicles, bus_loss, where, samples = [], [], {}, []
             for vid, d in traci.vehicle.getAllSubscriptionResults().items():
                 if not d:
                     continue
@@ -109,6 +119,12 @@ def run(publish, commands=None, *, seed=42, incident_at=None, realtime=True, unt
                 kind, road = kinds.get(vid, "car"), d[tc.VAR_ROAD_ID]
                 vehicles.append(Vehicle(vid, lon, lat, d[tc.VAR_ANGLE], d[tc.VAR_SPEED], kind, road))
                 where[vid] = (x, y, road)
+                lane = d[tc.VAR_LANE_ID]
+                if road in zones:  # what the queue sensor of this approach sees
+                    if lane not in lane_length:
+                        lane_length[lane] = traci.lane.getLength(lane)
+                    samples.append((lane, lane_length[lane] - d[tc.VAR_LANEPOSITION], d[tc.VAR_SPEED],
+                                    lengths.get(vid, 5.0)))
                 if kind == "bus":
                     bus_loss.append(traci.vehicle.getTimeLoss(vid))
                     bus_edges.add(road)
@@ -164,7 +180,8 @@ def run(publish, commands=None, *, seed=42, incident_at=None, realtime=True, unt
                     incident["status"] = "cleared"
                     events.append({**public(incident), "t": now, "duration": now - incident["t"]})
 
-            frame = {"t": now, "vehicles": vehicles, "bus_loss": bus_loss, "events": events}
+            frame = {"t": now, "vehicles": vehicles, "bus_loss": bus_loss, "events": events,
+                     "queues": queue_lengths(samples, zones)}
             if now % 5 == 0:
                 frame["telemetry"] = telemetry.sample(now)
             publish(frame)

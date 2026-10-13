@@ -45,13 +45,13 @@ export function createPanel(scene, S, { onCamera, onAction }) {
         : `<small class="muted">Решение принимает оператор: войдите по токену (вверху справа).</small>`)
       : '';
     const both = (now, other, word) => `<div class="stat">
-        <div class="row"><span>Загруженное: было ${c.queue0}</span><b>${word} ${now ?? '—'}</b></div>
-        <div class="row"><span>Отдаёт зелёный: было ${c.other0}</span><b>${word} ${other ?? '—'}</b></div></div>`;
+        <div class="row"><span>Очередь загруженного: было ${c.queue0} м</span><b>${word} ${now ?? '—'} м</b></div>
+        <div class="row"><span>Очередь отдающего зелёный: было ${c.other0} м</span><b>${word} ${other ?? '—'} м</b></div></div>`;
     return `<div class="item cmd ${c.status}">
       <div class="row"><b>${esc(c.street || c.cam)}</b>${chip(cls, label)}</div>
       <div>${esc(c.reason)}</div>
-      <small>Предложение платформы: перенести ${c.seconds} с зелёного с «${esc(c.from_street)}» на «${esc(c.street)}»
-        (${esc(c.cam)}). Длина цикла не меняется; пределы и откат задаёт контроллер.</small>
+      <small>Предложение платформы: включить <b>план ${c.plan}</b> из утверждённых для ${esc(c.cam)}:
+        +${c.shift} с зелёного для «${esc(c.street)}» за счёт «${esc(c.from_street)}». Длина цикла не меняется.</small>
       ${live ? `${both(c.queue, c.other, 'сейчас')}
         <small>Действует до ${clock(c.until)} (осталось ${Math.max(0, c.until - S.t)} с). Снимется раньше, если очередь уйдёт
         или начнёт страдать направление, отдающее зелёный.</small>` : ''}
@@ -68,7 +68,7 @@ export function createPanel(scene, S, { onCamera, onAction }) {
           ? `${chip(e.status === 'active' ? 'bad' : 'ok', e.status === 'active' ? 'ДТП' : 'снято')} ${esc(e.street || e.edge)}`
           : `${chip('info', esc(e.unit))} ${UNIT_TEXT[e.status]} · от «${esc(e.from)}»` })),
         ...S.alerts.map((a) => ({ t: a.t, html: `${chip(a.level === 'alert' ? 'bad' : 'warn', 'прогноз')} ${esc(a.text)}` })),
-        ...S.cmd.map((c) => ({ t: c.t, html: `${chip('warn', 'пробка')} ${esc(c.street || c.cam)}: в среднем стоит ${c.queue0} ТС` })),
+        ...S.cmd.map((c) => ({ t: c.t, html: `${chip('warn', 'пробка')} ${esc(c.street || c.cam)}: очередь в среднем ${c.queue0} м` })),
       ].sort((a, b) => b.t - a.t).slice(0, 8);
       return `<div class="grid">
           ${kpi('проблем ждут решения', wait, wait ? 'warn' : '')}${kpi('активных происшествий', inc, inc ? 'bad' : '')}
@@ -100,7 +100,7 @@ export function createPanel(scene, S, { onCamera, onAction }) {
           const st = S.camStatus[c.id];
           return `<button class="item cam ${c.id === S.cam ? 'sel' : ''}" data-cam="${c.id}">
             <span><b>${c.id}</b> ${esc(c.name)} ${st === 'problem' ? chip('warn', 'проблема') : st === 'control' ? chip('ok', 'коррекция') : ''}</span>
-            <span>очередь ${queue} · ${n} ТС · ${speed} км/ч</span></button>`;
+            <span>очередь ${queue} м · ${n} ТС · ${speed} км/ч</span></button>`;
         }).join('')}`],
     emergency: ['Экстренные', () => {
       const inc = S.incidents(), dis = S.dispatches();
@@ -126,8 +126,8 @@ export function createPanel(scene, S, { onCamera, onAction }) {
         <div class="item">${chip(S.link ? 'ok' : 'bad', S.link ? 'связь есть' : 'связь отключена')}
           ${S.link ? 'Платформа продлевает действующие команды.' : 'Продлений нет: светофоры возвращаются к своему плану сами.'}</div>
         <div class="item">${chip('ok', 'решает человек')} Платформа только предлагает. Без решения оператора команда не уходит.</div>
-        <div class="item">${chip('ok', 'аренда')} Команда живёт 60 с и продлевается; пропала связь или платформа, оборудование само возвращается к плану.</div>
-        <div class="item">${chip('ok', 'пределы')} Зелёный только переносится между фазами (до 15 с), цикл не удлиняется, каждой фазе остаётся не меньше 15 с. Контроллер проверяет это сам.</div>
+        <div class="item">${chip('ok', 'аренда')} Команда живёт 3 минуты (два цикла светофора) и продлевается; пропала связь или платформа, оборудование само возвращается к базовому плану.</div>
+        <div class="item">${chip('ok', 'пределы')} Можно только выбрать один из планов, утверждённых инженером для этого перекрёстка. Произвольных таймингов нет; цикл не удлиняется, минимальный зелёный учитывает время перехода пешеходов.</div>
         <div class="item">${chip('ok', 'приватность')} Камеры отдают счётчики. Лица, номера и треки жителей не обрабатываются.</div>
         <div class="item">${chip('shadow', 'эмуляция')} Реальные светофоры не затронуты: оборудование в демо смоделировано.</div>
         <h4>Журнал аудита (цепочка хэшей)</h4>

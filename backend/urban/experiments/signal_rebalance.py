@@ -8,8 +8,8 @@ The scripted incident is switched off so only the signal policy differs.
 
 Two questions are measured:
   network   - mean time loss of all vehicles that entered the network (finished or not);
-  junctions - mean number of vehicles standing at the watched junctions, all approaches
-              together, so a gain for one direction paid for by another does not count as a gain.
+  junctions - mean total queue length at the watched junctions, all approaches together,
+              so a gain for one direction paid for by another does not count as a gain.
 
 Coverage: "cameras" uses the 8 demo cameras, "all" pretends every signalised junction has one.
 
@@ -26,13 +26,13 @@ import statistics
 import xml.etree.ElementTree as ET
 
 from .. import config as c
-from ..api.cameras import load_all_junctions, load_cameras
+from ..junctions import load_all_junctions, load_cameras
 from ..platform import Platform
 from ..sources import sumo
 
 REACTION = 10  # seconds the simulated operator needs to approve a proposal
 WARMUP = 300   # seconds excluded from the junction metric while the network fills up
-METRICS = {"loss": "Потери времени на машину, с", "local": "Стоящих машин у перекрёстков с камерами",
+METRICS = {"loss": "Потери времени на машину, с", "local": "Суммарная длина очередей у перекрёстков с датчиками, м",
            "finished": "Завершено поездок"}
 HIGHER_IS_BETTER = {"finished"}
 
@@ -97,10 +97,12 @@ def report(results: dict, args) -> str:
     lines = [
         "# Замер: помогает ли перераспределение зелёного",
         "",
-        "Правило: когда одно направление перекрёстка в среднем за цикл заметно загружено, а у поперечного",
-        "зелёный простаивает, платформа предлагает перенести 5–15 с зелёного от свободного к загруженному.",
-        "Длина цикла не меняется. Если все направления стоят, ничего не предлагается. Команда снимается раньше",
-        "срока, когда очередь ушла или начало страдать направление-донор.",
+        "Правило: когда на одном направлении перекрёстка в среднем за цикл стоит длинная очередь (от 40 м), а у",
+        "поперечного зелёный простаивает, платформа предлагает включить один из планов, утверждённых для этого",
+        "перекрёстка: +5, +10 или +15 с зелёного загруженному направлению за счёт свободного. Длина цикла не",
+        "меняется, минимальный зелёный учитывает переход пешеходов. Если все направления стоят, ничего не",
+        "предлагается. Команда снимается раньше срока, когда очередь ушла или начало страдать направление-донор.",
+        "Очередь измеряется в метрах, как её видит датчик; аренда команды 3 минуты, окно подтверждения 15 минут.",
         "",
         "Парный эксперимент в симуляции SUMO: одинаковый спрос и одинаковое зерно случайности прогоняются",
         f"дважды, без вмешательства и с применением всех предложений (оператор-имитация подтверждает через {REACTION} с).",
@@ -109,7 +111,7 @@ def report(results: dict, args) -> str:
         "Изменение считается явным, если оно больше двух стандартных ошибок; иначе это шум.",
         "",
     ]
-    names = {"cameras": "8 камер демо", "all": "камеры на всех регулируемых перекрёстках"}
+    names = {"cameras": "датчики только на 8 перекрёстках с камерами", "all": "датчики на всех регулируемых перекрёстках"}
     for coverage in args.coverages:
         lines += [f"## Покрытие: {names[coverage]}", "",
                   "| Спрос | Показатель | Без вмешательства | Изменение | ± ст. ошибка | Лучше в прогонах | Вывод |",

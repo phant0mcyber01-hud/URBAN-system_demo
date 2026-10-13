@@ -1,95 +1,105 @@
-"""Queue analysis at camera junctions: who is short of green and who has green to spare.
+"""Queue analysis at junctions: who is short of green and who has green to spare.
 
-A camera reports only aggregates: how many vehicles are standing on each approach.
-Standing counts swing with the signal cycle (queues build on red and discharge on green),
-so decisions use the mean over WINDOW seconds, about one cycle. For every green phase the
-demand is the mean number of vehicles standing on the approaches it serves.
+Input is what the sensors report: the length of the standing queue on each approach, in
+metres. Queue length swings with the signal cycle (it builds on red and discharges on
+green), so decisions use the mean over WINDOW seconds, about one cycle. The demand of a
+green phase is the longest queue among the approaches it serves: green time has to clear
+the critical approach.
 
 A problem is raised only when one phase is clearly overloaded AND another one has green to
-spare. If every direction is queued there is nothing to move, and nothing is proposed.
-No vehicle identity leaves this module.
+spare, and only if the junction has an approved plan for exactly that shift. The answer is
+the number of that plan, never a free-form timing.
 """
 from collections import defaultdict, deque
 
-STANDING_SPEED = 2.0  # m/s: slower than this counts as standing
-WINDOW = 90           # seconds of history, about one signal cycle
-LOADED_MIN = 5.0      # mean standing vehicles before a phase counts as overloaded
-RATIO, MARGIN = 2.0, 2.0  # overloaded means: demand >= RATIO * spare demand + MARGIN
-RELIEVED = 2.0        # demand below this: the queue is gone
-SHIFT_MIN, SHIFT_MAX = 5, 15  # seconds of green that may be moved
-DONOR_MIN_GREEN = 15  # seconds a controller keeps for any phase (sources/signals.MIN_GREEN): never ask for more
+WINDOW = 90            # seconds of history, about one signal cycle
+LOADED_MIN = 40.0      # metres: mean queue before a phase counts as overloaded (about five cars)
+LOADED_SHARE = 0.7     # ... or this share of the covered zone on short approaches
+RATIO, MARGIN = 2.0, 15.0  # overloaded means: demand >= RATIO * spare demand + MARGIN metres
+RELIEVED = 15.0        # metres: below this the queue is gone
+SHIFT_MIN, SHIFT_MAX = 5, 15  # seconds of green worth moving
 
 
 def shift_seconds(loaded: float, spare: float, green_loaded: float, green_spare: float) -> int:
-    """Half of the way towards green shared in proportion to demand, within what may be moved.
-
-    Returns 0 when the donor phase cannot give at least SHIFT_MIN without dropping below DONOR_MIN_GREEN.
-    """
-    available = min(SHIFT_MAX, green_spare - DONOR_MIN_GREEN)
-    if available < SHIFT_MIN:
-        return 0
+    """Half of the way towards green shared in proportion to demand, within the sensible range."""
     total = green_loaded + green_spare
     target = total * loaded / (loaded + spare) if loaded + spare else green_loaded
-    return max(SHIFT_MIN, min(available, round(0.5 * (target - green_loaded))))
+    return max(SHIFT_MIN, min(SHIFT_MAX, round(0.5 * (target - green_loaded))))
+
+
+def pick_plan(plans: list[dict], give: int, take: int, wanted: int) -> dict | None:
+    """The approved plan moving green from `take` to `give`: the largest shift not above `wanted`,
+    or the smallest one available."""
+    fitting = sorted((pl for pl in plans if pl.get("give") == give and pl.get("take") == take),
+                     key=lambda pl: pl["shift"])
+    if not fitting:
+        return None
+    not_above = [pl for pl in fitting if pl["shift"] <= wanted]
+    return not_above[-1] if not_above else fitting[0]
 
 
 class QueueMonitor:
-    def __init__(self, cameras: list[dict]):
-        """cameras: [{id, tls, name, approaches: [{id, name}], phases: [{index, duration, edges, streets}]}]"""
-        self.cameras = cameras
-        self._by_id = {cam["id"]: cam for cam in cameras}
+    def __init__(self, junctions: list[dict]):
+        """junctions: [{id, camera, tls, name, approaches: [{id, name, zone}],
+        phases: [{index, duration, edges, streets}], plans: [{id, give, take, shift}]}]"""
+        self.junctions = junctions
+        self._by_id = {j["id"]: j for j in junctions}
         self._hist: dict[tuple, deque] = defaultdict(lambda: deque(maxlen=WINDOW))
         self._sum: dict[tuple, float] = defaultdict(float)
-        self.demands: dict[str, dict[int, float]] = {}  # camera id -> demand per phase, refreshed by update()
+        self.demands: dict[str, dict[int, float]] = {}  # junction id -> mean queue metres per phase
+        self._loaded_min = {}
+        for j in junctions:
+            zone = {a["id"]: a.get("zone", 100.0) for a in j["approaches"]}
+            for ph in j.get("phases", []):
+                covered = max((zone.get(e, 100.0) for e in ph["edges"]), default=100.0)
+                self._loaded_min[(j["id"], ph["index"])] = min(LOADED_MIN, LOADED_SHARE * covered)
 
-    def demand(self, cam_id: str) -> dict[int, float]:
-        """Mean standing vehicles per green phase over the window ({} until the window is full)."""
-        cam = self._by_id.get(cam_id)
-        if cam is None:
+    def demand(self, junction_id: str) -> dict[int, float]:
+        """Mean queue metres per green phase over the window ({} until the window is full)."""
+        j = self._by_id.get(junction_id)
+        if j is None:
             return {}
         out = {}
-        for ph in cam.get("phases", []):
-            key = (cam_id, ph["index"])
+        for ph in j.get("phases", []):
+            key = (junction_id, ph["index"])
             if len(self._hist[key]) < WINDOW:
                 return {}
             out[ph["index"]] = self._sum[key] / WINDOW
         return out
 
-    def update(self, t: int, vehicles) -> tuple[dict, list[dict]]:
-        standing = defaultdict(int)
-        for v in vehicles:
-            if v.speed < STANDING_SPEED and not v.edge.startswith(":"):
-                standing[v.edge] += 1
-
+    def update(self, t: int, queues_m: dict[str, float]) -> tuple[dict, list[dict]]:
+        """queues_m: {approach edge id: queue metres} as reported by the sensors this second."""
         queues, problems = {}, []
-        for cam in self.cameras:
-            queues[cam["id"]] = {a["id"]: standing.get(a["id"], 0) for a in cam["approaches"]}
-            for ph in cam.get("phases", []):
-                key = (cam["id"], ph["index"])
+        for j in self.junctions:
+            queues[j["id"]] = {a["id"]: queues_m.get(a["id"], 0.0) for a in j["approaches"]}
+            for ph in j.get("phases", []):
+                key = (j["id"], ph["index"])
                 hist = self._hist[key]
                 if len(hist) == WINDOW:
                     self._sum[key] -= hist[0]
-                now = sum(standing.get(e, 0) for e in ph["edges"])
+                now = max((queues_m.get(e, 0.0) for e in ph["edges"]), default=0.0)
                 hist.append(now)
                 self._sum[key] += now
 
-            demand = self.demands[cam["id"]] = self.demand(cam["id"])
+            demand = self.demands[j["id"]] = self.demand(j["id"])
             if len(demand) < 2:
                 continue
-            phases = {ph["index"]: ph for ph in cam["phases"]}
+            phases = {ph["index"]: ph for ph in j["phases"]}
             give = max(demand, key=demand.get)
-            # the donor is the least loaded phase that still has green to give
-            donors = [i for i in demand if i != give and phases[i]["duration"] >= DONOR_MIN_GREEN + SHIFT_MIN]
-            if not donors:
+            # the donor is the least loaded phase the engineer allowed to give green to this one
+            donors = {pl["take"] for pl in j.get("plans", []) if pl.get("give") == give}
+            if not donors or demand[give] < self._loaded_min[(j["id"], give)]:
                 continue
             take = min(donors, key=demand.get)
-            seconds = shift_seconds(demand[give], demand[take], phases[give]["duration"], phases[take]["duration"])
-            if seconds and demand[give] >= LOADED_MIN and demand[give] >= RATIO * demand[take] + MARGIN:
-                problems.append({
-                    "cam": cam["id"], "camera": bool(cam.get("camera")), "tls": cam["tls"],
-                    "give": give, "take": take, "seconds": seconds,
-                    "street": ", ".join(phases[give]["streets"]) or cam["name"],
-                    "from_street": ", ".join(phases[take]["streets"]) or cam["name"],
-                    "queue": round(demand[give], 1), "other": round(demand[take], 1),
-                })
+            if demand[give] < RATIO * demand[take] + MARGIN:
+                continue
+            wanted = shift_seconds(demand[give], demand[take], phases[give]["duration"], phases[take]["duration"])
+            plan = pick_plan(j["plans"], give, take, wanted)
+            problems.append({
+                "cam": j["id"], "camera": bool(j.get("camera")), "tls": j["tls"],
+                "plan": plan["id"], "shift": plan["shift"], "give": give, "take": take,
+                "street": ", ".join(phases[give]["streets"]) or j["name"],
+                "from_street": ", ".join(phases[take]["streets"]) or j["name"],
+                "queue": round(demand[give]), "other": round(demand[take]),
+            })
         return queues, problems

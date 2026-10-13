@@ -1,21 +1,22 @@
 from urban.gateway import POLICY, CommandGateway
 from urban.gateway.audit import GENESIS, AuditLog
 
-POL = POLICY["tls.rebalance"]
+POL = POLICY["tls.select_plan"]
+APPROVED = {"J1": {0, 1, 2, 3}, "J2": {0, 1, 2, 3}, "J9": {0, 1}}
 
 
 def make():
     sent = []
-    return CommandGateway(sent.append), sent
+    return CommandGateway(sent.append, APPROVED), sent
 
 
-def propose(gw, t=0, tls="J1", seconds=10, give=0, take=2):
-    return gw.propose(t, "tls.rebalance", {"tls": tls, "cam": "CAM-01", "give": give, "take": take, "seconds": seconds,
-                                           "street": "Main", "from_street": "Side", "queue": 9.0, "other": 1.0}, "reason")
+def propose(gw, t=0, tls="J1", plan=2):
+    return gw.propose(t, "tls.select_plan", {"tls": tls, "cam": "CAM-01", "plan": plan, "shift": 10, "give": 0, "take": 2,
+                                             "street": "Main", "from_street": "Side", "queue": 62, "other": 8}, "reason")
 
 
-def applied(gw, p, t=1, seconds=10):
-    gw.on_equipment({"id": p["id"], "status": "applied", "seconds": seconds}, t)
+def applied(gw, p, t=1):
+    gw.on_equipment({"id": p["id"], "status": "applied", "plan": p["plan"]}, t)
 
 
 def test_audit_chain_links_and_detects_tampering():
@@ -34,19 +35,18 @@ def test_nothing_is_sent_without_an_operator_decision():
     assert sent == [] and gw.applied == 0
 
 
-def test_approval_sends_one_lease_and_renews_only_while_link_is_up():
+def test_approval_sends_the_plan_number_and_renews_only_while_link_is_up():
     gw, sent = make()
     p = propose(gw)
     gw.decide(p["id"], True, "operator", 0)
-    assert [m["op"] for m in sent] == ["lease"]
-    assert sent[0]["ttl"] == POL.lease_ttl and (sent[0]["give"], sent[0]["take"]) == (0, 2)
+    assert sent == [{"op": "lease", "id": p["id"], "tls": "J1", "plan": 2, "ttl": POL.lease_ttl}]
     applied(gw, p)
-    gw.tick(10, {})
+    gw.tick(POL.lease_ttl // 3 - 1, {})
     assert len(sent) == 1                      # too early to renew
-    gw.tick(25, {})
+    gw.tick(POL.lease_ttl // 3, {})
     assert len(sent) == 2                      # renewed
-    gw.set_link(False, "operator", 26)
-    gw.tick(60, {})
+    gw.set_link(False, "operator", POL.lease_ttl // 3 + 1)
+    gw.tick(POL.lease_ttl, {})
     assert len(sent) == 2                      # silence: equipment must revert by itself
 
 
@@ -59,13 +59,19 @@ def test_approval_window_ends_with_release():
     assert sent[-1] == {"op": "release", "id": p["id"]}
 
 
-def test_policy_clamps_and_blocks():
+def test_only_approved_plans_of_known_commands_can_be_proposed():
     gw, _ = make()
-    assert propose(gw, seconds=500)["seconds"] == POL.max_seconds
-    assert propose(gw) is None                                    # junction already has an open proposal
-    assert gw.propose(0, "power.shutdown", {"tls": "J2", "give": 0, "take": 2}, "x") is None
+    assert propose(gw, plan=7) is None                            # not in the table of this junction
     assert gw.audit.records[-1]["event"] == "denied"
-    assert propose(gw, tls="J3", give=0, take=0) is None          # needs two different phases
+    assert propose(gw, plan=0) is None                            # the base plan is not something to propose
+    assert propose(gw, tls="UNKNOWN", plan=1) is None
+    assert gw.propose(0, "power.shutdown", {"tls": "J2", "plan": 1}, "x") is None
+    assert propose(gw) is not None
+    assert propose(gw, plan=3) is None                            # junction already has an open proposal
+
+
+def test_a_gateway_without_a_plan_table_refuses_everything():
+    assert CommandGateway().propose(0, "tls.select_plan", {"tls": "J1", "plan": 1}, "x") is None
 
 
 def test_cooldown_after_finish_reject_or_expiry():
@@ -76,11 +82,11 @@ def test_cooldown_after_finish_reject_or_expiry():
     gw.on_equipment({"id": p["id"], "status": "reverted", "reason": "released"}, 100)
     assert propose(gw, t=120) is None
     q = propose(gw, t=100 + POL.cooldown)
-    gw.decide(q["id"], False, "operator", 200)
-    assert propose(gw, t=210) is None                             # a rejected junction is left alone
-    r = propose(gw, t=100 + POL.cooldown, tls="J9")
-    gw.tick(100 + POL.cooldown + POL.pending_ttl + 1, {})
-    assert r["status"] == "expired" and propose(gw, t=r["t"] + POL.pending_ttl + 2, tls="J9") is None
+    gw.decide(q["id"], False, "operator", 400)
+    assert propose(gw, t=410) is None                             # a rejected junction is left alone
+    r = propose(gw, t=0, tls="J9", plan=1)
+    gw.tick(POL.pending_ttl + 1, {})
+    assert r["status"] == "expired" and propose(gw, t=POL.pending_ttl + 2, tls="J9", plan=1) is None
 
 
 def test_rejection_holds_until_the_problem_clears():
