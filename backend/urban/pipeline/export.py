@@ -101,8 +101,8 @@ def export_network():
             continue
         cams.append(p)
 
-    def public(p, ident):
-        return {"id": ident, "name": p["name"], "target": p["target"], "tls": p["tls"],
+    def public(p, ident, camera):
+        return {"id": ident, "camera": camera, "name": p["name"], "target": p["target"], "tls": p["tls"],
                 "approaches": p["approaches"], "phases": p["phases"]}
 
     features = []
@@ -112,13 +112,13 @@ def export_network():
         ux, uy = (bx - ax) / d, (by - ay) / d
         features.append({
             "type": "Feature",
-            "properties": {**public(p, f"CAM-{i:02d}"), "bearing": round(math.degrees(math.atan2(ux, uy)) % 360)},
+            "properties": {**public(p, f"CAM-{i:02d}", True), "bearing": round(math.degrees(math.atan2(ux, uy)) % 360)},
             "geometry": {"type": "Point", "coordinates": ll(bx - ux * 35, by - uy * 35)},
         })
     dump("cameras.geojson", features)
 
     # all signalised junctions, for experiments with full camera coverage
     with_cam = {p["tls"]: f"CAM-{i:02d}" for i, p in enumerate(cams, 1)}
-    signals = [public(p, with_cam.get(p["tls"], f"J-{i:02d}")) for i, p in enumerate(plans, 1)]
+    signals = [public(p, with_cam.get(p["tls"], f"J-{i:02d}"), p["tls"] in with_cam) for i, p in enumerate(plans, 1)]
     (c.OUT / "signals.json").write_text(json.dumps(signals, ensure_ascii=False), encoding="utf-8")
     print(f"   signals.json: {len(signals)}")

@@ -5,8 +5,8 @@ from .. import config as c
 
 
 def _camera(p: dict) -> dict:
-    return {"id": p["id"], "lon": p["target"][0], "lat": p["target"][1], "tls": p.get("tls"), "name": p["name"],
-            "approaches": p.get("approaches", []), "phases": p.get("phases", [])}
+    return {"id": p["id"], "camera": bool(p.get("camera", True)), "lon": p["target"][0], "lat": p["target"][1],
+            "tls": p.get("tls"), "name": p["name"], "approaches": p.get("approaches", []), "phases": p.get("phases", [])}
 
 
 def load_cameras() -> list[dict]:

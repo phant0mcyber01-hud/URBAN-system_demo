@@ -87,7 +87,7 @@ export async function loadScene() {
   const pois = feats(poisFc).map(point).filter(visible);
   const cams = feats(camsFc).map(point);
   // signalised junctions that have a queue detector but no camera window
-  const detectors = (signals ?? []).filter((s) => !s.id.startsWith('CAM'))
+  const detectors = (signals ?? []).filter((s) => !s.camera)
     .map((s) => ({ id: s.id, name: s.name, p: s.target, v: vis(s.target) })).filter(visible);
 
   // street names: one label per name every ~450 m, along the street direction

@@ -37,20 +37,22 @@ class QueueMonitor:
     def __init__(self, cameras: list[dict]):
         """cameras: [{id, tls, name, approaches: [{id, name}], phases: [{index, duration, edges, streets}]}]"""
         self.cameras = cameras
+        self._by_id = {cam["id"]: cam for cam in cameras}
         self._hist: dict[tuple, deque] = defaultdict(lambda: deque(maxlen=WINDOW))
         self._sum: dict[tuple, float] = defaultdict(float)
+        self.demands: dict[str, dict[int, float]] = {}  # camera id -> demand per phase, refreshed by update()
 
     def demand(self, cam_id: str) -> dict[int, float]:
         """Mean standing vehicles per green phase over the window ({} until the window is full)."""
+        cam = self._by_id.get(cam_id)
+        if cam is None:
+            return {}
         out = {}
-        for cam in self.cameras:
-            if cam["id"] != cam_id:
-                continue
-            for ph in cam.get("phases", []):
-                key = (cam_id, ph["index"])
-                if len(self._hist[key]) < WINDOW:
-                    return {}
-                out[ph["index"]] = self._sum[key] / WINDOW
+        for ph in cam.get("phases", []):
+            key = (cam_id, ph["index"])
+            if len(self._hist[key]) < WINDOW:
+                return {}
+            out[ph["index"]] = self._sum[key] / WINDOW
         return out
 
     def update(self, t: int, vehicles) -> tuple[dict, list[dict]]:
@@ -71,7 +73,7 @@ class QueueMonitor:
                 hist.append(now)
                 self._sum[key] += now
 
-            demand = self.demand(cam["id"])
+            demand = self.demands[cam["id"]] = self.demand(cam["id"])
             if len(demand) < 2:
                 continue
             phases = {ph["index"]: ph for ph in cam["phases"]}
@@ -84,7 +86,8 @@ class QueueMonitor:
             seconds = shift_seconds(demand[give], demand[take], phases[give]["duration"], phases[take]["duration"])
             if seconds and demand[give] >= LOADED_MIN and demand[give] >= RATIO * demand[take] + MARGIN:
                 problems.append({
-                    "cam": cam["id"], "tls": cam["tls"], "give": give, "take": take, "seconds": seconds,
+                    "cam": cam["id"], "camera": bool(cam.get("camera")), "tls": cam["tls"],
+                    "give": give, "take": take, "seconds": seconds,
                     "street": ", ".join(phases[give]["streets"]) or cam["name"],
                     "from_street": ", ".join(phases[take]["streets"]) or cam["name"],
                     "queue": round(demand[give], 1), "other": round(demand[take], 1),

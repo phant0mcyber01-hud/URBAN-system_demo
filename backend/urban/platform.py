@@ -16,14 +16,14 @@ M_LAT = 111320.0
 class Platform:
     def __init__(self, center, radius, cameras=(), send=lambda msg: None):
         """center: [lon, lat], radius: metres,
-        cameras: [{id, lon, lat, tls, name, approaches: [{id, name}], phases: [{index, duration, edges, streets}]}],
+        cameras: [{id, camera, lon, lat, tls, name, approaches: [{id, name}], phases: [{index, duration, edges, streets}]}]
+                 (camera: True when the junction has a camera window, False for a bare queue detector),
         send: delivers a gateway message to the (emulated) equipment."""
         self.center, self.radius = center, radius
         self.m_lon = M_LAT * math.cos(math.radians(center[1]))
         self.cameras = list(cameras)
         self.camera_xy = [(c["id"], *self.local(c["lon"], c["lat"])) for c in self.cameras]
         self.gateway = CommandGateway(send)
-        self.monitor = QueueMonitor(self.cameras)
         self.queues, self.last_cmd_version, self._logged = {}, -1, 0
         self._reset()
         self.t = -1
@@ -79,12 +79,10 @@ class Platform:
         for pr in problems:
             self.gateway.propose(
                 t, "tls.rebalance", pr,
-                f"{'камера' if pr['cam'].startswith('CAM') else 'детектор'} {pr['cam']}: "
+                f"{'камера' if pr['camera'] else 'детектор'} {pr['cam']}: "
                 f"в среднем стоит {pr['queue']} ТС, у поперечного направления {pr['other']}")
-        demand = {}
-        for cam in self.cameras:
-            for phase, value in self.monitor.demand(cam["id"]).items():
-                demand[(cam["tls"], phase)] = value
+        demand = {(cam["tls"], phase): value
+                  for cam in self.cameras for phase, value in self.monitor.demands.get(cam["id"], {}).items()}
         self.gateway.tick(t, demand)
         # going back to the base plan needs nobody's approval: release as soon as it stops helping
         for p in list(self.gateway.proposals.values()):

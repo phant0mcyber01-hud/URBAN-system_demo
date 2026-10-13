@@ -2,7 +2,7 @@ from urban.analytics.queues import LOADED_MIN, WINDOW, QueueMonitor, shift_secon
 from urban.core.events import Vehicle
 from urban.platform import Platform
 
-CAM = {"id": "CAM-01", "lon": 71.785, "lat": 40.385, "tls": "J1", "name": "Crossing",
+CAM = {"id": "CAM-01", "camera": True, "lon": 71.785, "lat": 40.385, "tls": "J1", "name": "Crossing",
        "approaches": [{"id": "e1", "name": "Main street"}, {"id": "e2", "name": "Side street"}],
        "phases": [{"index": 0, "duration": 40, "edges": ["e1"], "streets": ["Main street"]},
                   {"index": 2, "duration": 40, "edges": ["e2"], "streets": ["Side street"]}]}
@@ -78,6 +78,15 @@ def test_platform_turns_imbalance_into_a_pending_proposal_and_sends_nothing():
     assert len(cmds) == 1 and (cmds[0]["give"], cmds[0]["take"], cmds[0]["tls"]) == (0, 2, "J1")
     assert sent == [] and p.gateway.applied == 0
     assert out["cams"]["CAM-01"][2] == 10 and out["cmd"][0]["status"] == "pending"
+    assert cmds[0]["reason"].startswith("камера CAM-01")
+    assert p.monitor.demands["CAM-01"] == {0: 10.0, 2: 1.0}
+
+
+def test_bare_detector_is_labelled_as_one():
+    det = {**CAM, "id": "J-07", "camera": False}
+    p = Platform([71.785, 40.385], 1200, [det])
+    feed(lambda t, v: p.handle(frame(t, v)), standing(10, 1))
+    assert p.gateway.public()[0]["reason"].startswith("детектор J-07")
 
 
 def approve_and_apply(p, vehicles):
