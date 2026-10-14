@@ -29,6 +29,18 @@ const END_REASON = {
 
 const when = (at) => (at ? new Date(at * 1000).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—');
 const RUN_MODE = { simulation: 'симуляция', field: 'оборудование' };
+// the copy of the audit log outside this server: without one, a rebuilt chain cannot be told from the real one
+const exportItem = (e) => {
+  if (!e || !e.sinks.length) {
+    return `<div class="item">${chip('warn', 'нет внешней копии')} Журнал хранится только на этом сервере.
+      <br><small>Задайте <code>AUDIT_EXPORT</code> (файл на другом диске) или <code>AUDIT_SYSLOG</code> (сборщик журналов) в <code>.env</code>.</small></div>`;
+  }
+  const bad = e.sinks.filter((s) => s.error);
+  return `<div class="item">${chip(bad.length ? 'bad' : 'ok', bad.length ? 'копия отстаёт' : 'внешняя копия')}
+    ${e.sinks.map((s) => `<code>${esc(s.name)}</code>: ${s.error ? esc(s.error) : `до записи #${s.seq ?? '…'}`}`).join('<br>')}
+    <br><small>${e.checkpoint ? `Последняя подписанная контрольная точка: запись #${e.checkpoint.seq}, ${when(e.checkpoint.at)}.` : 'Подписанных контрольных точек ещё нет.'}
+    Проверка копии: <code>python -m urban.export verify</code>.</small></div>`;
+};
 
 export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
   const shadowList = (filter, n = 6) => {
@@ -192,6 +204,7 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
           ${ok ? `${h.chain.records ? `Журнал проверен от записи #1 до #${h.chain.records} (последняя проверка ${when(h.chain.checked)})` : 'Журнал начат при этом запуске'}; полная проверка повторяется каждые 15 минут, цепочка хэшей продолжается между перезапусками.`
             : ok === false ? `Нарушение на записи #${h.chain.broken_at}: файл истории изменяли в обход платформы.` : 'Полная проверка цепочки идёт в фоне после запуска.'}
           <br><small>Хранится в <code>data/urban.db</code> (SQLite): журнал, команды, здоровье устройств и очереди раз в минуту.</small></div>
+        ${exportItem(h.export)}
         <h4>Команды</h4>
         ${h.commands.length ? h.commands.map((c) => {
           const [cls, label] = CMD_STATUS[c.status] ?? ['info', c.status];

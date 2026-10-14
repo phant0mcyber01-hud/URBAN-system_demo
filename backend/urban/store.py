@@ -91,6 +91,12 @@ class Store:
                             (rec["seq"], self.run, rec.get("at", self.clock()), rec["event"], rec["actor"],
                              str(rec["ref"]), str(rec["target"]), json.dumps(rec, ensure_ascii=False)))
 
+    def audit_after(self, seq: int, limit: int = 500) -> list[dict]:
+        """Records with a higher sequence number, oldest first: what an exporter has not shipped yet."""
+        with self.lock:
+            rows = self.db.execute("SELECT data FROM audit WHERE seq > ? ORDER BY seq LIMIT ?", (seq, limit)).fetchall()
+        return [json.loads(r[0]) for r in rows]
+
     def audit_page(self, before: int | None = None, limit: int = 100) -> list[dict]:
         """Newest first; `before` is a seq to page from."""
         with self.lock:

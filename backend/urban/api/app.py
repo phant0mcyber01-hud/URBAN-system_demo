@@ -42,6 +42,7 @@ from ..junctions import approved_plans, load_all_junctions, load_cameras
 from ..platform import Platform
 from ..sources import clock, sumo
 from ..sources.field import FieldEmulator
+from ..export import Exporter, sinks_from_env
 from ..store import Store
 
 FIELD = c.SOURCE == "field"  # real units, no simulation, no demo fleet, no field link
@@ -64,6 +65,7 @@ hub = DeviceHub(Registry(c.PKI / "devices.json"), crypto.load_private((c.PKI / "
                 plans=approved_plans(junctions))
 store = Store(c.DB, mode=c.SOURCE, retention_days=c.HISTORY_DAYS)
 platform = Platform(meta["center"], meta["radius"], junctions, send=hub.send, reachable=hub.online, store=store)
+exporter = Exporter(store, crypto.load_private((c.PKI / "audit.key").read_text()), sinks_from_env(c.DATA))
 clients: set[WebSocket] = set()
 
 
@@ -125,9 +127,14 @@ async def lifespan(_):
     threading.Thread(target=source_thread, args=(field.loop, stop), daemon=True).start()
     watchdog = asyncio.create_task(edge_watchdog(stop)) if SPAWN_EDGE else None
     checker = asyncio.create_task(chain_checker())
+    shipper = asyncio.create_task(exporter.loop()) if exporter.sinks else None
+    print(f"  Audit copy: {', '.join(s.name for s in exporter.sinks)}" if exporter.sinks
+          else "  Audit copy: none (set AUDIT_EXPORT or AUDIT_SYSLOG in .env)", flush=True)
     yield
     stop.set()
     checker.cancel()
+    if shipper is not None:
+        shipper.cancel()
     if watchdog is not None:
         watchdog.cancel()
 
@@ -362,7 +369,8 @@ def audit(who: str = Depends(viewer)):
 # ---- history: what the store kept across restarts; all read-only ----
 @app.get("/api/history")
 def history(who: str = Depends(viewer)):
-    return {"counts": store.counts(), "run": store.run, "chain": store.audit_check(), "runs": store.runs(10)}
+    return {"counts": store.counts(), "run": store.run, "chain": store.audit_check(), "runs": store.runs(10),
+            "export": exporter.status()}
 
 
 @app.get("/api/history/commands")

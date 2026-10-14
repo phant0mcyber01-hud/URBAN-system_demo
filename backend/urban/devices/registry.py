@@ -168,6 +168,11 @@ def provision(junctions: list[dict], pki: Path, host: str | None = None, demo_de
         else:
             print(f"pki: the server certificate does not cover {host!r} and ca.key is not here to reissue it; "
                   f"bring ca.key back or start a new pki folder (devices then need the new ca.pem)", flush=True)
+    if not (pki / "audit.key").exists():  # signs checkpoints of the audit log that leave the server
+        key = crypto.new_key()
+        (pki / "audit.key").write_text(crypto.private_hex(key))
+        (pki / "audit.pub").write_text(crypto.public_hex(key))
+        created = True
     if not (pki / "gateway.key").exists():
         key = crypto.new_key()
         (pki / "gateway.key").write_text(crypto.private_hex(key))
