@@ -22,16 +22,19 @@ HELLO_TIMEOUT = 10  # seconds a connection may stay unauthenticated
 
 class DeviceHub:
     def __init__(self, registry: Registry, gateway_key, on_report, clock=lambda: 0, wall=time.time,
-                 plans: dict[str, set[int]] | None = None):
+                 plans: dict[str, set[int]] | None = None, gateway_cert: dict | None = None):
         """on_report(device record, report dict); clock(): platform time sent in the welcome;
         wall(): wall-clock seconds stamped into every command, so a device can refuse stale ones;
-        plans: tls id -> approved plan ids, handed to each unit at session start (its junction passport)."""
+        plans: tls id -> approved plan ids, handed to each unit at session start (its junction passport);
+        gateway_cert: the root's certificate for gateway_key, presented at session start (devices/trust.py)."""
         self.plans = plans or {}
+        self.gateway_cert = gateway_cert
         self.registry, self.key, self.on_report, self.clock, self.wall = registry, gateway_key, on_report, clock, wall
         self.sessions: dict[str, WebSocket] = {}
         self.seen: dict[str, dict] = {}  # device id -> {"at": wall time, "health": {...}}
         self.connects: dict[str, int] = {}  # device id -> sessions since the platform started
         self._stale: set[str] = set()  # sessions opened on a key or status that has since changed
+        self.epochs: dict[str, int | None] = {}  # device id -> gateway key epoch it trusted when it connected
         self._seq = time.time_ns() // 1_000_000  # survives restarts without going backwards
 
     # ---- towards devices: this is gateway.send
@@ -85,12 +88,17 @@ class DeviceHub:
             self.sessions[device] = ws
             self.connects[device] = self.connects.get(device, 0) + 1
             self.seen[device] = self.reconnected(device, hello.get("version"))
+            epoch = hello.get("epoch")
+            self.epochs[device] = epoch if isinstance(epoch, int) else None
             await ws.send_text(json.dumps({"type": "welcome", "t": self.clock(), "tls": rec["tls"],
-                                           "plans": sorted(self.plans.get(rec["tls"], ()))}))
+                                           "plans": sorted(self.plans.get(rec["tls"], ())),
+                                           "gateway": self.gateway_cert}))
             while True:
                 report = json.loads(await ws.receive_text())
                 if isinstance(report, dict) and report.get("type") == "report":
                     self.seen[device] = {"at": time.time(), "health": clean(report.get("health"))}
+                    if isinstance(report.get("epoch"), int) and not isinstance(report["epoch"], bool):
+                        self.epochs[device] = report["epoch"]  # the gateway key epoch the unit obeys now
                     self.on_report(rec, report)
         except (WebSocketDisconnect, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError):
             pass  # the usual ends of a session: gone, silent, or talking nonsense
@@ -146,6 +154,7 @@ class DeviceHub:
             out.append({"id": rec["id"], "junction": rec["junction"], "tls": rec["tls"], "name": rec.get("name", ""),
                         "serial": rec.get("serial", ""), "enrolled": rec.get("enrolled", ""),
                         "fingerprint": crypto.fingerprint(rec["public_key"]),
+                        "gateway_epoch": self.epochs.get(rec["id"]),
                         "status": rec["status"], "online": rec["id"] in self.sessions,
                         "connects": self.connects.get(rec["id"], 0),
                         "age": round(now - seen["at"]) if "at" in seen else None,

@@ -9,6 +9,8 @@ and the controller in each cabinet.
 One real unit, on its own computer in a cabinet (the platform in field mode):
     python -m urban.edge --unit edge-J-21 --platform city.example:8443 --adapter relay --controller /dev/ttyUSB0
     python -m urban.edge --unit edge-J-21 --platform city.example:8443 --adapter ntcip --controller 192.168.10.2:161
+Trust: the unit carries the platform's ca.pem (whose TLS it accepts) and root.pub (whose gateway key it
+obeys; the key itself comes in a certificate at session start, and rotations follow, never back).
 Before the first start the unit makes its own key; only the public half leaves it:
     python -m urban.edge --keygen --unit edge-J-21 [--pki /etc/urban/pki]
 and the administrator enrols that public key on the platform (python -m urban.provision enroll ...).
@@ -53,6 +55,7 @@ class Fleet:
     def __init__(self, only: str | None):
         junctions = [j for j in load_all_junctions() if only in (None, j["id"])]
         gateway_public = crypto.load_public((c.PKI / "gateway.pub").read_text())
+        root_public = crypto.load_public((c.PKI / "root.pub").read_text()) if (c.PKI / "root.pub").exists() else None
         self.field_ws = None
         adapter = FieldAdapter(self.field_send, approved_plans(junctions))
         self.devices = {}
@@ -65,7 +68,8 @@ class Fleet:
             key = crypto.load_private((c.PKI / "edge" / f"{ident}.key").read_text())
             self.devices[j["tls"]] = EdgeDevice(ident, j["tls"], key, gateway_public, adapter,
                                                 state_path=c.PKI / "edge" / f"{ident}.seq",
-                                                script=scripts.get(j["tls"]))
+                                                script=scripts.get(j["tls"]), root_public=root_public,
+                                                gateway_state=c.PKI / "edge" / f"{ident}.gateway.json")
         self.field_token = (c.PKI / "field.token").read_text().strip()  # the demo cable has a lock on it
         self.sessions: dict[str, object] = {}  # device id -> open websocket to the platform
         self.tls_context = ssl.create_default_context(cafile=str(c.PKI / "ca.pem"))  # pin our CA, nothing else
@@ -206,10 +210,16 @@ class Unit:
         pki = Path(args.pki)
         self.id = args.unit
         key = crypto.load_private(Path(args.key or pki / "edge" / f"{self.id}.key").read_text())
-        gateway_public = crypto.load_public(Path(args.gateway_pub or pki / "gateway.pub").read_text())
+        gw_path = Path(args.gateway_pub or pki / "gateway.pub")
+        gateway_public = crypto.load_public(gw_path.read_text()) if gw_path.exists() else None
+        root_path = Path(args.root or pki / "root.pub")
+        root_public = crypto.load_public(root_path.read_text()) if root_path.exists() else None
+        if gateway_public is None and root_public is None:
+            raise SystemExit(f"neither {root_path} nor {gw_path}: the unit would not know whose commands to obey")
         self.adapter = make_adapter(args)
         self.dev = EdgeDevice(self.id, args.junction, key, gateway_public, self.adapter,
-                              state_path=Path(args.state or pki / "edge" / f"{self.id}.seq"))
+                              state_path=Path(args.state or pki / "edge" / f"{self.id}.seq"),
+                              root_public=root_public, gateway_state=pki / "edge" / f"{self.id}.gateway.json")
         self.sensors = Path(args.sensors) if args.sensors else None
         self.url = f"wss://{args.platform}/device"
         self.server_name = args.server_name
@@ -240,11 +250,13 @@ class Unit:
                     if not isinstance(welcome, dict) or welcome.get("type") != "welcome":
                         raise ConnectionError("not welcome")
                     if not self.dev.on_welcome(welcome):
-                        print(f"edge: the platform enrols {self.id} for junction {welcome.get('tls')}, "
-                              f"this unit is configured for {self.dev.tls}: refusing to work", flush=True)
+                        why = getattr(self.dev, "refused", None) or (
+                            f"the platform enrols {self.id} for junction {welcome.get('tls')}, "
+                            f"this unit is configured for {self.dev.tls}")
+                        print(f"edge: {why}: refusing to work", flush=True)
                         raise SystemExit
                     print(f"edge: {self.id} online at {self.dev.tls}, approved plans "
-                          f"{sorted(self.adapter.plans(self.dev.tls))}", flush=True)
+                          f"{sorted(self.adapter.plans(self.dev.tls))}, gateway key epoch {self.dev.trust.epoch}", flush=True)
                     self.ws = ws
                     async for text in ws:
                         msg = json.loads(text)
@@ -281,6 +293,7 @@ def keygen(args):
     print(f"public key:  {public}")
     print(f"fingerprint: {crypto.fingerprint(public)}")
     print(f"on the platform: python -m urban.provision enroll {args.unit} --junction <id> --public {public}")
+    print("this unit also needs the platform's ca.pem and root.pub next to its key")
 
 
 def main():
@@ -302,7 +315,7 @@ def main():
     ap.add_argument("--backup-time", type=int, default=180, help="ntcip: unitBackupTime set before the first plan, seconds")
     ap.add_argument("--sensors", help="JSON file {approach id: metres} rewritten by the camera pipeline")
     ap.add_argument("--pki", default=str(c.PKI), help="folder with ca.pem, gateway.pub and edge/<unit>.key")
-    for name in ("--key", "--ca", "--gateway-pub", "--state"):
+    for name in ("--key", "--ca", "--gateway-pub", "--root", "--state"):
         ap.add_argument(name)
     args = ap.parse_args()
     if args.keygen:

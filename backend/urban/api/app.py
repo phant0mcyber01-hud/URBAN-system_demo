@@ -60,9 +60,10 @@ FIRST_PASSWORD = accounts.bootstrap()
 bus = Bus()
 field = FieldEmulator(FIELD_TOKEN)
 meta = json.loads((c.OUT / "meta.json").read_text())
+GATEWAY_CERT = json.loads((c.PKI / "gateway.cert.json").read_text())
 hub = DeviceHub(Registry(c.PKI / "devices.json"), crypto.load_private((c.PKI / "gateway.key").read_text()),
                 on_report=lambda rec, report: platform.on_report(rec["tls"], report), clock=lambda: platform.t,
-                plans=approved_plans(junctions))
+                plans=approved_plans(junctions), gateway_cert=GATEWAY_CERT)
 store = Store(c.DB, mode=c.SOURCE, retention_days=c.HISTORY_DAYS)
 platform = Platform(meta["center"], meta["radius"], junctions, send=hub.send, reachable=hub.online, store=store)
 exporter = Exporter(store, crypto.load_private((c.PKI / "audit.key").read_text()), sinks_from_env(c.DATA))
@@ -120,6 +121,14 @@ async def lifespan(_):
         print(f"\n  Accounts: {len(accounts.users)} (manage with python -m urban.users)", flush=True)
     print(f"  History: {c.DB.name}, run #{store.run}, audit chain {store.chain['records']} records; "
           f"the full check runs in the background and every {CHAIN_CHECK // 60} min", flush=True)
+    marker = c.DATA / "gateway.epoch"
+    seen = int(marker.read_text()) if marker.exists() else None
+    if seen != GATEWAY_CERT["epoch"]:
+        if seen is not None:
+            platform.gateway.audit.append(platform.t, "gateway-key-rotated", "-", "-", f"epoch {GATEWAY_CERT['epoch']}",
+                                          crypto.fingerprint(GATEWAY_CERT["gateway"]), actor="provision", mode="approval")
+        marker.write_text(str(GATEWAY_CERT["epoch"]))
+    print(f"  Gateway key: epoch {GATEWAY_CERT['epoch']}, {crypto.fingerprint(GATEWAY_CERT['gateway'])}", flush=True)
     print("  Mode: FIELD: no simulation, waiting for real URBAN Edge units\n" if FIELD
           else "  Mode: simulation (SUMO), demo Edge fleet\n", flush=True)
     field.loop = asyncio.get_running_loop()

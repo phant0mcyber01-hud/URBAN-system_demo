@@ -157,7 +157,7 @@ def test_release_reaches_the_device_and_the_lease_still_expires_without_the_plat
 def test_reports_carry_aggregates_and_health_but_nothing_else(pki):
     _, _, dev, _ = make(pki)
     report = dev.report({"e1": 42.0})
-    assert set(report) == {"type", "t", "queues", "events", "health"}
+    assert set(report) == {"type", "t", "queues", "events", "health", "epoch"}  # epoch: which gateway key it obeys
     assert report["queues"] == {"e1": 42.0} and report["health"]["version"]
 
 

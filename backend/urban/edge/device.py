@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 from ..devices import crypto
+from ..devices.trust import GatewayTrust
 from ..equipment.adapter import ControllerAdapter
 from ..equipment.edge import EdgeController
 
@@ -24,11 +25,16 @@ MAX_SKEW = 30  # seconds between the issue time of a command and the clock of th
 
 class EdgeDevice:
     def __init__(self, device_id: str, tls: str | None, key, gateway_public, adapter: ControllerAdapter,
-                 state_path: Path | None = None, wall=time.time, script: dict | None = None):
+                 state_path: Path | None = None, wall=time.time, script: dict | None = None,
+                 root_public=None, gateway_state: Path | None = None):
         """tls: the junction this unit is installed at, or None to take it from the platform's welcome;
+        gateway_public: gateway.pub, or None for a unit that takes the gateway key from the root's certificate;
         state_path: where the last accepted sequence number is kept; wall(): wall-clock seconds;
-        script: demo faults, e.g. {"heat": (120, 540)} or {"door": (420, 500)} in simulation seconds."""
-        self.id, self.tls, self.key, self.gateway_public = device_id, tls, key, gateway_public
+        script: demo faults, e.g. {"heat": (120, 540)} or {"door": (420, 500)} in simulation seconds;
+        root_public: the installed root key, to follow gateway key rotations (devices/trust.py);
+        gateway_state: where the accepted gateway certificate is kept."""
+        self.id, self.tls, self.key = device_id, tls, key
+        self.trust = GatewayTrust(root_public, gateway_public, gateway_state)
         self.adapter = adapter
         self.controller = EdgeController(adapter)
         self.script = script or {}
@@ -45,13 +51,22 @@ class EdgeDevice:
         self._temp = 38.0 + random.random() * 6
 
     # ---- session
+    @property
+    def gateway_public(self):
+        return self.trust.public
+
     def hello(self, nonce: str) -> dict:
-        return {"type": "hello", "device": self.id, "version": VERSION,
+        return {"type": "hello", "device": self.id, "version": VERSION, "epoch": self.trust.epoch,
                 "sig": crypto.sign(self.key, {"device": self.id, "nonce": nonce})}
 
     def on_welcome(self, msg: dict) -> bool:
         """The platform states which junction this unit is enrolled for and which plans are approved
-        there (the junction passport). A unit configured for another junction refuses to work."""
+        there (the junction passport), and presents its gateway certificate. A unit configured for another
+        junction, or offered a gateway key it cannot trust, refuses to work."""
+        why = self.trust.offer(msg.get("gateway"))
+        if why:
+            self.refused = why
+            return False
         tls = msg.get("tls")
         if self.tls is None and isinstance(tls, str) and tls:
             self.tls = tls
@@ -80,6 +95,8 @@ class EdgeDevice:
             body = env["body"]
         except (KeyError, TypeError):
             return "malformed command"
+        if self.gateway_public is None:
+            return "no gateway key yet"
         if not crypto.verify(self.gateway_public, signed, str(env.get("sig"))):
             return "bad signature"
         if signed["device"] != self.id:
@@ -110,7 +127,7 @@ class EdgeDevice:
         door = self.script.get("door")
         door_open = door is not None and door[0] <= self.clock < door[1]
         events, self.outbox = self.outbox, []
-        return {"type": "report", "t": self.clock, "queues": queues, "events": events,
+        return {"type": "report", "t": self.clock, "queues": queues, "events": events, "epoch": self.trust.epoch,
                 "health": {"version": VERSION, "temp": round(self._temp, 1), "door": "open" if door_open else "closed",
                            "controller": getattr(self.adapter, "last_error", None) or "ok",
                            "leases": len(self.controller.leases), "uptime": round(time.monotonic() - self.started)}}

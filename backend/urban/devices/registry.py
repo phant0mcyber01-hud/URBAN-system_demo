@@ -17,7 +17,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from . import crypto
+from . import crypto, trust
 
 ACTIVE, REVOKED = "active", "revoked"
 
@@ -178,6 +178,7 @@ def provision(junctions: list[dict], pki: Path, host: str | None = None, demo_de
         (pki / "gateway.key").write_text(crypto.private_hex(key))
         (pki / "gateway.pub").write_text(crypto.public_hex(key))
         created = True
+    created |= trust.ensure(pki)  # root key and the gateway certificate, see devices/trust.py
 
     path = pki / "devices.json"
     devices = {d["id"]: d for d in json.loads(path.read_text(encoding="utf-8"))} if path.exists() else {}

@@ -1,6 +1,7 @@
 """The platform without a simulation: a clock as the source, queues from device reports."""
 import threading
 
+from urban.devices.trust import GatewayTrust
 from urban.edge.device import EdgeDevice
 from urban.equipment.adapter import AdapterError, NoController
 from urban.equipment.edge import EdgeController
@@ -40,7 +41,7 @@ def test_platform_runs_on_device_reports_alone():
 def test_unit_learns_its_plans_from_the_platform():
     adapter = NoController()
     dev = EdgeDevice.__new__(EdgeDevice)
-    dev.adapter, dev.tls = adapter, "tls1"
+    dev.adapter, dev.tls, dev.trust = adapter, "tls1", GatewayTrust()  # a unit without rotation support
     dev.on_welcome({"type": "welcome", "tls": "tls1", "plans": [0, 2, "3", "x"]})
     assert adapter.plans("tls1") == {0, 2, 3}
     dev.on_welcome({"type": "welcome", "tls": "other", "plans": [9]})  # not my junction: ignored

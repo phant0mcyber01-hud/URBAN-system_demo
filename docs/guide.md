@@ -232,6 +232,7 @@ URBAN смотрит на перекрёстки через камеры и де
 | `python -m urban.users list \| add <имя> --role operator \| password <имя> \| disable <имя> \| enable <имя> \| mfa-reset <имя>` | учётные записи |
 | `python -m urban.provision [--host имя]` | ключи, сертификаты, реестр блоков; сертификат слушателя на имя хоста |
 | `python -m urban.export verify <копия> [--db data/urban.db]` | проверить внешнюю копию журнала и сверить с ней базу |
+| `python -m urban.provision rotate-gateway [--root путь/к/root.key]` | новый ключ шлюза со следующей эпохой; затем перезапустить платформу |
 | `python -m urban.edge --keygen --unit edge-J-21` (на блоке) | создать ключ блока; печатает открытый ключ и отпечаток |
 | `python -m urban.provision enroll edge-J-21 --junction J-21 --public <hex>` / `list` | учесть открытый ключ блока; список блоков с отпечатками |
 | `python -m urban.edge` / `--only J-21` | демо-блоки отдельно (`URBAN_EDGE=manual` для платформы) |
