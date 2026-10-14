@@ -48,7 +48,7 @@ FIELD = c.SOURCE == "field"  # real units, no simulation, no demo fleet, no fiel
 SPAWN_EDGE = os.getenv("URBAN_EDGE", "auto") != "manual" and not FIELD  # manual: start `python -m urban.edge` yourself
 
 junctions = load_all_junctions() or load_cameras()
-provision(junctions, c.PKI)  # demo convenience: a deployment enrols devices one by one
+provision(junctions, c.PKI, host=c.DEVICE_NAME)  # demo convenience: a deployment enrols devices one by one
 FIELD_TOKEN = secrets.token_urlsafe(24)  # new on every start; the Edge process reads it from the pki folder
 (c.PKI / "field.token").write_text(FIELD_TOKEN)
 

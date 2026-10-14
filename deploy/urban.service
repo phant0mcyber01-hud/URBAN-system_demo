@@ -1,0 +1,22 @@
+[Unit]
+Description=URBAN city platform
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=urban
+Group=urban
+WorkingDirectory=/opt/urban
+ExecStart=/opt/urban/.venv/bin/python -m urban
+Restart=always
+RestartSec=3
+# the process writes only under data/ (history, accounts, keys, the field token)
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/urban/data
+PrivateTmp=true
+PrivateDevices=true
+
+[Install]
+WantedBy=multi-user.target

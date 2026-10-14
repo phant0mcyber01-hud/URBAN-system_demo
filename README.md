@@ -8,7 +8,7 @@
 
 ![статус](https://img.shields.io/badge/статус-демо--макет-8a63d2)
 ![python](https://img.shields.io/badge/python-3.11+-3776ab)
-![tests](https://img.shields.io/badge/тесты-90%20проходят-2ea44f)
+![tests](https://img.shields.io/badge/тесты-92%20проходят-2ea44f)
 ![пилот](https://img.shields.io/badge/пилот-Фергана-5cc8ff)
 
 ![Центр управления: платформа нашла перекос на перекрёстке, оператор применил перенос зелёного](docs/img/control.png)
@@ -148,6 +148,12 @@ python -m urban.edge --unit edge-J-21 --platform host:8443 --adapter relay --con
 Учётные записи: из интерфейса (администратор, кнопка «Учётные записи») или `python -m urban.users add <имя> --role operator`.
 
 </details>
+
+## Развёртывание
+
+Сервер внутри страны, без Docker: `systemd` + `nginx` (TLS для операторов) + прямой TLS-порт 8443 для устройств.
+Файлы и пошаговая инструкция в [deploy/](deploy/README.md): установка, `.env` сервера, сертификат на имя хоста,
+выпуск ключей блоков, резервные копии истории и учётных записей, обновление.
 
 ## Что есть в интерфейсе
 

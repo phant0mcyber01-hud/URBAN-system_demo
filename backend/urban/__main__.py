@@ -1,7 +1,8 @@
 """Run the platform:  python -m urban
 
-Two listeners in one process: the UI and API on plain HTTP for this machine, and the device
-endpoint on TLS. The Edge units are started as a separate process (see urban.edge).
+Two listeners in one process: the UI and API on plain HTTP (for this machine, or for a reverse
+proxy on a server), and the device endpoint on TLS. Addresses come from .env: HOST, PORT,
+DEVICE_HOST, DEVICE_PORT. The Edge units are a separate process (see urban.edge).
 """
 import asyncio
 
@@ -11,9 +12,9 @@ from . import config as c
 
 
 async def serve():
-    ui = uvicorn.Server(uvicorn.Config("urban.api.app:app", host="127.0.0.1", port=c.PORT))
+    ui = uvicorn.Server(uvicorn.Config("urban.api.app:app", host=c.HOST, port=c.PORT))
     devices = uvicorn.Server(uvicorn.Config(
-        "urban.api.app:device_app", host="127.0.0.1", port=c.DEVICE_PORT, log_level="warning",
+        "urban.api.app:device_app", host=c.DEVICE_HOST, port=c.DEVICE_PORT, log_level="warning",
         ssl_certfile=str(c.PKI / "server.pem"), ssl_keyfile=str(c.PKI / "server.key")))
     await asyncio.gather(ui.serve(), devices.serve())
 

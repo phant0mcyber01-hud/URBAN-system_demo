@@ -55,40 +55,66 @@ def save(path: Path, devices: dict[str, dict]):
 
 # ---------------------------------------------------------------- demo provisioning
 
-def _write_tls(pki: Path):
-    """A private CA and a server certificate for localhost: devices pin the CA."""
+def server_names(pki: Path) -> set[str]:
+    """Host names on the device listener's certificate."""
+    cert = x509.load_pem_x509_certificate((pki / "server.pem").read_bytes())
+    try:
+        san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+    except x509.ExtensionNotFound:
+        return set()
+    return set(san.get_values_for_type(x509.DNSName))
+
+
+def _write_tls(pki: Path, host: str | None = None):
+    """A private CA (kept, if one exists) and a server certificate for localhost and `host`: devices pin the CA.
+    The CA key stays in ca.key so the server certificate can be reissued for a new host name; in a
+    deployment it is moved off the server once the certificate is issued."""
     now = datetime.datetime.now(datetime.timezone.utc)
-    ca_key = ec.generate_private_key(ec.SECP256R1())
-    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "URBAN demo device CA")])
-    ca = (x509.CertificateBuilder().subject_name(ca_name).issuer_name(ca_name).public_key(ca_key.public_key())
-          .serial_number(x509.random_serial_number()).not_valid_before(now - datetime.timedelta(days=1))
-          .not_valid_after(now + datetime.timedelta(days=3650))
-          .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
-          .sign(ca_key, hashes.SHA256()))
+    pem = serialization.Encoding.PEM
+    if (pki / "ca.key").exists() and (pki / "ca.pem").exists():
+        ca_key = serialization.load_pem_private_key((pki / "ca.key").read_bytes(), None)
+        ca_name = x509.load_pem_x509_certificate((pki / "ca.pem").read_bytes()).subject
+    else:
+        ca_key = ec.generate_private_key(ec.SECP256R1())
+        ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "URBAN device CA")])
+        ca = (x509.CertificateBuilder().subject_name(ca_name).issuer_name(ca_name).public_key(ca_key.public_key())
+              .serial_number(x509.random_serial_number()).not_valid_before(now - datetime.timedelta(days=1))
+              .not_valid_after(now + datetime.timedelta(days=3650))
+              .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+              .sign(ca_key, hashes.SHA256()))
+        (pki / "ca.pem").write_bytes(ca.public_bytes(pem))
+        (pki / "ca.key").write_bytes(ca_key.private_bytes(pem, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+    names = [x509.DNSName(n) for n in dict.fromkeys(["localhost", *([host] if host else [])])]
     key = ec.generate_private_key(ec.SECP256R1())
     cert = (x509.CertificateBuilder()
             .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "URBAN device gateway")]))
             .issuer_name(ca_name).public_key(key.public_key()).serial_number(x509.random_serial_number())
             .not_valid_before(now - datetime.timedelta(days=1)).not_valid_after(now + datetime.timedelta(days=825))
-            .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost"),
-                                                        x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), critical=False)
+            .add_extension(x509.SubjectAlternativeName([*names, x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
+                           critical=False)
             .sign(ca_key, hashes.SHA256()))
-    pem = serialization.Encoding.PEM
-    (pki / "ca.pem").write_bytes(ca.public_bytes(pem))
     (pki / "server.pem").write_bytes(cert.public_bytes(pem))
     (pki / "server.key").write_bytes(key.private_bytes(pem, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
 
 
-def provision(junctions: list[dict], pki: Path) -> bool:
+def provision(junctions: list[dict], pki: Path, host: str | None = None) -> bool:
     """Create whatever is missing: TLS material, the gateway signing key, one identity per junction.
+    host: the name devices connect to; a server certificate that does not cover it is reissued.
 
     Returns True if anything was created. Existing devices keep their keys and status.
     """
     (pki / "edge").mkdir(parents=True, exist_ok=True)
     created = False
     if not (pki / "server.pem").exists():
-        _write_tls(pki)
+        _write_tls(pki, host)
         created = True
+    elif host and host not in server_names(pki):
+        if (pki / "ca.key").exists():
+            _write_tls(pki, host)
+            created = True
+        else:
+            print(f"pki: the server certificate does not cover {host!r} and ca.key is not here to reissue it; "
+                  f"bring ca.key back or start a new pki folder (devices then need the new ca.pem)", flush=True)
     if not (pki / "gateway.key").exists():
         key = crypto.new_key()
         (pki / "gateway.key").write_text(crypto.private_hex(key))
