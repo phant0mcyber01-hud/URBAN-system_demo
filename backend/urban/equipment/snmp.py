@@ -52,12 +52,18 @@ def encode_set(community: str, oid: str, value: int, request_id: int, version: i
 
 # ---- decoding, only as far as the response status
 def _read(data: bytes, at: int) -> tuple[int, bytes, int]:
-    """(tag, body, index after) of the TLV at `at`."""
+    """(tag, body, index after) of the TLV at `at`; ValueError if the data ends before the TLV does."""
+    if at + 2 > len(data):
+        raise ValueError("truncated")
     tag, n, at = data[at], data[at + 1], at + 2
     if n & 0x80:
         size = n & 0x7F
+        if size == 0 or at + size > len(data):
+            raise ValueError("truncated")
         n = int.from_bytes(data[at:at + size], "big")
         at += size
+    if at + n > len(data):
+        raise ValueError("truncated")
     return tag, data[at:at + n], at + n
 
 
@@ -96,7 +102,7 @@ class SnmpClient:
                 try:
                     data, _ = sock.recvfrom(1500)
                     rid, status = decode_response(data)
-                except (socket.timeout, ValueError) as err:
+                except (socket.timeout, ValueError, IndexError) as err:
                     last = err
                     continue
                 if rid != request_id:

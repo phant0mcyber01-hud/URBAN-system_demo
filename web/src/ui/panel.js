@@ -1,7 +1,7 @@
 // Control-centre side panel: one renderer per module tab. The DOM is only touched when the
 // generated markup actually changes, so hover and scroll state survive the 1 Hz updates.
 const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+export const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
 // scenario time as m:ss in simulation; wall-clock time of day in field mode
 let wallClock = false;
 export const setClockMode = (field) => { wallClock = field; };
@@ -68,10 +68,10 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
       .map(([junction, d]) => `<div class="item dev" data-fly="${esc(junction)}">
         <div class="row"><span><b>${esc(d.id)}</b> <small>${esc(junction)}${d.serial ? ` · ${esc(d.serial)}` : ''}</small></span>${devState(d)}</div>
         <div class="row meta">
-          <span title="температура в шкафу">${d.t == null ? '—' : `${d.t} °C`}</span>
+          <span title="температура в шкафу">${d.t == null ? '—' : `${esc(d.t)} °C`}</span>
           <span title="дверь шкафа">${d.d === 'open' ? 'дверь открыта' : d.d === 'closed' ? 'дверь закрыта' : '—'}</span>
           <span title="связь с контроллером">${d.c == null ? '—' : d.c === 'ok' ? 'контроллер ок' : esc(d.c)}</span>
-          <span title="действующих аренд">${d.l ?? 0} аренд</span>
+          <span title="действующих аренд">${esc(d.l ?? 0)} аренд</span>
           <span title="версия ПО">${esc(d.v ?? '—')}</span>
           <span title="последний отчёт">${age(d.a)} назад</span>
           ${devButton(d)}
@@ -159,7 +159,7 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
           const st = S.camStatus[c.id];
           return `<button class="item cam ${c.id === S.cam ? 'sel' : ''}" data-cam="${c.id}">
             <span><b>${c.id}</b> ${esc(c.name)} ${st === 'problem' ? chip('warn', 'проблема') : st === 'control' ? chip('ok', 'коррекция') : ''}</span>
-            <span>${queue == null ? 'нет данных' : `очередь ${queue} м`} · ${n} ТС · ${speed} км/ч</span></button>`;
+            <span>${queue == null ? 'нет данных' : `очередь ${queue} м`}${n == null ? '' : ` · ${n} ТС · ${speed} км/ч`}</span></button>`;
         }).join('')}`],
     emergency: ['Экстренные', () => {
       const inc = S.incidents(), dis = S.dispatches();
@@ -185,12 +185,12 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
       if (!h) return empty('загрузка истории…');
       const ok = h.chain.intact;
       return `<div class="grid">
-          ${kpi('записей аудита', h.counts.audit, ok ? 'ok' : 'bad')}${kpi('команд за всё время', h.counts.commands)}
+          ${kpi('записей аудита', h.counts.audit, ok ? 'ok' : ok === false ? 'bad' : '')}${kpi('команд за всё время', h.counts.commands)}
           ${kpi('запусков платформы', h.counts.runs)}${kpi('замеров очередей', h.counts.queues)}
         </div>
-        <div class="item">${chip(ok ? 'ok' : 'bad', ok ? 'цепочка целая' : 'цепочка нарушена')}
-          ${ok ? `${h.chain.records ? `Журнал проверен от записи #1 до #${h.chain.records} при запуске` : 'Журнал начат при этом запуске'}; цепочка хэшей продолжается между перезапусками.`
-            : `Нарушение на записи #${h.chain.broken_at}: файл истории изменяли в обход платформы.`}
+        <div class="item">${chip(ok ? 'ok' : ok === false ? 'bad' : 'warn', ok ? 'цепочка целая' : ok === false ? 'цепочка нарушена' : 'проверяется')}
+          ${ok ? `${h.chain.records ? `Журнал проверен от записи #1 до #${h.chain.records} (последняя проверка ${when(h.chain.checked)})` : 'Журнал начат при этом запуске'}; полная проверка повторяется каждые 15 минут, цепочка хэшей продолжается между перезапусками.`
+            : ok === false ? `Нарушение на записи #${h.chain.broken_at}: файл истории изменяли в обход платформы.` : 'Полная проверка цепочки идёт в фоне после запуска.'}
           <br><small>Хранится в <code>data/urban.db</code> (SQLite): журнал, команды, здоровье устройств и очереди раз в минуту.</small></div>
         <h4>Команды</h4>
         ${h.commands.length ? h.commands.map((c) => {

@@ -16,7 +16,9 @@ Restart=always
 RestartSec=2
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/etc/urban/pki /run/urban
+ReadWritePaths=/etc/urban/pki
+RuntimeDirectory=urban
+RuntimeDirectoryPreserve=yes
 # EXTRA in the env file takes the rest: --relay-unit 1 --relays 3 --baud 9600, or --community ... --backup-time 180
 # relay boards and serial controllers are devices: list them here when ADAPTER=relay
 # DeviceAllow=/dev/ttyUSB0 rw

@@ -8,7 +8,8 @@ What is kept and why:
   commands        every proposal with its decision, who decided and how it ended;
   device_samples  health of each URBAN Edge unit once a minute (temperature, door, controller, leases);
   queues          mean queue length per approach once a minute, the raw material for later analysis.
-Rows are written by the analysis thread and read by the API thread; one lock guards the connection.
+Queue and device samples are pruned after `retention_days`; the audit log and the commands are never
+deleted. Rows are written by the analysis thread and read by the API thread; one lock guards the connection.
 Each audit and command row also carries the record as JSON, so a record read back is byte-for-byte
 what was hashed.
 """
@@ -36,7 +37,7 @@ CREATE INDEX IF NOT EXISTS queues_junction ON queues(junction, at);
 
 
 class Store:
-    def __init__(self, path: Path | str, mode: str = "simulation", clock=time.time):
+    def __init__(self, path: Path | str, mode: str = "simulation", clock=time.time, retention_days: int = 90):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.clock = clock
@@ -45,8 +46,15 @@ class Store:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
         self.mode = mode
+        self.retention = retention_days * 86400
+        self._pruned = None
+        self._counts: tuple[float, dict] | None = None
         self.run = 0
         self.start_run(mode, "platform started")
+        seq, head = self.audit_head()
+        # what is known about the chain before anyone verified it: length and head only
+        self.chain = {"records": seq, "intact": None, "broken_at": None, "head": head, "checked": None}
+        self._verified = (0, GENESIS)  # (seq, hash) up to which the chain was last verified
 
     def close(self):
         with self.lock:
@@ -90,18 +98,40 @@ class Store:
                                    (before if before is not None else 2 ** 62, limit)).fetchall()
         return [{**json.loads(d), "run": run} for run, d in rows]
 
-    def audit_verify(self) -> dict:
-        """Walk the whole stored chain: every record must match its hash and point at its predecessor."""
-        prev, n, broken = GENESIS, 0, None
+    def _walk(self, start_seq: int, prev: str) -> dict:
+        """Verify records after start_seq, continuing a chain whose hash at start_seq is `prev`."""
+        n, broken = start_seq, None
         with self.lock:
-            cur = self.db.execute("SELECT seq, data FROM audit ORDER BY seq")
-            for seq, data in cur:
-                rec = json.loads(data)
-                if rec["seq"] != n + 1 or rec["prev"] != prev or rec["hash"] != _digest(rec):
-                    broken = seq
-                    break
-                prev, n = rec["hash"], seq
+            rows = self.db.execute("SELECT seq, data FROM audit WHERE seq > ? ORDER BY seq", (start_seq,)).fetchall()
+        for seq, data in rows:
+            rec = json.loads(data)
+            if rec["seq"] != n + 1 or rec["prev"] != prev or rec["hash"] != _digest(rec):
+                broken = seq
+                break
+            prev, n = rec["hash"], seq
         return {"records": n, "intact": broken is None, "broken_at": broken, "head": prev}
+
+    def audit_verify(self) -> dict:
+        """Walk the whole stored chain: every record must match its hash and point at its predecessor.
+        Costs a pass over the table; the platform runs it in the background, not on a request."""
+        result = self._walk(0, GENESIS)
+        self._remember(result)
+        return result
+
+    def audit_check(self) -> dict:
+        """Cheap check on request: only the records added since the last verification are walked.
+        A chain already found broken stays broken until a full verification says otherwise."""
+        if self.chain["intact"] is False:
+            return self.chain
+        seq, prev = self._verified
+        result = self._walk(seq, prev)
+        self._remember(result)
+        return self.chain
+
+    def _remember(self, result: dict):
+        self.chain = {**result, "checked": self.clock()}
+        if result["intact"]:
+            self._verified = (result["records"], result["head"])
 
     # ---- commands
     def save_command(self, p: dict):
@@ -147,6 +177,17 @@ class Store:
             self.db.executemany("INSERT INTO queues(at, run, junction, approach, metres) VALUES (?, ?, ?, ?, ?)",
                                 [(at, self.run, j, a, round(float(m), 1)) for j, per in queues.items() if per
                                  for a, m in per.items()])
+        self.prune(at)
+
+    def prune(self, now: float | None = None, every: float = 3600.0):
+        """Drop samples older than the retention; runs at most once an hour. Audit and commands are kept."""
+        now = self.clock() if now is None else now
+        if self._pruned is not None and 0 <= now - self._pruned < every:
+            return
+        self._pruned = now
+        with self.lock:
+            for table in ("queues", "device_samples"):
+                self.db.execute(f"DELETE FROM {table} WHERE at < ?", (now - self.retention,))
 
     def queues(self, junction: str, since: float) -> list[dict]:
         with self.lock:
@@ -154,7 +195,13 @@ class Store:
                                    (junction, since)).fetchall()
         return [dict(zip(("at", "approach", "metres"), r)) for r in rows]
 
-    def counts(self) -> dict:
+    def counts(self, max_age: float = 30.0) -> dict:
+        """Row counts, cached for `max_age` seconds: COUNT(*) walks the table and the History tab asks often."""
+        now = self.clock()
+        if self._counts is not None and 0 <= now - self._counts[0] < max_age:
+            return self._counts[1]
         with self.lock:
-            return {name: self.db.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
-                    for name in ("runs", "audit", "commands", "device_samples", "queues")}
+            counts = {name: self.db.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
+                      for name in ("runs", "audit", "commands", "device_samples", "queues")}
+        self._counts = (now, counts)
+        return counts

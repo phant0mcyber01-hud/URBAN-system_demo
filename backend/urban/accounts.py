@@ -5,7 +5,9 @@ Users live in a JSON file (data/users.json, outside git) with scrypt password ha
   operator  may also decide on proposals, pull everything back and cut the demo link;
   admin     may also manage devices (revoke, restore) and users.
 A session is a random bearer token kept in memory with an expiry; restarting the platform
-signs everyone out. Failed logins are throttled per account and per address.
+signs everyone out. Failed logins are throttled per account and per address. The file is
+re-read when another process (python -m urban.users) changes it; sessions of accounts whose
+password changed or that were disabled end at once.
 """
 import datetime
 import hashlib
@@ -28,16 +30,44 @@ def _hash(password: str, salt: bytes) -> str:
 class Accounts:
     def __init__(self, path: Path):
         self.path = path
-        self.users: dict[str, dict] = {}
-        if path.exists():
-            self.users = {u["name"]: u for u in json.loads(path.read_text(encoding="utf-8"))}
+        self.users: dict[str, dict] = self._load()
+        self._mtime = self._stamp()
         self.sessions: dict[str, dict] = {}  # token -> {name, role, expires}
         self._failures: dict[str, list[float]] = {}
 
     # ---- users
+    def _load(self) -> dict[str, dict]:
+        if not self.path.exists():
+            return {}
+        return {u["name"]: u for u in json.loads(self.path.read_text(encoding="utf-8"))}
+
+    def _stamp(self):
+        try:
+            st = self.path.stat()
+            return st.st_mtime_ns, st.st_size
+        except OSError:
+            return None
+
+    def refresh(self):
+        """Re-read the file if another process changed it; end the sessions that change invalidates."""
+        stamp = self._stamp()
+        if stamp == self._mtime:
+            return
+        try:
+            users = self._load()
+        except (OSError, ValueError):
+            return  # half-written: try again on the next call
+        self._mtime = stamp
+        old, self.users = self.users, users
+        for name, u in old.items():
+            new = users.get(name)
+            if new is None or new["hash"] != u["hash"] or not new["enabled"]:
+                self.sign_out_all(name)
+
     def save(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(list(self.users.values()), ensure_ascii=False, indent=1), encoding="utf-8")
+        self._mtime = self._stamp()
 
     def create(self, name: str, password: str, role: str, by: str = "system") -> dict:
         name = name.strip()
@@ -89,24 +119,32 @@ class Accounts:
         self._failures[key] = recent
         return len(recent) >= MAX_FAILURES
 
-    def sign_in(self, name: str, password: str, address: str = "") -> dict | None:
-        """A session {token, name, role, expires} or None. Wrong attempts count against name and address."""
-        keys = [f"u:{name}", f"a:{address}"]
+    def check(self, name: str, password: str, address: str = "") -> bool:
+        """Is this the password of an enabled account? Wrong attempts count against name and address."""
+        self.refresh()
+        keys = [f"u:{name}"] + ([f"a:{address}"] if address else [])
         if any(self._throttled(k) for k in keys):
-            return None
+            return False
         u = self.users.get(name)
         ok = (u is not None and u["enabled"]
               and hmac.compare_digest(_hash(password, bytes.fromhex(u["salt"])), u["hash"]))
         if not ok:
             for k in keys:
                 self._failures.setdefault(k, []).append(time.time())
+        return ok
+
+    def sign_in(self, name: str, password: str, address: str = "") -> dict | None:
+        """A session {token, name, role, expires} or None."""
+        if not self.check(name, password, address):
             return None
+        u = self.users[name]
         token = secrets.token_urlsafe(32)
         session = {"token": token, "name": name, "role": u["role"], "expires": time.time() + SESSION_HOURS * 3600}
         self.sessions[token] = session
         return session
 
     def session(self, token: str) -> dict | None:
+        self.refresh()
         s = self.sessions.get(token or "")
         if s is None:
             return None
@@ -115,7 +153,7 @@ class Accounts:
             return None
         return s
 
-    def session_role(self, name: str) -> str:
+    def role_of(self, name: str) -> str:
         return self.users.get(name, {}).get("role", "")
 
     def sign_out(self, token: str):

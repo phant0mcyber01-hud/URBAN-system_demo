@@ -9,7 +9,7 @@ import { createMap } from './map/view.js';
 import { createCameraView } from './map/cameraView.js';
 import { createSearch } from './map/search.js';
 import { createPlaceCard, describe } from './map/placeCard.js';
-import { createPanel, clock, setClockMode } from './ui/panel.js';
+import { createPanel, clock, esc, setClockMode } from './ui/panel.js';
 import { createState } from './state.js';
 import * as api from './api.js';
 
@@ -151,10 +151,10 @@ $('op-revoke').onclick = () => run(() => api.post('/api/revoke-all'));
 $('op-link').onclick = () => run(() => api.post('/api/link', { up: !S.link }));
 
 // accounts dialog: admins manage everyone, others change their own password
-const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
 async function renderUsers() {
   const body = $('users-body');
   const own = `<form data-form="password"><h4>Мой пароль</h4>
+      <label>Текущий пароль <input name="current" type="password" autocomplete="current-password" required /></label>
       <label>Новый пароль (от 10 символов) <input name="password" type="password" autocomplete="new-password" required minlength="10" /></label>
       <button type="submit">Сменить пароль</button></form>`;
   if (!S.can('admin')) { body.innerHTML = own; return; }
@@ -187,7 +187,7 @@ $('users-body').onsubmit = (e) => {
       await api.post('/api/users', data);
       toast(`учётная запись ${data.name} создана`);
     } else {
-      await api.post(`/api/users/${encodeURIComponent(S.user.name)}/password`, { password: data.password });
+      await api.post(`/api/users/${encodeURIComponent(S.user.name)}/password`, { password: data.password, current: data.current });
       toast('пароль изменён, войдите заново');
       signedOut();
       return;
@@ -268,7 +268,7 @@ function onFrame(f) {
   renderOperator();
   if (S.cam) {
     const [n, speed, queue] = S.cams[S.cam] ?? [0, 0, 0];
-    cameras.setHud(`${clock(S.t)} · ТС в кадре: ${n} · очередь: ${queue == null ? 'нет данных' : `${queue} м`} · ср. скорость: ${speed} км/ч · обезличено`);
+    cameras.setHud(`${clock(S.t)}${n == null ? '' : ` · ТС в кадре: ${n}`} · очередь: ${queue == null ? 'нет данных' : `${queue} м`}${speed == null ? '' : ` · ср. скорость: ${speed} км/ч`} · обезличено`);
   }
 }
 

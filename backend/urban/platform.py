@@ -72,8 +72,9 @@ class Platform:
             if math.hypot(x, y) <= limit:
                 out.append([v.id, round(x * 10), round(y * 10), round(v.angle), round(v.speed, 1), v.kind])
         frame["v"] = out
+        observed = raw.get("observed", True)  # False: no traffic source at all (field mode), nothing to count
         frame["jam"] = traffic.jams(raw["vehicles"])
-        frame["stats"] = traffic.stats(raw["vehicles"], raw.get("bus_loss", []))
+        frame["stats"] = traffic.stats(raw["vehicles"], raw.get("bus_loss", [])) if observed else None
 
         # sensors: flow counters and queue length per approach (aggregates only)
         if "queues" in raw:  # an Edge embedded in the source: readings arrive with the frame
@@ -88,7 +89,8 @@ class Platform:
                     readings.update(reported)
         queues, problems = self.monitor.update(t, readings, missing)
         self.queues = queues
-        counts = traffic.camera_counts(points, self.camera_xy)
+        counts = (traffic.camera_counts(points, self.camera_xy) if observed
+                  else {cid: [None, None] for cid, *_ in self.camera_xy})
         frame["cams"] = {cid: [*counts[cid], None if queues[cid] is None else round(max(queues[cid].values(), default=0))]
                          for cid in counts}
 

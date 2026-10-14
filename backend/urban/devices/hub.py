@@ -9,10 +9,12 @@ import asyncio
 import json
 import secrets
 import time
+import traceback
 
 from fastapi import WebSocket, WebSocketDisconnect
 
 from . import crypto
+from .health import clean
 from .registry import REVOKED, Registry
 
 HELLO_TIMEOUT = 10  # seconds a connection may stay unauthenticated
@@ -81,21 +83,28 @@ class DeviceHub:
                 await _close(old)
             self.sessions[device] = ws
             self.connects[device] = self.connects.get(device, 0) + 1
-            self.seen[device] = {"at": time.time(), "health": {"version": hello.get("version")}}
+            self.seen[device] = self.reconnected(device, hello.get("version"))
             await ws.send_text(json.dumps({"type": "welcome", "t": self.clock(), "tls": rec["tls"],
                                            "plans": sorted(self.plans.get(rec["tls"], ()))}))
             while True:
                 report = json.loads(await ws.receive_text())
                 if isinstance(report, dict) and report.get("type") == "report":
-                    health = report.get("health")
-                    self.seen[device] = {"at": time.time(), "health": health if isinstance(health, dict) else {}}
+                    self.seen[device] = {"at": time.time(), "health": clean(report.get("health"))}
                     self.on_report(rec, report)
-        except (WebSocketDisconnect, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError, AttributeError,
-                TypeError, ValueError):
-            pass
+        except (WebSocketDisconnect, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError):
+            pass  # the usual ends of a session: gone, silent, or talking nonsense
+        except Exception:  # a bug in report handling must not look like a flaky network
+            print(f"hub: dropping the session of {device}: report handling failed", flush=True)
+            traceback.print_exc()
         finally:
             if device is not None and self.sessions.get(device) is ws:
                 del self.sessions[device]
+
+    def reconnected(self, device: str, version) -> dict:
+        """The hub's view of a unit at session start: its last known health stays until the first report,
+        so a short link outage does not clear its alerts and raise them again a second later."""
+        last = self.seen.get(device, {}).get("health", {})
+        return {"at": time.time(), "health": {**last, **clean({"version": version})}}
 
     # ---- registry operations
     async def set_status(self, device: str, status: str) -> dict | None:

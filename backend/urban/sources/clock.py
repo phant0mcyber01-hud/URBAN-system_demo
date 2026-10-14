@@ -10,7 +10,8 @@ import time
 
 
 def frame(now: float) -> dict:
-    return {"t": int(now), "vehicles": [], "events": [], "bus_loss": []}
+    # observed=False: there is no traffic source, so counts and speeds are unknown, not zero
+    return {"t": int(now), "vehicles": [], "events": [], "bus_loss": [], "observed": False}
 
 
 def run(publish, stop: threading.Event, clock=time.time, sleep=None):

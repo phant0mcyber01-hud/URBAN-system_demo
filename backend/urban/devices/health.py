@@ -4,11 +4,36 @@ Rules are plain thresholds on the self-report (temperature, door, controller lin
 version) plus what the hub knows (session, last report). Each alert has a level: `warn` is
 something to plan around, `alert` means the unit cannot be trusted with commands right now.
 """
+import math
+
 EXPECTED_VERSION = "0.1.0"
+TEXT_MAX = 80                        # longest string a unit may put into its health report
 TEMP_WARN, TEMP_ALERT = 55.0, 65.0   # degrees in the cabinet; see docs/hardware.md, section 7.3
 STALE_REPORT = 10                    # seconds online without a report before it counts as silent
 
 BLOCKING = {"door", "controller"}    # alerts that stop commands at that junction
+
+
+def clean(health) -> dict:
+    """What a unit says about itself, reduced to numbers and short words. Everything else is dropped:
+    a unit is trusted for measurements, not for markup, and this is what reaches every browser and the history."""
+    if not isinstance(health, dict):
+        return {}
+    out = {}
+    temp = health.get("temp")
+    if isinstance(temp, (int, float)) and not isinstance(temp, bool) and math.isfinite(temp):
+        out["temp"] = round(float(temp), 1)
+    for key in ("leases", "uptime"):
+        v = health.get(key)
+        if isinstance(v, int) and not isinstance(v, bool) and 0 <= v < 10 ** 9:
+            out[key] = v
+    if health.get("door") in ("open", "closed"):
+        out["door"] = health["door"]
+    for key in ("controller", "version"):
+        v = health.get(key)
+        if isinstance(v, str) and v:
+            out[key] = v[:TEXT_MAX]
+    return out
 
 
 def assess(row: dict) -> list[dict]:

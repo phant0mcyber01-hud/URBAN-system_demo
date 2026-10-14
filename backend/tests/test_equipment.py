@@ -122,8 +122,8 @@ def test_ntcip_adapter_arms_the_backup_timer_before_the_first_pattern_and_keeps_
     ntcip.keepalive("J1", 2)
     ntcip.select("J1", 1)
     ntcip.base("J1")
-    assert sets == [(UNIT_BACKUP_TIME, 180), (SYSTEM_PATTERN_CONTROL, 2), (SYSTEM_PATTERN_CONTROL, 2),
-                    (SYSTEM_PATTERN_CONTROL, 1), (SYSTEM_PATTERN_CONTROL, STANDBY)]
+    assert sets == [(UNIT_BACKUP_TIME, 180), (SYSTEM_PATTERN_CONTROL, 2), (UNIT_BACKUP_TIME, 180), (SYSTEM_PATTERN_CONTROL, 2),
+                    (UNIT_BACKUP_TIME, 180), (SYSTEM_PATTERN_CONTROL, 1), (SYSTEM_PATTERN_CONTROL, STANDBY)]
     with pytest.raises(AdapterError):
         ntcip.select("J1", 7)
 

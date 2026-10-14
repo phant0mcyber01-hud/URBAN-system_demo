@@ -61,8 +61,7 @@ meta = json.loads((c.OUT / "meta.json").read_text())
 hub = DeviceHub(Registry(c.PKI / "devices.json"), crypto.load_private((c.PKI / "gateway.key").read_text()),
                 on_report=lambda rec, report: platform.on_report(rec["tls"], report), clock=lambda: platform.t,
                 plans=approved_plans(junctions))
-store = Store(c.DB, mode=c.SOURCE)
-CHAIN = store.audit_verify()  # the whole stored audit chain, checked once at start
+store = Store(c.DB, mode=c.SOURCE, retention_days=c.HISTORY_DAYS)
 platform = Platform(meta["center"], meta["radius"], junctions, send=hub.send, reachable=hub.online, store=store)
 clients: set[WebSocket] = set()
 
@@ -116,18 +115,34 @@ async def lifespan(_):
               f"  Change it after signing in. More accounts: python -m urban.users add <name> --role operator\n", flush=True)
     else:
         print(f"\n  Accounts: {len(accounts.users)} (manage with python -m urban.users)", flush=True)
-    print(f"  History: {c.DB.name}, run #{store.run}, audit chain {CHAIN['records']} records, "
-          f"{'intact' if CHAIN['intact'] else 'BROKEN at #' + str(CHAIN['broken_at'])}", flush=True)
+    print(f"  History: {c.DB.name}, run #{store.run}, audit chain {store.chain['records']} records; "
+          f"the full check runs in the background and every {CHAIN_CHECK // 60} min", flush=True)
     print("  Mode: FIELD: no simulation, waiting for real URBAN Edge units\n" if FIELD
           else "  Mode: simulation (SUMO), demo Edge fleet\n", flush=True)
     field.loop = asyncio.get_running_loop()
     stop = threading.Event()
     threading.Thread(target=source_thread, args=(field.loop, stop), daemon=True).start()
     watchdog = asyncio.create_task(edge_watchdog(stop)) if SPAWN_EDGE else None
+    checker = asyncio.create_task(chain_checker())
     yield
     stop.set()
+    checker.cancel()
     if watchdog is not None:
         watchdog.cancel()
+
+
+CHAIN_CHECK = 900  # seconds between full verifications of the stored audit chain
+
+
+async def chain_checker():
+    """Verifies the whole stored chain off the event loop: once right after start, then periodically,
+    so tampering with the database while the platform runs is seen within minutes, not at the next restart."""
+    while True:
+        result = await asyncio.to_thread(store.audit_verify)
+        if not result["intact"]:
+            print(f"AUDIT CHAIN BROKEN at record #{result['broken_at']}: the history file was changed outside the platform",
+                  flush=True)
+        await asyncio.sleep(CHAIN_CHECK)
 
 
 async def edge_watchdog(stop: threading.Event):
@@ -210,6 +225,7 @@ class NewUser(BaseModel):
 
 class Password(BaseModel):
     password: str
+    current: str = ""  # required when changing one's own password
 
 
 class Enabled(BaseModel):
@@ -259,9 +275,11 @@ async def create_user(body: NewUser, who: str = Depends(admin)):
 
 @app.post("/api/users/{name}/password")
 async def user_password(name: str, body: Password, who: str = Depends(viewer)):
-    """Admins may reset anyone; everyone may change their own."""
-    session_name = who
-    if name != session_name and not allows(accounts.session_role(session_name), "admin"):
+    """Everyone may change their own password, knowing the current one; admins may reset anyone else's."""
+    if name == who:
+        if not accounts.check(who, body.current):
+            raise HTTPException(400, "current password is wrong")
+    elif not allows(accounts.role_of(who), "admin"):
         raise HTTPException(403, "admin role required")
     if name not in accounts.users:
         raise HTTPException(404, "unknown user")
@@ -298,13 +316,13 @@ def state(who: str = Depends(viewer)):
 @app.get("/api/audit")
 def audit(who: str = Depends(viewer)):
     return {**platform.audit(), "intact": platform.gateway.verify(), "records": platform.gateway.records[-50:],
-            "chain": CHAIN}
+            "chain": store.audit_check()}
 
 
 # ---- history: what the store kept across restarts; all read-only ----
 @app.get("/api/history")
 def history(who: str = Depends(viewer)):
-    return {"counts": store.counts(), "run": store.run, "chain": CHAIN, "runs": store.runs(10)}
+    return {"counts": store.counts(), "run": store.run, "chain": store.audit_check(), "runs": store.runs(10)}
 
 
 @app.get("/api/history/commands")

@@ -3,6 +3,8 @@
 Selecting a plan is one write to systemPatternControl. Every such write restarts the
 unitBackupTime countdown of the controller; when it runs out the controller goes back to
 local control by itself, so the lease is enforced a second time inside the controller.
+unitBackupTime itself is written before every pattern write: a controller that rebooted
+since the last write may have forgotten it, and a forgotten timer means a plan that never expires.
 
 Not tried on a real controller. `snmp_set(tls, oid, value)` is the transport, kept out of
 this module so it can be tested without a device. Check the OIDs against the MIB of the
@@ -23,7 +25,6 @@ class NtcipAdapter(ControllerAdapter):
                  backup_time: int = 180, pattern_of: Callable[[int], int] = lambda plan: plan):
         """tables: tls id -> approved plan ids; pattern_of: our plan id -> pattern number in the controller."""
         self.snmp_set, self.tables, self.backup_time, self.pattern_of = snmp_set, tables, backup_time, pattern_of
-        self._armed = set()
 
     def learn(self, tls, plans):
         """The approved table as the platform states it at session start."""
@@ -35,12 +36,11 @@ class NtcipAdapter(ControllerAdapter):
     def select(self, tls, plan):
         if plan not in self.plans(tls):
             raise AdapterError("plan is not loaded in this controller")
-        if tls not in self._armed:  # the controller must fall back on its own before we touch anything
-            self._set(tls, UNIT_BACKUP_TIME, self.backup_time)
-            self._armed.add(tls)
+        self._set(tls, UNIT_BACKUP_TIME, self.backup_time)  # the controller must fall back on its own before we touch anything
         self._set(tls, SYSTEM_PATTERN_CONTROL, self.pattern_of(plan))
 
     def keepalive(self, tls, plan):
+        self._set(tls, UNIT_BACKUP_TIME, self.backup_time)
         self._set(tls, SYSTEM_PATTERN_CONTROL, self.pattern_of(plan))
 
     def base(self, tls):

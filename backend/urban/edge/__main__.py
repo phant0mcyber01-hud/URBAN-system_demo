@@ -170,20 +170,30 @@ def read_sensors(path: Path | None) -> dict:
     return out
 
 
-def make_adapter(kind: str, controller: str | None, args=None):
-    """The controller link of this unit. Plan tables come later, from the platform's welcome."""
+def parse_endpoint(text: str, default_port: int) -> tuple[str, int]:
+    """host, [host]:port, host:port or an IPv6 literal -> (host, port)."""
+    if text.startswith("["):
+        host, _, rest = text[1:].partition("]")
+        return host, int(rest[1:] or default_port) if rest.startswith(":") else default_port
+    if text.count(":") == 1:
+        host, _, port = text.partition(":")
+        return host, int(port or default_port)
+    return text, default_port  # a bare name or a bare IPv6 address
+
+
+def make_adapter(args):
+    """The controller link of this unit, from the command line. Plan tables come later, from the platform's welcome."""
+    kind, controller = args.adapter, args.controller
     if kind == "none":
         return NoController()
     if not controller:
         raise SystemExit(f"--adapter {kind} needs --controller (relay: serial port of the board; ntcip: host[:port])")
     if kind == "relay":
-        board = ModbusRelayBoard(controller, unit=getattr(args, "relay_unit", 1), baud=getattr(args, "baud", 9600))
-        return RelayAdapter(board.write, {}, relays=getattr(args, "relays", 3))
-    host, _, port = controller.partition(":")
-    client = SnmpClient(host, int(port or 161), community=getattr(args, "community", "private"),
-                        version=getattr(args, "snmp_version", 1))
-    return NtcipAdapter(lambda tls, oid, value: client.set(oid, value), {},
-                        backup_time=getattr(args, "backup_time", 180))
+        board = ModbusRelayBoard(controller, unit=args.relay_unit, baud=args.baud)
+        return RelayAdapter(board.write, {}, relays=args.relays)
+    host, port = parse_endpoint(controller, 161)
+    client = SnmpClient(host, port, community=args.community, version=args.snmp_version)
+    return NtcipAdapter(lambda tls, oid, value: client.set(oid, value), {}, backup_time=args.backup_time)
 
 
 class Unit:
@@ -194,7 +204,7 @@ class Unit:
         self.id = args.unit
         key = crypto.load_private(Path(args.key or pki / "edge" / f"{self.id}.key").read_text())
         gateway_public = crypto.load_public(Path(args.gateway_pub or pki / "gateway.pub").read_text())
-        self.adapter = make_adapter(args.adapter, args.controller, args)
+        self.adapter = make_adapter(args)
         self.dev = EdgeDevice(self.id, args.junction, key, gateway_public, self.adapter,
                               state_path=Path(args.state or pki / "edge" / f"{self.id}.seq"))
         self.sensors = Path(args.sensors) if args.sensors else None
@@ -220,9 +230,11 @@ class Unit:
             try:
                 async with websockets.connect(self.url, ssl=self.tls_context, server_hostname=self.server_name) as ws:
                     challenge = json.loads(await ws.recv())
+                    if not isinstance(challenge, dict):
+                        raise ConnectionError("no challenge")
                     await ws.send(json.dumps(self.dev.hello(challenge["nonce"])))
                     welcome = json.loads(await ws.recv())
-                    if welcome.get("type") != "welcome":
+                    if not isinstance(welcome, dict) or welcome.get("type") != "welcome":
                         raise ConnectionError("not welcome")
                     if not self.dev.on_welcome(welcome):
                         print(f"edge: the platform enrols {self.id} for junction {welcome.get('tls')}, "
@@ -233,9 +245,10 @@ class Unit:
                     self.ws = ws
                     async for text in ws:
                         msg = json.loads(text)
-                        if msg.get("type") == "cmd":
+                        if isinstance(msg, dict) and msg.get("type") == "cmd":
                             self.dev.on_command(msg)
-            except (OSError, websockets.WebSocketException, ConnectionError, json.JSONDecodeError, KeyError) as err:
+            except (OSError, websockets.WebSocketException, ConnectionError, json.JSONDecodeError, KeyError,
+                    TypeError, AttributeError) as err:
                 print(f"edge: platform unreachable ({err.__class__.__name__}), retrying", flush=True)
             finally:
                 self.ws = None

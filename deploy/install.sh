@@ -9,10 +9,11 @@ REPO=${URBAN_REPO:-https://github.com/phant0mcyber01-hud/URBAN-system_demo.git}
 apt-get update
 apt-get install -y python3 python3-venv python3-pip git nginx nodejs npm sqlite3
 
-id -u urban >/dev/null 2>&1 || useradd --system --create-home --home-dir "$APP" --shell /usr/sbin/nologin urban
+# the clone comes first: useradd must not create the home directory, git refuses a non-empty one
 if [ ! -d "$APP/.git" ]; then
   git clone "$REPO" "$APP"
 fi
+id -u urban >/dev/null 2>&1 || useradd --system --no-create-home --home-dir "$APP" --shell /usr/sbin/nologin urban
 chown -R urban:urban "$APP"
 cd "$APP"
 

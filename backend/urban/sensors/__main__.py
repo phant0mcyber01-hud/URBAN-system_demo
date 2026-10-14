@@ -28,18 +28,18 @@ def main():
     pipeline = QueuePipeline(load_views(Path(args.calibration)))
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    stream = open(args.input, encoding="utf-8") if args.input else sys.stdin
     written = 0.0
-    for line in stream:
-        try:
-            frame = json.loads(line)
-            pipeline.feed(str(frame["approach"]), float(frame["t"]), frame.get("boxes") or [])
-        except (ValueError, KeyError, TypeError):
-            continue  # a bad frame is skipped, the next one counts
-        now = time.time()
-        if now - written >= 1.0:
-            pipeline.write(out, now)
-            written = now
+    with (open(args.input, encoding="utf-8") if args.input else sys.stdin) as stream:
+        for line in stream:
+            try:
+                frame = json.loads(line)
+                pipeline.feed(str(frame["approach"]), float(frame["t"]), frame.get("boxes") or [])
+            except (ValueError, KeyError, TypeError):
+                continue  # a bad frame is skipped, the next one counts
+            now = time.time()
+            if now - written >= 1.0:
+                pipeline.write(out, now)
+                written = now
     pipeline.write(out)
 
 

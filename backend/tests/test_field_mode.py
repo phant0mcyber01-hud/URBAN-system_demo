@@ -30,7 +30,7 @@ def test_platform_runs_on_device_reports_alone():
     p = Platform([71.78, 40.38], 1000, [cam])
     t0 = 1_800_000_000
     f = p.handle(clock.frame(t0))
-    assert f["stats"]["cars"] == 0 and f["cams"]["J-1"][2] is None  # no report yet: no data
+    assert f["stats"] is None and f["cams"]["J-1"] == [None, None, None]  # nothing observed, no report yet: no data
     p.on_report("tls1", {"t": t0 + 1, "queues": {"a": 55.0, "b": 4.0}, "events": []})
     f = p.handle(clock.frame(t0 + 1))
     assert f["cams"]["J-1"][2] == 55

@@ -37,7 +37,7 @@ def main():
     elif args.cmd == "password":
         pw = getpass.getpass("new password (10+ characters): ")
         accounts.set_password(args.name, pw)
-        print("changed; open sessions of this user end at the next platform restart")
+        print("changed; a running platform picks it up within seconds and ends this user's open sessions")
     else:
         accounts.set_enabled(args.name, args.cmd == "enable")
         print(accounts.public(args.name))
