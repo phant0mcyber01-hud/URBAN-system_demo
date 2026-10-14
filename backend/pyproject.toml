@@ -20,6 +20,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
+edge = ["pyserial"]  # a unit in a cabinet with a relay board on a serial port
 
 [project.scripts]
 urban-prepare = "urban.pipeline.__main__:main"

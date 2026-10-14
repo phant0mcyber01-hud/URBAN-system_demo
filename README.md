@@ -8,7 +8,7 @@
 
 ![статус](https://img.shields.io/badge/статус-демо--макет-8a63d2)
 ![python](https://img.shields.io/badge/python-3.11+-3776ab)
-![tests](https://img.shields.io/badge/тесты-92%20проходят-2ea44f)
+![tests](https://img.shields.io/badge/тесты-97%20проходят-2ea44f)
 ![пилот](https://img.shields.io/badge/пилот-Фергана-5cc8ff)
 
 ![Центр управления: платформа нашла перекос на перекрёстке, оператор применил перенос зелёного](docs/img/control.png)

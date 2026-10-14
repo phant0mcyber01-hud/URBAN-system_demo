@@ -18,7 +18,7 @@ cd "$APP"
 
 sudo -u urban python3 -m venv .venv
 sudo -u urban .venv/bin/pip install --upgrade pip
-sudo -u urban .venv/bin/pip install -e backend
+sudo -u urban .venv/bin/pip install -e "backend[edge]"
 (cd web && sudo -u urban npm ci && sudo -u urban npm run build)
 
 sudo -u urban mkdir -p data

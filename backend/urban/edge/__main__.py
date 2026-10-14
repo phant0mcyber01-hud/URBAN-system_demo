@@ -8,10 +8,13 @@ and the controller in each cabinet.
 
 One real unit, on its own computer in a cabinet (the platform in field mode):
     python -m urban.edge --unit edge-J-21 --platform city.example:8443 --adapter relay --controller /dev/ttyUSB0
+    python -m urban.edge --unit edge-J-21 --platform city.example:8443 --adapter ntcip --controller 192.168.10.2:161
 It needs its key, the CA of the platform and the gateway's public key (--pki or --key/--ca/--gateway-pub),
 learns its junction and the approved plan table from the platform at session start, ticks on its own
 wall clock, and reads queue lengths from --sensors (a JSON file {approach id: metres} that the camera
 pipeline rewrites). Without --sensors it reports no queues; with --adapter none it refuses every plan.
+Transports: relay = Modbus RTU coils on a serial relay board (needs pyserial, `pip install -e "backend[edge]"`),
+ntcip = SNMP SetRequest to the controller. Neither has been tried on real hardware yet.
 
 Every unit keeps its own outbound TLS session to the platform, authenticates with its own key
 and obeys only commands signed by the gateway.
@@ -30,7 +33,10 @@ from .. import config as c
 from ..devices import crypto
 from ..devices.registry import device_id
 from ..equipment.adapter import NoController
+from ..equipment.modbus import ModbusRelayBoard
+from ..equipment.ntcip import NtcipAdapter
 from ..equipment.relay import RelayAdapter
+from ..equipment.snmp import SnmpClient
 from ..junctions import approved_plans, load_all_junctions
 from .device import EdgeDevice
 from ..sources.field import SUPERSEDED
@@ -164,19 +170,20 @@ def read_sensors(path: Path | None) -> dict:
     return out
 
 
-def make_adapter(kind: str, controller: str | None):
+def make_adapter(kind: str, controller: str | None, args=None):
+    """The controller link of this unit. Plan tables come later, from the platform's welcome."""
     if kind == "none":
         return NoController()
+    if not controller:
+        raise SystemExit(f"--adapter {kind} needs --controller (relay: serial port of the board; ntcip: host[:port])")
     if kind == "relay":
-        if not controller:
-            raise SystemExit("--adapter relay needs --controller <device path of the relay board>")
-        board = Path(controller)
-
-        def write(tls, states):  # one line per change; the board driver is whatever reads this device
-            with board.open("a", encoding="utf-8") as f:
-                f.write(tls + " " + "".join("1" if s else "0" for s in states) + "\n")
-        return RelayAdapter(write, {})
-    raise SystemExit(f"adapter {kind!r}: NTCIP needs an SNMP client on the unit, not implemented yet")
+        board = ModbusRelayBoard(controller, unit=getattr(args, "relay_unit", 1), baud=getattr(args, "baud", 9600))
+        return RelayAdapter(board.write, {}, relays=getattr(args, "relays", 3))
+    host, _, port = controller.partition(":")
+    client = SnmpClient(host, int(port or 161), community=getattr(args, "community", "private"),
+                        version=getattr(args, "snmp_version", 1))
+    return NtcipAdapter(lambda tls, oid, value: client.set(oid, value), {},
+                        backup_time=getattr(args, "backup_time", 180))
 
 
 class Unit:
@@ -187,7 +194,7 @@ class Unit:
         self.id = args.unit
         key = crypto.load_private(Path(args.key or pki / "edge" / f"{self.id}.key").read_text())
         gateway_public = crypto.load_public(Path(args.gateway_pub or pki / "gateway.pub").read_text())
-        self.adapter = make_adapter(args.adapter, args.controller)
+        self.adapter = make_adapter(args.adapter, args.controller, args)
         self.dev = EdgeDevice(self.id, args.junction, key, gateway_public, self.adapter,
                               state_path=Path(args.state or pki / "edge" / f"{self.id}.seq"))
         self.sensors = Path(args.sensors) if args.sensors else None
@@ -248,7 +255,13 @@ def main():
     ap.add_argument("--server-name", default="localhost", help="name on the platform's certificate")
     ap.add_argument("--junction", help="tls id this unit is installed at; checked against the platform")
     ap.add_argument("--adapter", choices=("none", "relay", "ntcip"), default="none")
-    ap.add_argument("--controller", help="relay: device path of the relay board")
+    ap.add_argument("--controller", help="relay: serial port of the relay board; ntcip: host[:port] of the controller")
+    ap.add_argument("--relay-unit", type=int, default=1, help="relay: Modbus unit id of the board")
+    ap.add_argument("--relays", type=int, default=3, help="relay: coils used for the plan code")
+    ap.add_argument("--baud", type=int, default=9600, help="relay: serial speed")
+    ap.add_argument("--community", default="private", help="ntcip: SNMP community with write access")
+    ap.add_argument("--snmp-version", type=int, choices=(0, 1), default=1, help="ntcip: 0 = SNMPv1, 1 = SNMPv2c")
+    ap.add_argument("--backup-time", type=int, default=180, help="ntcip: unitBackupTime set before the first plan, seconds")
     ap.add_argument("--sensors", help="JSON file {approach id: metres} rewritten by the camera pipeline")
     ap.add_argument("--pki", default=str(c.PKI), help="folder with ca.pem, gateway.pub and edge/<unit>.key")
     for name in ("--key", "--ca", "--gateway-pub", "--state"):

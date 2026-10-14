@@ -11,14 +11,16 @@ Group=urban
 WorkingDirectory=/opt/urban
 EnvironmentFile=/etc/urban/edge-%i.env
 ExecStart=/opt/urban/.venv/bin/python -m urban.edge --unit %i --platform ${PLATFORM} --server-name ${SERVER_NAME} \
-    --adapter ${ADAPTER} --controller "${CONTROLLER}" --sensors "${SENSORS}" --pki /etc/urban/pki
+    --adapter ${ADAPTER} --controller "${CONTROLLER}" --sensors "${SENSORS}" --pki /etc/urban/pki $EXTRA
 Restart=always
 RestartSec=2
 NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=/etc/urban/pki /run/urban
+# EXTRA in the env file takes the rest: --relay-unit 1 --relays 3 --baud 9600, or --community ... --backup-time 180
 # relay boards and serial controllers are devices: list them here when ADAPTER=relay
 # DeviceAllow=/dev/ttyUSB0 rw
+# SupplementaryGroups=dialout
 
 [Install]
 WantedBy=multi-user.target

@@ -74,8 +74,8 @@ sudo systemctl start urban && sudo journalctl -u urban -f
 ```
 PLATFORM=urban.example.uz:8443
 SERVER_NAME=urban.example.uz
-ADAPTER=none            # none | relay; ntcip в автономном блоке пока не реализован
-CONTROLLER=             # relay: устройство платы, например /dev/ttyUSB0
+ADAPTER=none            # none | relay (плата реле по Modbus RTU) | ntcip (SNMP к контроллеру)
+CONTROLLER=             # relay: порт платы, например /dev/ttyUSB0; ntcip: адрес контроллера, например 192.168.10.2:161
 SENSORS=/run/urban/queues.json
 ```
 
@@ -98,5 +98,6 @@ sudo systemctl enable --now urban-edge@edge-J-21
 
 ## Что ещё не сделано
 
-Драйвер платы реле и SNMP для NTCIP на блоке, камерный конвейер, который пишет `queues.json`, выпуск ключей на
-самом блоке, ротация ключей шлюза, внешняя копия журнала аудита, второй сервер для отказоустойчивости.
+Проверка транспортов (Modbus RTU к плате реле, SNMP к контроллеру NTCIP) на настоящем железе, камерный конвейер,
+который пишет `queues.json`, выпуск ключей на самом блоке, ротация ключей шлюза, внешняя копия журнала аудита,
+второй сервер для отказоустойчивости.

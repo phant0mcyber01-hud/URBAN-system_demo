@@ -25,6 +25,10 @@ class NtcipAdapter(ControllerAdapter):
         self.snmp_set, self.tables, self.backup_time, self.pattern_of = snmp_set, tables, backup_time, pattern_of
         self._armed = set()
 
+    def learn(self, tls, plans):
+        """The approved table as the platform states it at session start."""
+        self.tables[tls] = set(plans)
+
     def plans(self, tls):
         return set(self.tables.get(tls, ()))
 
