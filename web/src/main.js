@@ -71,10 +71,22 @@ const panel = createPanel(scene, S, {
     select('detectors', target, target.p);
   },
   onCamera: (id) => (id === S.cam ? cameras.close() : cameras.open(id)),
+  onTab: (tab) => { clearInterval(historyTimer); if (tab === 'history') { loadHistory(); historyTimer = setInterval(loadHistory, 20000); } },
   onAction: (act, id) => run(() => (act === 'revoke' || act === 'restore'
     ? api.post(`/api/devices/${id}/status`, { status: act === 'revoke' ? 'revoked' : 'active' })
     : api.post(`/api/commands/${id}/${act}`))),
 });
+
+// history comes from the store, not from live frames: fetched when the tab is open
+let historyTimer = null;
+async function loadHistory() {
+  if (!S.user) return;
+  try {
+    const [h, commands] = await Promise.all([api.get('/api/history'), api.get('/api/history/commands?limit=40')]);
+    S.history = { ...h, commands };
+    panel.render();
+  } catch (e) { if (e.message === 'нужно войти заново') signedOut(); }
+}
 
 // ---- accounts: everything needs a sign-in; what the buttons do depends on the role ----
 const ROLE_TEXT = { viewer: 'наблюдатель', operator: 'оператор', admin: 'администратор' };

@@ -23,6 +23,7 @@ import secrets
 import subprocess
 import sys
 import threading
+import time
 import traceback
 from contextlib import asynccontextmanager
 
@@ -41,6 +42,7 @@ from ..junctions import load_all_junctions, load_cameras
 from ..platform import Platform
 from ..sources import sumo
 from ..sources.field import FieldEmulator
+from ..store import Store
 
 SPAWN_EDGE = os.getenv("URBAN_EDGE", "auto") != "manual"  # manual: start `python -m urban.edge` yourself
 
@@ -57,7 +59,9 @@ field = FieldEmulator(FIELD_TOKEN)
 meta = json.loads((c.OUT / "meta.json").read_text())
 hub = DeviceHub(Registry(c.PKI / "devices.json"), crypto.load_private((c.PKI / "gateway.key").read_text()),
                 on_report=lambda rec, report: platform.on_report(rec["tls"], report), clock=lambda: platform.t)
-platform = Platform(meta["center"], meta["radius"], junctions, send=hub.send, reachable=hub.online)
+store = Store(c.DB, mode="simulation")
+CHAIN = store.audit_verify()  # the whole stored audit chain, checked once at start
+platform = Platform(meta["center"], meta["radius"], junctions, send=hub.send, reachable=hub.online, store=store)
 clients: set[WebSocket] = set()
 
 
@@ -106,7 +110,9 @@ async def lifespan(_):
         print(f"\n  First start: account 'admin' created, password: {FIRST_PASSWORD}\n"
               f"  Change it after signing in. More accounts: python -m urban.users add <name> --role operator\n", flush=True)
     else:
-        print(f"\n  Accounts: {len(accounts.users)} (manage with python -m urban.users)\n", flush=True)
+        print(f"\n  Accounts: {len(accounts.users)} (manage with python -m urban.users)", flush=True)
+    print(f"  History: {c.DB.name}, run #{store.run}, audit chain {CHAIN['records']} records, "
+          f"{'intact' if CHAIN['intact'] else 'BROKEN at #' + str(CHAIN['broken_at'])}\n", flush=True)
     field.loop = asyncio.get_running_loop()
     stop = threading.Event()
     threading.Thread(target=source_thread, args=(field.loop, stop), daemon=True).start()
@@ -281,7 +287,34 @@ def state(who: str = Depends(viewer)):
 
 @app.get("/api/audit")
 def audit(who: str = Depends(viewer)):
-    return {**platform.audit(), "intact": platform.gateway.verify(), "records": platform.gateway.records[-50:]}
+    return {**platform.audit(), "intact": platform.gateway.verify(), "records": platform.gateway.records[-50:],
+            "chain": CHAIN}
+
+
+# ---- history: what the store kept across restarts; all read-only ----
+@app.get("/api/history")
+def history(who: str = Depends(viewer)):
+    return {"counts": store.counts(), "run": store.run, "chain": CHAIN, "runs": store.runs(10)}
+
+
+@app.get("/api/history/commands")
+def history_commands(tls: str | None = None, before: float | None = None, limit: int = 50, who: str = Depends(viewer)):
+    return store.commands(tls, before, max(1, min(limit, 200)))
+
+
+@app.get("/api/history/audit")
+def history_audit(before: int | None = None, limit: int = 100, who: str = Depends(viewer)):
+    return store.audit_page(before, max(1, min(limit, 500)))
+
+
+@app.get("/api/history/devices/{device}")
+def history_device(device: str, hours: float = 24, who: str = Depends(viewer)):
+    return store.device_samples(device, time.time() - max(0.0, min(hours, 24 * 31)) * 3600)
+
+
+@app.get("/api/history/queues/{junction}")
+def history_queues(junction: str, hours: float = 24, who: str = Depends(viewer)):
+    return store.queues(junction, time.time() - max(0.0, min(hours, 24 * 31)) * 3600)
 
 
 @app.get("/api/devices")

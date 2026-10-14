@@ -14,21 +14,25 @@ from .junctions import approved_plans
 
 SETTLE = 2 * WINDOW  # seconds after a plan change before judging it: a controller needs a cycle to switch
 STALE = 5            # seconds without a report before a junction counts as "no data"
+SAMPLE = 60          # seconds between history samples of queues and device health
 
 M_LAT = 111320.0
 
 
 class Platform:
-    def __init__(self, center, radius, cameras=(), send=lambda msg: None, reachable=lambda tls: True):
+    def __init__(self, center, radius, cameras=(), send=lambda msg: None, reachable=lambda tls: True, store=None):
         """center: [lon, lat], radius: metres,
         cameras: junctions with a queue sensor, as loaded by urban.junctions
                  (camera: True when the junction also has a camera window),
-        send: delivers a gateway message to the (emulated) equipment."""
+        send: delivers a gateway message to the (emulated) equipment,
+        store: persistent history (urban.store.Store) or None to keep everything in memory."""
         self.center, self.radius = center, radius
         self.m_lon = M_LAT * math.cos(math.radians(center[1]))
         self.cameras = list(cameras)
         self.camera_xy = [(c["id"], *self.local(c["lon"], c["lat"])) for c in self.cameras]
-        self.gateway = CommandGateway(send, approved_plans(self.cameras), reachable)
+        self.store = store
+        self._saved_version, self._queue_sampled, self._dev_sampled = -1, None, None
+        self.gateway = CommandGateway(send, approved_plans(self.cameras), reachable, store=store)
         self._by_tls = {c["tls"]: c for c in self.cameras}
         self.sensors: dict[str, tuple[int, dict]] = {}  # junction id -> (report time, queues) from its Edge unit
         self.dev: dict[str, dict] = {}        # junction id -> brief of its Edge unit, for the UI
@@ -54,6 +58,8 @@ class Platform:
             self._reset()
             self.sensors.clear()
             frame["reset"] = True
+            if self.store is not None:
+                self.store.start_run(note="scenario restarted")
         self.t = raw["t"]
         t = raw["t"]
 
@@ -132,6 +138,7 @@ class Platform:
         if shadow:
             self.shadow += shadow
             frame["shadow"] = shadow
+        self._persist(t, queues)
         frame["audit"] = self.audit()
         if (new := [r for r in self.gateway.records if r["seq"] > self._logged]):
             self._logged = new[-1]["seq"]
@@ -143,10 +150,25 @@ class Platform:
             frame["cmd"] = self.gateway.public()
         return frame
 
+    def _persist(self, t, queues: dict):
+        """Write what changed to the history: commands on every change, queues once a minute."""
+        if self.store is None:
+            return
+        if self.gateway.version != self._saved_version:
+            self._saved_version = self.gateway.version
+            for p in self.gateway.unsettled():
+                self.store.save_command(p)
+        if self._queue_sampled is None or not 0 <= t - self._queue_sampled < SAMPLE:
+            self._queue_sampled = t
+            self.store.add_queues(queues)
+
     def devices(self, rows: list[dict], t: int) -> list[dict]:
         """Take the hub's view of the fleet, judge each unit, lock junctions whose unit cannot be trusted.
         Returns the alerts that are new since the last call; the brief for the UI is in self.dev."""
         new = []
+        if self.store is not None and rows and (self._dev_sampled is None or not 0 <= t - self._dev_sampled < SAMPLE):
+            self._dev_sampled = t
+            self.store.add_device_samples(rows)
         for row in rows:
             alerts = health.assess(row)
             kinds = {(a["kind"], a["level"]) for a in alerts}

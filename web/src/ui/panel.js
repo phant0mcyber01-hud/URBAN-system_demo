@@ -22,7 +22,10 @@ const END_REASON = {
   balance: 'начало загружаться направление, отдававшее зелёный: базовый план возвращён',
 };
 
-export function createPanel(scene, S, { onCamera, onAction, onFly }) {
+const when = (at) => (at ? new Date(at * 1000).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—');
+const RUN_MODE = { simulation: 'симуляция', field: 'оборудование' };
+
+export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
   const shadowList = (filter, n = 6) => {
     const list = S.shadow.filter(filter).slice(-n).reverse();
     return list.length ? list.map((p) => `<div class="item">${chip('shadow', 'ТОЛЬКО ЗАПИСЬ')} <code>${esc(p.command)}</code>
@@ -172,6 +175,32 @@ export function createPanel(scene, S, { onCamera, onAction, onFly }) {
         <h4>Заявки на обслуживание (пока только запись)</h4>
         ${shadowList((p) => p.command === 'workorder.create')}`],
     devices: ['Устройства', devicesTab],
+    history: ['История', () => {
+      const h = S.history;
+      if (!h) return empty('загрузка истории…');
+      const ok = h.chain.intact;
+      return `<div class="grid">
+          ${kpi('записей аудита', h.counts.audit, ok ? 'ok' : 'bad')}${kpi('команд за всё время', h.counts.commands)}
+          ${kpi('запусков платформы', h.counts.runs)}${kpi('замеров очередей', h.counts.queues)}
+        </div>
+        <div class="item">${chip(ok ? 'ok' : 'bad', ok ? 'цепочка целая' : 'цепочка нарушена')}
+          ${ok ? `${h.chain.records ? `Журнал проверен от записи #1 до #${h.chain.records} при запуске` : 'Журнал начат при этом запуске'}; цепочка хэшей продолжается между перезапусками.`
+            : `Нарушение на записи #${h.chain.broken_at}: файл истории изменяли в обход платформы.`}
+          <br><small>Хранится в <code>data/urban.db</code> (SQLite): журнал, команды, здоровье устройств и очереди раз в минуту.</small></div>
+        <h4>Команды</h4>
+        ${h.commands.length ? h.commands.map((c) => {
+          const [cls, label] = CMD_STATUS[c.status] ?? ['info', c.status];
+          const r = c.result;
+          return `<div class="item cmd">
+            <div class="row"><span><time>${when(c.at)}</time><b>${esc(c.street || c.cam)}</b></span>${chip(cls, label)}</div>
+            <small>план ${c.plan} для ${esc(c.cam)}${c.actor ? ` · решение: ${esc(c.actor)}` : ''} · запуск #${c.run}</small>
+            ${r && r.queue != null ? `<br><small>очередь ${c.queue0} → ${r.queue} м, донор ${c.other0} → ${r.other} м · ${esc(END_REASON[r.reason] ?? r.reason)}</small>` : ''}
+          </div>`;
+        }).join('') : empty('команд ещё не было')}
+        <h4>Запуски</h4>
+        ${h.runs.map((r) => `<div class="item row"><span><time>${when(r.started)}</time>#${r.id} · ${RUN_MODE[r.mode] ?? esc(r.mode)}${r.note === 'scenario restarted' ? ' · сценарий перезапущен' : ''}</span>
+          <small>${r.commands} команд · ${r.audit} записей</small></div>`).join('')}`;
+    }],
     security: ['Безопасность', () => `<div class="grid">
           ${kpi('команд передано оборудованию (эмуляция)', S.audit.applied ?? 0, 'ok')}${kpi('записей в журнале аудита', S.audit.count)}
         </div>
@@ -209,6 +238,7 @@ export function createPanel(scene, S, { onCamera, onAction, onFly }) {
       last = '';
       api.render();
       $('side').scrollTop = 0;
+      if (onTab) onTab(tab);
     },
   };
   tabs.onclick = (e) => e.target.dataset.tab && api.setTab(e.target.dataset.tab);

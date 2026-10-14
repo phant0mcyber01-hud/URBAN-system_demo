@@ -36,13 +36,14 @@ class CommandGateway:
     mode = "approval"
 
     def __init__(self, send=lambda msg: None, plans: dict[str, set[int]] | None = None,
-                 reachable=lambda tls: True):
+                 reachable=lambda tls: True, store=None):
         """plans: tls id -> approved plan ids. Without it every plan request is refused.
-        reachable(tls): is the device of that junction connected right now."""
+        reachable(tls): is the device of that junction connected right now.
+        store: persistent history (urban.store.Store); the audit chain continues from it."""
         self.send = send
         self.plans = plans or {}
         self.reachable = reachable
-        self.audit = AuditLog()
+        self.audit = AuditLog(store=store)
         self.proposals: dict[str, dict] = {}
         self.link_up = True
         self.applied = 0  # commands that actually reached (emulated) equipment
@@ -109,6 +110,7 @@ class CommandGateway:
         if approve and (p["tls"] in self.locked or not (self.link_up and self.reachable(p["tls"]))):
             return None  # nobody to send it to, or nobody we trust: approving would be a promise we cannot keep
         pol = POLICY[p["command"]]
+        p["actor"] = actor
         if not approve:
             p["status"] = "rejected"
             self._last_done[p["tls"]] = t
@@ -137,9 +139,9 @@ class CommandGateway:
         for p in self.proposals.values():
             if p["status"] in ("approved", "active"):
                 self.send({"op": "release", "id": p["id"], "tls": p["tls"]})
-                p["status"], p["end"] = "revoking", "revoked"
+                p["status"], p["end"], p["actor"] = "revoking", "revoked", actor
             elif p["status"] == "pending":
-                p["status"] = "rejected"
+                p["status"], p["actor"] = "rejected", actor
                 self._last_done[p["tls"]] = t
                 self.muted.add(p["tls"])
         self.audit.append(t, "revoked", "*", "*", "all active leases", "kill switch", actor=actor, mode="approval")
@@ -258,6 +260,12 @@ class CommandGateway:
 
     def public(self) -> list[dict]:
         return list(self.proposals.values())[-12:]
+
+    def unsettled(self) -> list[dict]:
+        """Proposals whose record may still change: the recent ones and everything still open."""
+        recent = self.public()
+        seen = {p["id"] for p in recent}
+        return recent + [p for p in self.proposals.values() if p["id"] not in seen and p["status"] in (*OPEN, "revoking")]
 
     @staticmethod
     def _target(p: dict) -> str:
