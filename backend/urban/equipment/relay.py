@@ -14,6 +14,10 @@ class RelayAdapter(ControllerAdapter):
         """write(tls, states): drive the relays of that junction; tables: tls id -> approved plan ids."""
         self.write, self.tables, self.relays = write, tables, relays
 
+    def learn(self, tls, plans):
+        """The approved table as the platform states it at session start."""
+        self.tables[tls] = set(plans)
+
     def plans(self, tls):
         return set(self.tables.get(tls, ()))
 

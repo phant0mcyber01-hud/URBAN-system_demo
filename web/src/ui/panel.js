@@ -2,7 +2,12 @@
 // generated markup actually changes, so hover and scroll state survive the 1 Hz updates.
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
-export const clock = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t) % 60).padStart(2, '0')}`;
+// scenario time as m:ss in simulation; wall-clock time of day in field mode
+let wallClock = false;
+export const setClockMode = (field) => { wallClock = field; };
+export const clock = (t) => (wallClock
+  ? new Date(t * 1000).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  : `${Math.floor(t / 60)}:${String(Math.floor(t) % 60).padStart(2, '0')}`);
 const chip = (cls, text) => `<span class="chip ${cls}">${text}</span>`;
 const kpi = (label, value, cls = '') => `<div class="kpi ${cls}"><b>${value}</b><span>${label}</span></div>`;
 const empty = (text) => `<p class="muted">${text}</p>`;
@@ -139,7 +144,7 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
       const cards = [...S.cmd].filter((c) => c.status !== 'expired' && c.status !== 'rejected').reverse();
       return `<div class="grid">
           ${kpi('ср. скорость, км/ч', S.stats?.mean_speed_kmh ?? '—')}${kpi('потери автобуса, с', S.stats?.bus_avg_loss ?? '—')}
-          ${kpi('сегментов с затором', jam, jam ? 'warn' : '')}${kpi('команд передано, эмуляция', S.audit.applied ?? 0)}
+          ${kpi('сегментов с затором', jam, jam ? 'warn' : '')}${kpi(S.mode === 'field' ? 'команд передано оборудованию' : 'команд передано, эмуляция', S.audit.applied ?? 0)}
         </div>
         <h4>Проблемы, найденные камерами и детекторами</h4>
         ${cards.length ? cards.map(cmdCard).join('') : empty('перекосов нет: нигде одно направление не стоит при свободном поперечном')}
@@ -202,7 +207,7 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
           <small>${r.commands} команд · ${r.audit} записей</small></div>`).join('')}`;
     }],
     security: ['Безопасность', () => `<div class="grid">
-          ${kpi('команд передано оборудованию (эмуляция)', S.audit.applied ?? 0, 'ok')}${kpi('записей в журнале аудита', S.audit.count)}
+          ${kpi(S.mode === 'field' ? 'команд передано оборудованию' : 'команд передано оборудованию (эмуляция)', S.audit.applied ?? 0, 'ok')}${kpi('записей в журнале аудита', S.audit.count)}
         </div>
         <div class="item">${chip(S.link ? 'ok' : 'bad', S.link ? 'связь есть' : 'связь отключена')}
           ${S.link ? 'Платформа продлевает действующие команды.' : 'Продлений нет: светофоры возвращаются к своему плану сами.'}</div>
@@ -210,7 +215,9 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
         <div class="item">${chip('ok', 'аренда')} Команда живёт 3 минуты (два цикла светофора) и продлевается; пропала связь или платформа, оборудование само возвращается к базовому плану.</div>
         <div class="item">${chip('ok', 'пределы')} Можно только выбрать один из планов, утверждённых инженером для этого перекрёстка. Произвольных таймингов нет; цикл не удлиняется, минимальный зелёный учитывает время перехода пешеходов.</div>
         <div class="item">${chip('ok', 'приватность')} Камеры отдают счётчики. Лица, номера и треки жителей не обрабатываются.</div>
-        <div class="item">${chip('shadow', 'эмуляция')} Реальные светофоры не затронуты: оборудование в демо смоделировано.</div>
+        ${S.mode === 'field'
+          ? `<div class="item">${chip('ok', 'оборудование')} Команды уходят на реальные устройства URBAN Edge; очереди только из их отчётов.</div>`
+          : `<div class="item">${chip('shadow', 'эмуляция')} Реальные светофоры не затронуты: оборудование в демо смоделировано.</div>`}
         <h4>Устройства URBAN Edge</h4>
         ${deviceSummary()}
         <h4>Журнал аудита (цепочка хэшей)</h4>

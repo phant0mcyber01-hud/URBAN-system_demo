@@ -23,9 +23,10 @@ MAX_SKEW = 30  # seconds between the issue time of a command and the clock of th
 
 
 class EdgeDevice:
-    def __init__(self, device_id: str, tls: str, key, gateway_public, adapter: ControllerAdapter,
+    def __init__(self, device_id: str, tls: str | None, key, gateway_public, adapter: ControllerAdapter,
                  state_path: Path | None = None, wall=time.time, script: dict | None = None):
-        """state_path: where the last accepted sequence number is kept; wall(): wall-clock seconds;
+        """tls: the junction this unit is installed at, or None to take it from the platform's welcome;
+        state_path: where the last accepted sequence number is kept; wall(): wall-clock seconds;
         script: demo faults, e.g. {"heat": (120, 540)} or {"door": (420, 500)} in simulation seconds."""
         self.id, self.tls, self.key, self.gateway_public = device_id, tls, key, gateway_public
         self.adapter = adapter
@@ -47,6 +48,19 @@ class EdgeDevice:
     def hello(self, nonce: str) -> dict:
         return {"type": "hello", "device": self.id, "version": VERSION,
                 "sig": crypto.sign(self.key, {"device": self.id, "nonce": nonce})}
+
+    def on_welcome(self, msg: dict) -> bool:
+        """The platform states which junction this unit is enrolled for and which plans are approved
+        there (the junction passport). A unit configured for another junction refuses to work."""
+        tls = msg.get("tls")
+        if self.tls is None and isinstance(tls, str) and tls:
+            self.tls = tls
+        if tls != self.tls:
+            return False
+        learn, plans = getattr(self.adapter, "learn", None), msg.get("plans")
+        if learn is not None and isinstance(plans, list):
+            learn(self.tls, {int(p) for p in plans if isinstance(p, (int, str)) and str(p).isdigit()})
+        return True
 
     # ---- commands from the gateway
     def on_command(self, env: dict) -> bool:

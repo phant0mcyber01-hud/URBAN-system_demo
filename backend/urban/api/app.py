@@ -38,13 +38,14 @@ from ..core.bus import PLATFORM_FRAME, SOURCE_FRAME, Bus
 from ..devices import crypto
 from ..devices.hub import DeviceHub
 from ..devices.registry import ACTIVE, REVOKED, Registry, provision
-from ..junctions import load_all_junctions, load_cameras
+from ..junctions import approved_plans, load_all_junctions, load_cameras
 from ..platform import Platform
-from ..sources import sumo
+from ..sources import clock, sumo
 from ..sources.field import FieldEmulator
 from ..store import Store
 
-SPAWN_EDGE = os.getenv("URBAN_EDGE", "auto") != "manual"  # manual: start `python -m urban.edge` yourself
+FIELD = c.SOURCE == "field"  # real units, no simulation, no demo fleet, no field link
+SPAWN_EDGE = os.getenv("URBAN_EDGE", "auto") != "manual" and not FIELD  # manual: start `python -m urban.edge` yourself
 
 junctions = load_all_junctions() or load_cameras()
 provision(junctions, c.PKI)  # demo convenience: a deployment enrols devices one by one
@@ -58,8 +59,9 @@ bus = Bus()
 field = FieldEmulator(FIELD_TOKEN)
 meta = json.loads((c.OUT / "meta.json").read_text())
 hub = DeviceHub(Registry(c.PKI / "devices.json"), crypto.load_private((c.PKI / "gateway.key").read_text()),
-                on_report=lambda rec, report: platform.on_report(rec["tls"], report), clock=lambda: platform.t)
-store = Store(c.DB, mode="simulation")
+                on_report=lambda rec, report: platform.on_report(rec["tls"], report), clock=lambda: platform.t,
+                plans=approved_plans(junctions))
+store = Store(c.DB, mode=c.SOURCE)
 CHAIN = store.audit_verify()  # the whole stored audit chain, checked once at start
 platform = Platform(meta["center"], meta["radius"], junctions, send=hub.send, reachable=hub.online, store=store)
 clients: set[WebSocket] = set()
@@ -94,6 +96,9 @@ def source_thread(loop: asyncio.AbstractEventLoop, stop: threading.Event):
             raise SystemExit
         asyncio.run_coroutine_threadsafe(bus.publish(SOURCE_FRAME, frame), loop)
 
+    if FIELD:
+        clock.run(publish, stop)
+        return
     while not stop.is_set():  # loop the scenario for the demo
         try:
             sumo.run(publish, field=field)
@@ -112,7 +117,9 @@ async def lifespan(_):
     else:
         print(f"\n  Accounts: {len(accounts.users)} (manage with python -m urban.users)", flush=True)
     print(f"  History: {c.DB.name}, run #{store.run}, audit chain {CHAIN['records']} records, "
-          f"{'intact' if CHAIN['intact'] else 'BROKEN at #' + str(CHAIN['broken_at'])}\n", flush=True)
+          f"{'intact' if CHAIN['intact'] else 'BROKEN at #' + str(CHAIN['broken_at'])}", flush=True)
+    print("  Mode: FIELD: no simulation, waiting for real URBAN Edge units\n" if FIELD
+          else "  Mode: simulation (SUMO), demo Edge fleet\n", flush=True)
     field.loop = asyncio.get_running_loop()
     stop = threading.Event()
     threading.Thread(target=source_thread, args=(field.loop, stop), daemon=True).start()
@@ -153,6 +160,9 @@ async def device_endpoint(ws: WebSocket):
 
 @app.websocket("/field")
 async def field_endpoint(ws: WebSocket):
+    if FIELD:  # there are no emulated cables in field mode
+        await ws.close(code=4404)
+        return
     await field.serve(ws)
 
 
@@ -277,12 +287,12 @@ async def user_enabled(name: str, body: Enabled, who: str = Depends(admin)):
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "t": platform.t, "devices_online": len(hub.sessions)}
+    return {"ok": True, "t": platform.t, "mode": c.SOURCE, "devices_online": len(hub.sessions)}
 
 
 @app.get("/api/state")
 def state(who: str = Depends(viewer)):
-    return platform.snapshot()
+    return {**platform.snapshot(), "mode": c.SOURCE}
 
 
 @app.get("/api/audit")

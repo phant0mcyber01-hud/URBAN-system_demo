@@ -28,3 +28,24 @@ class ControllerAdapter(ABC):
 
     def keepalive(self, tls: str, plan: int) -> None:
         """Confirm the selected plan. Protocols with a loss-of-communication timer need this."""
+
+
+class NoController(ControllerAdapter):
+    """A unit with no controller wired yet: it learns the approved table from the platform, reports
+    queues and health, and refuses every plan request so that nothing is promised to anyone."""
+
+    def __init__(self):
+        self.tables: dict[str, set[int]] = {}
+        self.last_error = "no controller attached"
+
+    def learn(self, tls: str, plans: set[int]):
+        self.tables[tls] = set(plans)
+
+    def plans(self, tls):
+        return set(self.tables.get(tls, ()))
+
+    def select(self, tls, plan):
+        raise AdapterError("no controller attached")
+
+    def base(self, tls):
+        pass

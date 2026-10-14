@@ -14,6 +14,9 @@ class FieldAdapter(ControllerAdapter):
         self.send, self._plans = send, plans
         self.last_error: str | None = None  # what the unit reports as its controller link state
 
+    def learn(self, tls, plans):
+        self._plans[tls] = set(plans)
+
     def plans(self, tls):
         return set(self._plans.get(tls, ()))
 

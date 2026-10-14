@@ -19,9 +19,12 @@ HELLO_TIMEOUT = 10  # seconds a connection may stay unauthenticated
 
 
 class DeviceHub:
-    def __init__(self, registry: Registry, gateway_key, on_report, clock=lambda: 0, wall=time.time):
+    def __init__(self, registry: Registry, gateway_key, on_report, clock=lambda: 0, wall=time.time,
+                 plans: dict[str, set[int]] | None = None):
         """on_report(device record, report dict); clock(): platform time sent in the welcome;
-        wall(): wall-clock seconds stamped into every command, so a device can refuse stale ones."""
+        wall(): wall-clock seconds stamped into every command, so a device can refuse stale ones;
+        plans: tls id -> approved plan ids, handed to each unit at session start (its junction passport)."""
+        self.plans = plans or {}
         self.registry, self.key, self.on_report, self.clock, self.wall = registry, gateway_key, on_report, clock, wall
         self.sessions: dict[str, WebSocket] = {}
         self.seen: dict[str, dict] = {}  # device id -> {"at": wall time, "health": {...}}
@@ -79,7 +82,8 @@ class DeviceHub:
             self.sessions[device] = ws
             self.connects[device] = self.connects.get(device, 0) + 1
             self.seen[device] = {"at": time.time(), "health": {"version": hello.get("version")}}
-            await ws.send_text(json.dumps({"type": "welcome", "t": self.clock()}))
+            await ws.send_text(json.dumps({"type": "welcome", "t": self.clock(), "tls": rec["tls"],
+                                           "plans": sorted(self.plans.get(rec["tls"], ()))}))
             while True:
                 report = json.loads(await ws.receive_text())
                 if isinstance(report, dict) and report.get("type") == "report":

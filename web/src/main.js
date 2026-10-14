@@ -9,7 +9,7 @@ import { createMap } from './map/view.js';
 import { createCameraView } from './map/cameraView.js';
 import { createSearch } from './map/search.js';
 import { createPlaceCard, describe } from './map/placeCard.js';
-import { createPanel, clock } from './ui/panel.js';
+import { createPanel, clock, setClockMode } from './ui/panel.js';
 import { createState } from './state.js';
 import * as api from './api.js';
 
@@ -115,6 +115,16 @@ function renderOperator() {
   $('op-link').textContent = S.link ? 'Отключить связь' : 'Восстановить связь';
   $('op-link').classList.toggle('on', !S.link);
   panel.render();
+}
+function renderMode() {
+  const field = S.mode === 'field';
+  const chip = $('modechip');
+  chip.textContent = field ? 'ОБОРУДОВАНИЕ' : 'ЭМУЛЯЦИЯ';
+  chip.className = `chip ${field ? 'ok' : 'shadow'}`;
+  chip.title = field ? 'Платформа работает с реальными устройствами URBAN Edge' : 'Оборудование в демо смоделировано';
+  $('foot-note').textContent = field
+    ? 'Режим оборудования: очереди и состояние шкафов приходят от устройств URBAN Edge; трафик на карте не показывается (видеопотока нет); сеть и здания из OSM.'
+    : 'Демо на синтетических данных: трафик, автобусные линии, телеметрия, камеры и сами светофоры смоделированы; сеть и здания из OSM.';
 }
 function signedOut() {
   S.user = null;
@@ -269,7 +279,13 @@ function connect() {
   ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
   ws.onopen = async () => {
     ws.send(JSON.stringify({ token: api.wsToken() }));
-    try { S.applySnapshot(await api.get('/api/state')); } catch { /* the socket will tell us if the session is gone */ }
+    try {
+      const snap = await api.get('/api/state');
+      S.mode = snap.mode ?? 'simulation';
+      setClockMode(S.mode === 'field');
+      renderMode();
+      S.applySnapshot(snap);
+    } catch { /* the socket will tell us if the session is gone */ }
     renderOperator();
   };
   ws.onmessage = (m) => onFrame(JSON.parse(m.data));
