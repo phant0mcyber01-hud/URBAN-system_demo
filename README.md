@@ -8,7 +8,7 @@
 
 ![статус](https://img.shields.io/badge/статус-демо--макет-8a63d2)
 ![python](https://img.shields.io/badge/python-3.11+-3776ab)
-![tests](https://img.shields.io/badge/тесты-97%20проходят-2ea44f)
+![tests](https://img.shields.io/badge/тесты-102%20проходят-2ea44f)
 ![пилот](https://img.shields.io/badge/пилот-Фергана-5cc8ff)
 
 ![Центр управления: платформа нашла перекос на перекрёстке, оператор применил перенос зелёного](docs/img/control.png)
@@ -215,6 +215,7 @@ backend/urban/
   gateway/       Command Gateway: политика, аренда, журнал аудита
   platform.py    ядро: анализ и предложения
   store.py       история в SQLite: цепочка аудита между запусками, команды, здоровье устройств, очереди
+  sensors/       камерный конвейер блока: детекции -> калибровка -> треки -> очередь в метрах -> queues.json
   api/           HTTP/WebSocket, вход и роли
   accounts.py    учётные записи, роли, сессии; users.py — консоль
   pipeline/      подготовка данных из OSM

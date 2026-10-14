@@ -76,7 +76,7 @@ PLATFORM=urban.example.uz:8443
 SERVER_NAME=urban.example.uz
 ADAPTER=none            # none | relay (плата реле по Modbus RTU) | ntcip (SNMP к контроллеру)
 CONTROLLER=             # relay: порт платы, например /dev/ttyUSB0; ntcip: адрес контроллера, например 192.168.10.2:161
-SENSORS=/run/urban/queues.json
+SENSORS=/run/urban/queues.json   # пишет камерный конвейер: python -m urban.sensors --calibration /etc/urban/cameras.json --out /run/urban/queues.json
 ```
 
 ```bash
