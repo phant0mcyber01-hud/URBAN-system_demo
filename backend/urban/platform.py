@@ -38,6 +38,7 @@ class Platform:
         self.dev: dict[str, dict] = {}        # junction id -> brief of its Edge unit, for the UI
         self.dev_alerts: list[dict] = []      # health alerts as they appeared, for the feed and the audit log
         self._dev_state: dict[str, set] = {}  # device id -> alert kinds currently raised
+        self._dev_keys: dict[str, str] = {}   # device id -> fingerprint of its enrolled key
         self.queues, self.last_cmd_version, self._logged = {}, -1, 0
         self._reset()
         self.t = -1
@@ -172,6 +173,12 @@ class Platform:
             self._dev_sampled = t
             self.store.add_device_samples(rows)
         for row in rows:
+            fp = row.get("fingerprint")
+            if fp and self._dev_keys.get(row["id"], fp) != fp:  # a new key was enrolled for this unit
+                self.gateway.audit.append(t, "device-key-changed", "-", "-", row["id"],
+                                          f"{self._dev_keys[row['id']]} -> {fp}", actor="registry", mode="approval")
+            if fp:
+                self._dev_keys[row["id"]] = fp
             alerts = health.assess(row)
             kinds = {(a["kind"], a["level"]) for a in alerts}
             before = self._dev_state.get(row["id"], set())

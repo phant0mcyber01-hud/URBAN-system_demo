@@ -48,7 +48,8 @@ FIELD = c.SOURCE == "field"  # real units, no simulation, no demo fleet, no fiel
 SPAWN_EDGE = os.getenv("URBAN_EDGE", "auto") != "manual" and not FIELD  # manual: start `python -m urban.edge` yourself
 
 junctions = load_all_junctions() or load_cameras()
-provision(junctions, c.PKI, host=c.DEVICE_NAME)  # demo convenience: a deployment enrols devices one by one
+# the demo generates every unit's key here; in field mode units bring their own and are enrolled one by one
+provision(junctions, c.PKI, host=c.DEVICE_NAME, demo_devices=not FIELD)
 FIELD_TOKEN = secrets.token_urlsafe(24)  # new on every start; the Edge process reads it from the pki folder
 (c.PKI / "field.token").write_text(FIELD_TOKEN)
 
@@ -397,6 +398,28 @@ class Link(BaseModel):
 
 class DeviceStatus(BaseModel):
     status: str
+
+
+class Enrolment(BaseModel):
+    junction: str        # junction id, e.g. J-21
+    public_key: str      # hex, printed by `python -m urban.edge --keygen` on the unit
+    serial: str = ""
+
+
+@app.post("/api/devices/{device}/enroll")
+async def device_enroll(device: str, body: Enrolment, who: str = Depends(admin)):
+    """Enrol a unit's public key (installation or a replaced box). The unit's private key never leaves it."""
+    junction = next((j for j in junctions if j["id"] == body.junction), None)
+    if junction is None:
+        raise HTTPException(404, "unknown junction")
+    try:
+        rec = await hub.enroll(device, junction, body.public_key, body.serial)
+    except ValueError as err:
+        raise HTTPException(400, str(err))
+    fp = crypto.fingerprint(rec["public_key"])
+    platform.gateway.audit.append(platform.t, "device-enrolled", "-", "-", device, f"{body.junction} key {fp}",
+                                  actor=who, mode="approval")
+    return {"id": rec["id"], "junction": rec["junction"], "serial": rec["serial"], "fingerprint": fp}
 
 
 # async handlers run on the event loop, the same thread that runs Platform.handle: no races on gateway state

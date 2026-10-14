@@ -9,6 +9,9 @@ and the controller in each cabinet.
 One real unit, on its own computer in a cabinet (the platform in field mode):
     python -m urban.edge --unit edge-J-21 --platform city.example:8443 --adapter relay --controller /dev/ttyUSB0
     python -m urban.edge --unit edge-J-21 --platform city.example:8443 --adapter ntcip --controller 192.168.10.2:161
+Before the first start the unit makes its own key; only the public half leaves it:
+    python -m urban.edge --keygen --unit edge-J-21 [--pki /etc/urban/pki]
+and the administrator enrols that public key on the platform (python -m urban.provision enroll ...).
 It needs its key, the CA of the platform and the gateway's public key (--pki or --key/--ca/--gateway-pub),
 learns its junction and the approved plan table from the platform at session start, ticks on its own
 wall clock, and reads queue lengths from --sensors (a JSON file {approach id: metres} that the camera
@@ -259,8 +262,30 @@ class Unit:
         await asyncio.gather(self.ticker(), self.session())
 
 
+def keygen(args):
+    """Make this unit's key on the unit. Refuses to overwrite one: a new key means re-enrolment."""
+    if not args.unit:
+        raise SystemExit("--keygen needs --unit <device id>, e.g. edge-J-21")
+    path = Path(args.key or Path(args.pki) / "edge" / f"{args.unit}.key")
+    if path.exists():
+        raise SystemExit(f"{path} exists; remove it on purpose if this unit really needs a new key")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    key = crypto.new_key()
+    path.write_text(crypto.private_hex(key))
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    public = crypto.public_hex(key)
+    print(f"private key: {path} (stays on this unit)")
+    print(f"public key:  {public}")
+    print(f"fingerprint: {crypto.fingerprint(public)}")
+    print(f"on the platform: python -m urban.provision enroll {args.unit} --junction <id> --public {public}")
+
+
 def main():
     ap = argparse.ArgumentParser(description="URBAN Edge units")
+    ap.add_argument("--keygen", action="store_true", help="make this unit's key and print its public half, then exit")
     ap.add_argument("--only", help="demo fleet: run a single unit, by junction id (for example J-21)")
     ap.add_argument("--keep-running", action="store_true", help="demo fleet: do not stop when the field link disappears")
     ap.add_argument("--unit", help="one real unit: its device id (for example edge-J-21)")
@@ -280,6 +305,9 @@ def main():
     for name in ("--key", "--ca", "--gateway-pub", "--state"):
         ap.add_argument(name)
     args = ap.parse_args()
+    if args.keygen:
+        keygen(args)
+        return
     try:
         asyncio.run(Unit(args).run() if args.unit else Fleet(args.only).run(args.keep_running))
     except (KeyboardInterrupt, SystemExit):

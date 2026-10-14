@@ -31,6 +31,7 @@ class DeviceHub:
         self.sessions: dict[str, WebSocket] = {}
         self.seen: dict[str, dict] = {}  # device id -> {"at": wall time, "health": {...}}
         self.connects: dict[str, int] = {}  # device id -> sessions since the platform started
+        self._stale: set[str] = set()  # sessions opened on a key or status that has since changed
         self._seq = time.time_ns() // 1_000_000  # survives restarts without going backwards
 
     # ---- towards devices: this is gateway.send
@@ -107,6 +108,27 @@ class DeviceHub:
         return {"at": time.time(), "health": {**last, **clean({"version": version})}}
 
     # ---- registry operations
+    def _sync(self):
+        """Pick up enrolments made by another process; sessions of units whose key or status changed are closed
+        (on the event loop; from a worker thread they are remembered and closed on the next call there)."""
+        self._stale |= self.registry.refresh()
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        for device in list(self._stale):
+            self._stale.discard(device)
+            ws = self.sessions.pop(device, None)
+            if ws is not None:
+                asyncio.ensure_future(_close(ws))
+
+    async def enroll(self, device: str, junction: dict, public: str, serial: str = "") -> dict:
+        rec = self.registry.enroll(device, junction, public, serial)
+        ws = self.sessions.pop(device, None)
+        if ws is not None:  # a session on the previous key ends; the unit reconnects with its new one
+            await _close(ws)
+        return rec
+
     async def set_status(self, device: str, status: str) -> dict | None:
         rec = self.registry.set_status(device, status)
         if rec is not None and status == REVOKED:
@@ -116,12 +138,14 @@ class DeviceHub:
         return rec
 
     def status(self) -> list[dict]:
+        self._sync()
         now = time.time()
         out = []
         for rec in self.registry.devices.values():
             seen = self.seen.get(rec["id"], {})
             out.append({"id": rec["id"], "junction": rec["junction"], "tls": rec["tls"], "name": rec.get("name", ""),
                         "serial": rec.get("serial", ""), "enrolled": rec.get("enrolled", ""),
+                        "fingerprint": crypto.fingerprint(rec["public_key"]),
                         "status": rec["status"], "online": rec["id"] in self.sessions,
                         "connects": self.connects.get(rec["id"], 0),
                         "age": round(now - seen["at"]) if "at" in seen else None,

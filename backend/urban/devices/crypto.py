@@ -5,6 +5,7 @@ Two things are signed, independently of the TLS channel underneath:
 - every command is signed by the gateway key, so a device obeys only the real gateway even
   if the channel is terminated or tampered with somewhere in between.
 """
+import hashlib
 import json
 
 from cryptography.exceptions import InvalidSignature
@@ -39,6 +40,12 @@ def load_private(text: str) -> Ed25519PrivateKey:
 
 def load_public(text: str) -> Ed25519PublicKey:
     return Ed25519PublicKey.from_public_bytes(bytes.fromhex(text.strip()))
+
+
+def fingerprint(public: str) -> str:
+    """Short form of a public key (hex) to compare by eye or over the phone: XXXX-XXXX-XXXX-XXXX."""
+    digest = hashlib.sha256(bytes.fromhex(public.strip())).hexdigest()[:16].upper()
+    return "-".join(digest[i:i + 4] for i in range(0, 16, 4))
 
 
 def sign(key: Ed25519PrivateKey, obj) -> str:

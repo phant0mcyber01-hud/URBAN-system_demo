@@ -1,8 +1,10 @@
 """Device registry: which URBAN Edge units exist, where they are installed and whether they are trusted.
 
-Also the demo provisioning: keys and certificates for the local setup. In a deployment a
-device generates its key inside its secure element and only the public half is enrolled;
-here everything is generated on one machine and kept under data/pki, which is not in git.
+In a deployment a unit generates its own key (python -m urban.edge --keygen; later inside its
+secure element) and only the public half is enrolled here (python -m urban.provision enroll).
+The demo instead generates every unit's key on one machine under data/pki, which is not in git.
+The registry file is re-read when another process changes it, so enrolment works while the
+platform runs.
 """
 import datetime
 import ipaddress
@@ -27,11 +29,60 @@ def device_id(junction_id: str) -> str:
 class Registry:
     def __init__(self, path: Path):
         self.path = path
-        self.devices: dict[str, dict] = {d["id"]: d for d in json.loads(path.read_text(encoding="utf-8"))}
+        self.devices: dict[str, dict] = {}
+        self._by_tls: dict[str, dict] = {}
+        self._stamp = None
+        self.refresh()
+
+    def _load(self):
+        self.devices = {d["id"]: d for d in json.loads(self.path.read_text(encoding="utf-8"))}
+        self._by_tls = {d["tls"]: d for d in self.devices.values()}
+
+    def refresh(self) -> set[str]:
+        """Re-read the file if another process changed it. Returns the ids whose key or status changed,
+        or that appeared or disappeared: their open sessions must not continue on the old trust."""
+        try:
+            st = self.path.stat()
+            stamp = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return set()
+        if stamp == self._stamp:
+            return set()
+        before = {i: (d["public_key"], d["status"]) for i, d in self.devices.items()}
+        try:
+            self._load()
+        except (OSError, ValueError):
+            return set()  # half-written: next time
+        self._stamp = stamp
+        after = {i: (d["public_key"], d["status"]) for i, d in self.devices.items()}
+        return {i for i in before.keys() | after.keys() if before.get(i) != after.get(i)}
+
+    def _save(self):
+        save(self.path, self.devices)
+        st = self.path.stat()
+        self._stamp = (st.st_mtime_ns, st.st_size)
         self._by_tls = {d["tls"]: d for d in self.devices.values()}
 
     def by_tls(self, tls: str) -> dict | None:
         return self._by_tls.get(tls)
+
+    def enroll(self, device: str, junction: dict, public: str, serial: str = "") -> dict:
+        """Enrol a unit's public key for a junction ({id, tls, name}); a known unit gets the new key (replaced box).
+        The private key never comes here."""
+        crypto.load_public(public)  # raises ValueError if it is not an Ed25519 public key
+        if not device.startswith("edge-") or len(device) > 60:
+            raise ValueError("device id must look like edge-<junction>")
+        other = self._by_tls.get(junction["tls"])
+        if other is not None and other["id"] != device:
+            raise ValueError(f"junction {junction['id']} already has unit {other['id']}; revoke and remove it first")
+        rec = self.devices.get(device, {})
+        rec.update({"id": device, "junction": junction["id"], "tls": junction["tls"], "name": junction.get("name", ""),
+                    "public_key": public.strip().lower(), "status": ACTIVE,
+                    "serial": serial or rec.get("serial") or f"URB-{secrets.token_hex(3).upper()}",
+                    "enrolled": datetime.date.today().isoformat()})
+        self.devices[device] = rec
+        self._save()
+        return rec
 
     def authenticate(self, device: str, nonce: str, signature: str) -> dict | None:
         """The enrolled, non-revoked device that signed this challenge, or None."""
@@ -45,7 +96,7 @@ class Registry:
         rec = self.devices.get(device)
         if rec is not None and status in (ACTIVE, REVOKED):
             rec["status"] = status
-            save(self.path, self.devices)
+            self._save()
         return rec
 
 
@@ -97,9 +148,11 @@ def _write_tls(pki: Path, host: str | None = None):
     (pki / "server.key").write_bytes(key.private_bytes(pem, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
 
 
-def provision(junctions: list[dict], pki: Path, host: str | None = None) -> bool:
+def provision(junctions: list[dict], pki: Path, host: str | None = None, demo_devices: bool = True) -> bool:
     """Create whatever is missing: TLS material, the gateway signing key, one identity per junction.
     host: the name devices connect to; a server certificate that does not cover it is reissued.
+    demo_devices: also generate every unit's private key here (demo only). Without it the registry only
+    holds what was enrolled; real units bring their own keys.
 
     Returns True if anything was created. Existing devices keep their keys and status.
     """
@@ -123,6 +176,11 @@ def provision(junctions: list[dict], pki: Path, host: str | None = None) -> bool
 
     path = pki / "devices.json"
     devices = {d["id"]: d for d in json.loads(path.read_text(encoding="utf-8"))} if path.exists() else {}
+    if not demo_devices:
+        if not path.exists():
+            save(path, devices)
+            created = True
+        return created
     for j in junctions:
         ident = device_id(j["id"])
         if ident in devices and (pki / "edge" / f"{ident}.key").exists():
