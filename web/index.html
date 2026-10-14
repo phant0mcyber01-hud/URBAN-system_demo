@@ -57,6 +57,8 @@
       <p class="muted">Вход только по учётной записи. Роли: наблюдатель, оператор, администратор.</p>
       <label>Имя <input id="login-name" autocomplete="username" required autofocus /></label>
       <label>Пароль <input id="login-pass" type="password" autocomplete="current-password" required /></label>
+      <label id="login-code-row" hidden>Код из приложения <input id="login-code" inputmode="numeric" autocomplete="one-time-code"
+        maxlength="6" pattern="[0-9]{6}" placeholder="6 цифр" /></label>
       <button type="submit">Войти</button>
       <small id="login-err" class="err"></small>
     </form>

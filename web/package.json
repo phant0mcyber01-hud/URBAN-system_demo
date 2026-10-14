@@ -12,7 +12,8 @@
     "@deck.gl/mapbox": "^9.4.0",
     "@deck.gl/mesh-layers": "^9.4.0",
     "@luma.gl/engine": "^9.4.2",
-    "maplibre-gl": "4.7.1"
+    "maplibre-gl": "4.7.1",
+    "qrcode-generator": "1.4.4"
   },
   "devDependencies": {
     "vite": "5.4.11"

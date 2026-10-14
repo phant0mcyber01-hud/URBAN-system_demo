@@ -21,8 +21,13 @@ async function call(method, path, body) {
     method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
   });
-  if (r.status === 401) remember('');
-  if (!r.ok) throw new Error(ERRORS[r.status] ?? `ошибка ${r.status}`);
+  if (r.status === 401 && path !== '/api/login') remember('');
+  if (!r.ok) {
+    const err = new Error(ERRORS[r.status] ?? `ошибка ${r.status}`);
+    err.status = r.status;
+    try { err.detail = (await r.json()).detail; } catch { /* no body */ }
+    throw err;
+  }
   return r.json();
 }
 export const get = (path) => call('GET', path);
@@ -34,13 +39,19 @@ export async function whoami() {
   try { return await get('/api/me'); } catch { return null; }
 }
 
-export async function login(name, password) {
+/** Sign in. Throws an error with .needCode when the account has a second factor and no code was given. */
+export async function login(name, password, code = '') {
   let s;
-  try { s = await post('/api/login', { name, password }); } catch (e) {
-    throw new Error(e.message === ERRORS[401] ? 'неверное имя или пароль' : e.message);
+  try { s = await post('/api/login', { name, password, code }); } catch (e) {
+    if (e.detail === 'code required') {
+      const need = new Error('введите код из приложения-аутентификатора');
+      need.needCode = true;
+      throw need;
+    }
+    throw new Error(e.status === 401 ? (code ? 'неверное имя, пароль или код' : 'неверное имя или пароль') : e.message);
   }
   remember(s.token);
-  return { name: s.name, role: s.role };
+  return { name: s.name, role: s.role, mfa: s.mfa, mfa_setup: s.mfa_setup };
 }
 
 export async function logout() {

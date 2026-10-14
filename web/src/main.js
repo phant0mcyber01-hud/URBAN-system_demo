@@ -11,6 +11,7 @@ import { createSearch } from './map/search.js';
 import { createPlaceCard, describe } from './map/placeCard.js';
 import { createPanel, clock, esc, setClockMode } from './ui/panel.js';
 import { createState } from './state.js';
+import qrcode from 'qrcode-generator';
 import * as api from './api.js';
 
 const $ = (id) => document.getElementById(id);
@@ -104,8 +105,8 @@ async function run(action) {
 function renderOperator() {
   $('op-tools').hidden = !S.user;
   if (S.user) {
-    $('op-user').textContent = `${S.user.name} · ${ROLE_TEXT[S.user.role] ?? S.user.role}`;
-    $('op-user').className = `chip ${S.user.role === 'viewer' ? 'info' : 'ok'}`;
+    $('op-user').textContent = `${S.user.name} · ${ROLE_TEXT[S.user.role] ?? S.user.role}${S.user.mfa_setup ? ' · нужен второй фактор' : ''}`;
+    $('op-user').className = `chip ${S.user.mfa_setup ? 'warn' : S.user.role === 'viewer' ? 'info' : 'ok'}`;
   }
   $('op-link').hidden = $('op-revoke').hidden = !S.can('operator');
   $('op-users').textContent = S.can('admin') ? 'Учётные записи' : 'Мой пароль';
@@ -132,28 +133,64 @@ function signedOut() {
   $('users').hidden = true;
   $('login').hidden = false;
   $('login-pass').value = '';
+  $('login-code').value = '';
+  $('login-code-row').hidden = true;
   $('login-name').focus();
   renderOperator();
+}
+function afterSignIn() {
+  if (!S.user?.mfa_setup) return;
+  toast('Для вашей роли нужен второй фактор: пока он не включён, права только на просмотр');
+  $('users').hidden = false;
+  renderUsers();
 }
 $('login-form').onsubmit = async (e) => {
   e.preventDefault();
   $('login-err').textContent = '';
   try {
-    S.user = await api.login($('login-name').value.trim(), $('login-pass').value);
-  } catch (err) { $('login-err').textContent = err.message; return; }
+    S.user = await api.login($('login-name').value.trim(), $('login-pass').value, $('login-code').value.trim());
+  } catch (err) {
+    $('login-err').textContent = err.message;
+    if (err.needCode) { $('login-code-row').hidden = false; $('login-code').focus(); }
+    $('login-code').value = '';
+    return;
+  }
   $('login').hidden = true;
   $('login-pass').value = '';
+  $('login-code').value = '';
+  $('login-code-row').hidden = true;
   renderOperator();
   connect();
+  afterSignIn();
 };
 $('op-logout').onclick = async () => { await api.logout(); signedOut(); };
 $('op-revoke').onclick = () => run(() => api.post('/api/revoke-all'));
 $('op-link').onclick = () => run(() => api.post('/api/link', { up: !S.link }));
 
 // accounts dialog: admins manage everyone, others change their own password
+const MFA_TEXT = 'Одноразовые коды из приложения-аутентификатора (Google Authenticator, Aegis, FreeOTP и подобные).';
+function mfaSection() {
+  if (S.user.mfa) return `<h4>Второй фактор</h4><p class="muted">Включён. ${MFA_TEXT} Потеряли телефон — администратор сбросит.</p>`;
+  return `<form data-form="mfa-start"><h4>Второй фактор</h4>
+      <p class="muted">${S.user.mfa_setup ? '<b>Для вашей роли обязателен.</b> ' : ''}${MFA_TEXT}</p>
+      <label>Текущий пароль <input name="current" type="password" autocomplete="current-password" required /></label>
+      <button type="submit">Включить</button></form>`;
+}
+function mfaEnrol(started) {
+  const qr = qrcode(0, 'M');
+  qr.addData(started.uri);
+  qr.make();
+  const secret = started.secret.replace(/(.{4})/g, '$1 ').trim();
+  return `<form data-form="mfa-confirm"><h4>Второй фактор</h4>
+      <p class="muted">Отсканируйте код приложением или введите ключ вручную, затем введите 6 цифр из приложения.</p>
+      <div class="qr">${qr.createSvgTag(4, 8)}</div>
+      <p><code class="secret">${esc(secret)}</code></p>
+      <label>Код из приложения <input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required /></label>
+      <button type="submit">Подтвердить</button></form>`;
+}
 async function renderUsers() {
   const body = $('users-body');
-  const own = `<form data-form="password"><h4>Мой пароль</h4>
+  const own = `${mfaSection()}<form data-form="password"><h4>Мой пароль</h4>
       <label>Текущий пароль <input name="current" type="password" autocomplete="current-password" required /></label>
       <label>Новый пароль (от 10 символов) <input name="password" type="password" autocomplete="new-password" required minlength="10" /></label>
       <button type="submit">Сменить пароль</button></form>`;
@@ -163,8 +200,9 @@ async function renderUsers() {
   body.innerHTML = `<p class="muted">Наблюдатель смотрит, оператор решает, администратор ещё управляет устройствами и учётными записями.
       Пароль хранится как scrypt-хэш в <code>data/users.json</code>; то же можно делать из консоли: <code>python -m urban.users</code>.</p>
     ${users.map((u) => `<div class="item row ${u.enabled ? '' : 'off'}">
-      <span><b>${esc(u.name)}</b>${chipHtml(u.role)}${u.enabled ? '' : chipHtml('off')}<small>с ${esc(u.created)}</small></span>
+      <span><b>${esc(u.name)}</b>${chipHtml(u.role)}${u.enabled ? '' : chipHtml('off')}${u.mfa ? '<span class="chip ok">2FA</span>' : u.mfa_required ? '<span class="chip warn">нет 2FA</span>' : ''}<small>с ${esc(u.created)}</small></span>
       <span class="acts">
+        ${u.mfa ? `<button data-mfa-reset="${esc(u.name)}" title="Потерян телефон: при следующем входе второй фактор настраивается заново">Сбросить 2FA</button>` : ''}
         <button data-reset="${esc(u.name)}">Пароль</button>
         ${u.name === S.user.name ? '' : `<button data-enable="${esc(u.name)}" data-to="${u.enabled ? 0 : 1}">${u.enabled ? 'Отключить' : 'Включить'}</button>`}
       </span></div>`).join('')}
@@ -183,6 +221,18 @@ $('users-body').onsubmit = (e) => {
   e.preventDefault();
   const form = e.target, data = Object.fromEntries(new FormData(form));
   run(async () => {
+    if (form.dataset.form === 'mfa-start') {
+      const started = await api.post('/api/me/mfa/start', { current: data.current });
+      form.outerHTML = mfaEnrol(started);
+      $('users-body').querySelector('[data-form=mfa-confirm] input').focus();
+      return;
+    }
+    if (form.dataset.form === 'mfa-confirm') {
+      await api.post('/api/me/mfa/confirm', { code: data.code });
+      toast('второй фактор включён, войдите заново с кодом');
+      signedOut();
+      return;
+    }
     if (form.dataset.form === 'create') {
       await api.post('/api/users', data);
       toast(`учётная запись ${data.name} создана`);
@@ -197,6 +247,15 @@ $('users-body').onsubmit = (e) => {
 };
 $('users-body').onclick = (e) => {
   const reset = e.target.closest('[data-reset]'), enable = e.target.closest('[data-enable]');
+  const mfaReset = e.target.closest('[data-mfa-reset]');
+  if (mfaReset) {
+    run(async () => {
+      await api.post(`/api/users/${encodeURIComponent(mfaReset.dataset.mfaReset)}/mfa-reset`);
+      toast(`второй фактор ${mfaReset.dataset.mfaReset} сброшен`);
+      renderUsers();
+    });
+    return;
+  }
   if (reset) {
     const row = reset.closest('.item');
     if (row.querySelector('form')) return;
@@ -299,3 +358,4 @@ panel.setTab('overview');
 S.user = await api.whoami();
 if (S.user) connect(); else signedOut();
 renderOperator();
+afterSignIn();

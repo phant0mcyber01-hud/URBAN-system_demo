@@ -33,7 +33,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .. import config as c
-from ..accounts import Accounts, allows
+from ..accounts import Accounts, CodeRequired, allows
 from ..core.bus import PLATFORM_FRAME, SOURCE_FRAME, Bus
 from ..devices import crypto
 from ..devices.hub import DeviceHub
@@ -52,7 +52,7 @@ provision(junctions, c.PKI, host=c.DEVICE_NAME)  # demo convenience: a deploymen
 FIELD_TOKEN = secrets.token_urlsafe(24)  # new on every start; the Edge process reads it from the pki folder
 (c.PKI / "field.token").write_text(FIELD_TOKEN)
 
-accounts = Accounts(c.USERS)
+accounts = Accounts(c.USERS, mfa_roles=c.MFA_ROLES)
 FIRST_PASSWORD = accounts.bootstrap()
 
 bus = Bus()
@@ -215,6 +215,15 @@ viewer, operator, admin = role("viewer"), role("operator"), role("admin")
 class Credentials(BaseModel):
     name: str
     password: str
+    code: str = ""  # one-time code, for accounts with a second factor
+
+
+class Code(BaseModel):
+    code: str
+
+
+class Current(BaseModel):
+    current: str
 
 
 class NewUser(BaseModel):
@@ -234,13 +243,17 @@ class Enabled(BaseModel):
 
 @app.post("/api/login")
 async def login(body: Credentials, request: Request):
-    session = accounts.sign_in(body.name, body.password, request.client.host if request.client else "")
+    try:
+        session = accounts.sign_in(body.name, body.password, request.client.host if request.client else "", body.code)
+    except CodeRequired:
+        raise HTTPException(401, "code required")
     if session is None:
         platform.gateway.audit.append(platform.t, "login-failed", "-", "-", body.name[:40], "", actor="-", mode="approval")
         raise HTTPException(401, "wrong name or password, or too many attempts")
     platform.gateway.audit.append(platform.t, "login", "-", "-", session["name"], session["role"],
                                   actor=session["name"], mode="approval")
-    return {"token": session["token"], "name": session["name"], "role": session["role"]}
+    return {"token": session["token"], "name": session["name"], "role": session["role"],
+            "mfa_setup": session["mfa_setup"], "mfa": bool(accounts.users[session["name"]].get("totp"))}
 
 
 @app.post("/api/logout")
@@ -255,7 +268,33 @@ async def logout(authorization: str = Header(default="")):
 @app.get("/api/me")
 def me(authorization: str = Header(default="")):
     s = _session(authorization)
-    return {"name": s["name"], "role": s["role"]}
+    return {"name": s["name"], "role": s["role"], "mfa_setup": s["mfa_setup"],
+            "mfa": bool(accounts.users.get(s["name"], {}).get("totp"))}
+
+
+@app.post("/api/me/mfa/start")
+async def mfa_start(body: Current, who: str = Depends(viewer)):
+    """Begin enrolling a second factor; needs the current password, so a stolen session cannot do it."""
+    if not accounts.check(who, body.current):
+        raise HTTPException(400, "current password is wrong")
+    return accounts.start_mfa(who)
+
+
+@app.post("/api/me/mfa/confirm")
+async def mfa_confirm(body: Code, who: str = Depends(viewer)):
+    if not accounts.confirm_mfa(who, body.code):
+        raise HTTPException(400, "wrong or expired code")
+    platform.gateway.audit.append(platform.t, "mfa-enabled", "-", "-", who, "", actor=who, mode="approval")
+    return {"ok": True}
+
+
+@app.post("/api/users/{name}/mfa-reset")
+async def mfa_reset(name: str, who: str = Depends(admin)):
+    if name not in accounts.users:
+        raise HTTPException(404, "unknown user")
+    accounts.reset_mfa(name)
+    platform.gateway.audit.append(platform.t, "mfa-reset", "-", "-", name, "", actor=who, mode="approval")
+    return accounts.public(name)
 
 
 @app.get("/api/users")

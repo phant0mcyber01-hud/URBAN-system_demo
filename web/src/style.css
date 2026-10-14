@@ -134,6 +134,10 @@ button.cam span:last-child { color: var(--muted); white-space: nowrap; }
 #users .item.row small { display: block; }
 #users .acts { display: flex; gap: 6px; }
 #users .off { opacity: .55; }
+#users .qr { background: #fff; border-radius: 8px; padding: 6px; width: max-content; margin: 4px 0; }
+#users .qr svg { display: block; }
+#users .secret { font-size: 13px; letter-spacing: .04em; user-select: all; }
+#users .acts { flex-wrap: wrap; justify-content: flex-end; }
 #link.bad { background: #431c1c; color: #ff8a8a; }
 .btns { display: flex; gap: 6px; margin-top: 8px; }
 .btns button.go { background: #143328; border-color: #1f5a43; color: var(--ok); font-weight: 600; }
