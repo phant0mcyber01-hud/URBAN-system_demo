@@ -2,7 +2,8 @@
 
 Этот файл нужен, чтобы быстро войти в проект: человеку из команды или ИИ-ассистенту.
 Здесь замысел, принятые решения, текущее состояние и правила, которые нельзя нарушать.
-Как запускать, написано в [README.md](README.md); как устроено внутри, в [docs/architecture.md](docs/architecture.md);
+Как запускать, написано в [README.md](README.md); как пользоваться, в [docs/guide.md](docs/guide.md);
+как устроено внутри, в [docs/architecture.md](docs/architecture.md);
 что ставить на перекрёсток, в [docs/hardware.md](docs/hardware.md); как под это устроен код, в
 [docs/software.md](docs/software.md).
 
@@ -154,7 +155,8 @@ web/src/
   map/          карта и навигация, окно камеры, поиск, карточка объекта
   ui/panel.js   вкладки центра управления
   state.js, api.js
-docs/           architecture.md, security.md, benchmark.md, hardware.md, software.md
+docs/           guide.md (руководство пользователя), architecture.md, security.md, benchmark.md, hardware.md, software.md
+deploy/         установка на сервер, службы, nginx, копии
 ```
 
 Поток: `sources` → шина → `Platform.handle` (анализ, предложения) → WebSocket → интерфейс.
