@@ -8,7 +8,7 @@
 
 ![статус](https://img.shields.io/badge/статус-продукт%20для%20пилота%20·%20демо--режим-8a63d2)
 ![python](https://img.shields.io/badge/python-3.11+-3776ab)
-![tests](https://img.shields.io/badge/тесты-137%20проходят-2ea44f)
+![tests](https://img.shields.io/badge/тесты-144%20проходят-2ea44f)
 ![пилот](https://img.shields.io/badge/пилот-Фергана-5cc8ff)
 
 ![Центр управления: платформа нашла перекос на перекрёстке, оператор применил перенос зелёного](docs/img/control.png)
@@ -265,7 +265,7 @@ backend/urban/
   accounts.py    учётные записи, роли, сессии; users.py — консоль
   pipeline/      подготовка данных из OSM
   experiments/   замер эффекта управления
-backend/tests/   137 тестов
+backend/tests/   144 теста
 web/src/         интерфейс: scene/ (3D-сцена), map/ (навигация, камера, поиск), ui/ (панель)
 deploy/          сервер: systemd, nginx, установка, резервные копии
 docs/            руководство, архитектура, безопасность, железо, софт под железо, замер

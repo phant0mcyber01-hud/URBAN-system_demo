@@ -19,7 +19,10 @@ learns its junction and the approved plan table from the platform at session sta
 wall clock, and reads queue lengths from --sensors (a JSON file {approach id: metres} that the camera
 pipeline rewrites). Without --sensors it reports no queues; with --adapter none it refuses every plan.
 Transports: relay = Modbus RTU coils on a serial relay board (needs pyserial, `pip install -e "backend[edge]"`),
-ntcip = SNMP SetRequest to the controller. Neither has been tried on real hardware yet.
+ntcip = SNMP SetRequest to the controller: SNMPv3 authPriv by default, with SNMP_USER, SNMP_AUTH_PASS,
+SNMP_PRIV_PASS (and SNMP_AUTH=sha|sha256) from the environment, never from the command line;
+--snmp-version 1 or 0 falls back to a community string for an isolated link. Neither transport has been
+tried on real hardware yet.
 
 Every unit keeps its own outbound TLS session to the platform, authenticates with its own key
 and obeys only commands signed by the gateway.
@@ -27,6 +30,7 @@ and obeys only commands signed by the gateway.
 import argparse
 import asyncio
 import json
+import os
 import ssl
 import time
 import traceback
@@ -41,7 +45,7 @@ from ..equipment.adapter import NoController
 from ..equipment.modbus import ModbusRelayBoard
 from ..equipment.ntcip import NtcipAdapter
 from ..equipment.relay import RelayAdapter
-from ..equipment.snmp import SnmpClient
+from ..equipment.snmp import SnmpClient, SnmpV3Client
 from ..junctions import approved_plans, load_all_junctions
 from .device import EdgeDevice
 from ..sources.field import SUPERSEDED
@@ -199,7 +203,18 @@ def make_adapter(args):
         board = ModbusRelayBoard(controller, unit=args.relay_unit, baud=args.baud)
         return RelayAdapter(board.write, {}, relays=args.relays)
     host, port = parse_endpoint(controller, 161)
-    client = SnmpClient(host, port, community=args.community, version=args.snmp_version)
+    if args.snmp_version == 3:
+        user, auth_pass, priv_pass = (os.getenv(k, "") for k in ("SNMP_USER", "SNMP_AUTH_PASS", "SNMP_PRIV_PASS"))
+        if not (user and auth_pass and priv_pass):
+            raise SystemExit("SNMPv3 needs SNMP_USER, SNMP_AUTH_PASS and SNMP_PRIV_PASS in the environment "
+                             "(the unit's env file); --snmp-version 1 uses a community string instead")
+        try:
+            client = SnmpV3Client(host, port, user=user, auth_password=auth_pass, priv_password=priv_pass,
+                                  auth=os.getenv("SNMP_AUTH", "sha"))
+        except ValueError as err:
+            raise SystemExit(f"SNMPv3: {err}")
+    else:
+        client = SnmpClient(host, port, community=args.community, version=args.snmp_version)
     return NtcipAdapter(lambda tls, oid, value: client.set(oid, value), {}, backup_time=args.backup_time)
 
 
@@ -254,7 +269,7 @@ class Unit:
                             f"the platform enrols {self.id} for junction {welcome.get('tls')}, "
                             f"this unit is configured for {self.dev.tls}")
                         print(f"edge: {why}: refusing to work", flush=True)
-                        raise SystemExit
+                        raise SystemExit(1)  # a unit that refuses to work says so to systemd
                     print(f"edge: {self.id} online at {self.dev.tls}, approved plans "
                           f"{sorted(self.adapter.plans(self.dev.tls))}, gateway key epoch {self.dev.trust.epoch}", flush=True)
                     self.ws = ws
@@ -310,8 +325,9 @@ def main():
     ap.add_argument("--relay-unit", type=int, default=1, help="relay: Modbus unit id of the board")
     ap.add_argument("--relays", type=int, default=3, help="relay: coils used for the plan code")
     ap.add_argument("--baud", type=int, default=9600, help="relay: serial speed")
-    ap.add_argument("--community", default="private", help="ntcip: SNMP community with write access")
-    ap.add_argument("--snmp-version", type=int, choices=(0, 1), default=1, help="ntcip: 0 = SNMPv1, 1 = SNMPv2c")
+    ap.add_argument("--community", default="private", help="ntcip with --snmp-version 0/1: community with write access")
+    ap.add_argument("--snmp-version", type=int, choices=(0, 1, 3), default=3,
+                    help="ntcip: 3 = SNMPv3 authPriv (default; credentials from SNMP_* env), 1 = v2c, 0 = v1")
     ap.add_argument("--backup-time", type=int, default=180, help="ntcip: unitBackupTime set before the first plan, seconds")
     ap.add_argument("--sensors", help="JSON file {approach id: metres} rewritten by the camera pipeline")
     ap.add_argument("--pki", default=str(c.PKI), help="folder with ca.pem, gateway.pub and edge/<unit>.key")
@@ -321,10 +337,14 @@ def main():
     if args.keygen:
         keygen(args)
         return
+    runner = Unit(args) if args.unit else Fleet(args.only)  # configuration errors stop here, with their message
     try:
-        asyncio.run(Unit(args).run() if args.unit else Fleet(args.only).run(args.keep_running))
-    except (KeyboardInterrupt, SystemExit):
+        asyncio.run(runner.run() if args.unit else runner.run(args.keep_running))
+    except KeyboardInterrupt:
         pass
+    except SystemExit as stop:
+        if stop.code not in (None, 0):
+            raise
 
 
 if __name__ == "__main__":

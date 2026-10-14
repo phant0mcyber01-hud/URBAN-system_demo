@@ -108,6 +108,11 @@ PLATFORM=urban.example.uz:8443
 SERVER_NAME=urban.example.uz
 ADAPTER=none            # none | relay (плата реле по Modbus RTU) | ntcip (SNMP к контроллеру)
 CONTROLLER=             # relay: порт платы, например /dev/ttyUSB0; ntcip: адрес контроллера, например 192.168.10.2:161
+SNMP_USER=urban          # ntcip: SNMPv3 authPriv (по умолчанию); пароли от 8 символов, файл с правами 600
+SNMP_AUTH_PASS=...
+SNMP_PRIV_PASS=...
+SNMP_AUTH=sha            # sha (HMAC-SHA-96) или sha256 (HMAC-SHA-256-192), как настроено в контроллере
+# EXTRA=--snmp-version 1 --community ...   только если контроллер не умеет SNMPv3 и линия до него изолирована
 SENSORS=/run/urban/queues.json   # пишет камерный конвейер: python -m urban.sensors --calibration /etc/urban/cameras.json --out /run/urban/queues.json
 ```
 

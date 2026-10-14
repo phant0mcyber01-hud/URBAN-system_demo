@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pytest", "pysnmp>=7.1,<8"]  # pysnmp: an independent agent for the SNMPv3 tests only
 edge = ["pyserial"]  # a unit in a cabinet with a relay board on a serial port
 
 [project.scripts]
