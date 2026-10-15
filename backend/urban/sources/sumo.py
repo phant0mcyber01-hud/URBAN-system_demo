@@ -82,7 +82,7 @@ def run(publish, commands=None, *, field=None, seed=42, incident_at=None, realti
     traci.vehicletype.setVehicleClass("emg", "emergency")
     traci.vehicletype.setSpeedFactor("emg", 1.5)
 
-    junctions = load_all_junctions()
+    junctions = load_all_junctions(c.OUT)
     controllers = SumoAdapter(plan_tables(junctions))
     signals = EdgeController(controllers) if field is None else None  # embedded Edge
     bank = ControllerBank(controllers)                                 # controllers behind the field link

@@ -30,10 +30,15 @@ const LAYERS = [
   ['buildings', 'Здания в 3D'], ['traffic', 'Транспортный поток'], ['transit', 'Остановки'],
   ['cameras', 'Камеры'], ['infra', 'Инфраструктура'], ['pois', 'Службы и больницы'], ['labels', 'Названия улиц'],
 ];
+const DEMO_LAYERS = new Set(['traffic', 'cameras', 'infra']);  // drawn from the twin's simulation only
 const show = Object.fromEntries(LAYERS.map(([k]) => [k, true]));
 let base = staticLayers(scene, show);
 let camBase = null;
-$('layers-menu').innerHTML = LAYERS.map(([k, label]) => `<label><input type="checkbox" data-layer="${k}" checked> ${label}</label>`).join('');
+const drawLayerMenu = () => {
+  $('layers-menu').innerHTML = LAYERS.filter(([k]) => S.mode !== 'field' || !DEMO_LAYERS.has(k))
+    .map(([k, label]) => `<label><input type="checkbox" data-layer="${k}" ${show[k] ? 'checked' : ''}> ${label}</label>`).join('');
+};
+drawLayerMenu();
 $('layers-menu').onchange = (e) => {
   show[e.target.dataset.layer] = e.target.checked;
   base = staticLayers(scene, show);
@@ -77,8 +82,31 @@ const panel = createPanel(scene, S, {
     select('detectors', target, target.p);
   },
   onCamera: (id) => (id === S.cam ? cameras.close() : cameras.open(id)),
-  onTab: (tab) => { clearInterval(historyTimer); if (tab === 'history') { loadHistory(); historyTimer = setInterval(loadHistory, 20000); } },
+  onTab: (tab) => {
+    clearInterval(historyTimer);
+    if (tab === 'history') { loadHistory(); historyTimer = setInterval(loadHistory, 20000); }
+    if (tab === 'junctions') loadJunctions();
+  },
   onAction: (act, id) => run(async () => {
+    if (act === 'passport-save') {
+      await api.post(`/api/junctions/${id}/passport`, passportChange(id));
+      toast(`паспорт ${id} сохранён черновиком`);
+      return loadJunctions();
+    }
+    if (act === 'passport-approve') {
+      const j = S.junctions.find((x) => x.id === id);
+      if (!window.confirm(`Утвердить паспорт ${id}, версия ${j?.passport.version ?? 1}?\n\nПосле утверждения платформа сможет предлагать `
+        + 'для перекрёстка команды, а блок — выполнять планы из этой таблицы. Паспорт должен совпадать с тем, что загружено в контроллер.')) return null;
+      await api.post(`/api/junctions/${id}/approve`);
+      toast(`паспорт ${id} утверждён`);
+      return loadJunctions();
+    }
+    if (act === 'passport-withdraw') {
+      const why = document.querySelector(`form[data-passport="${CSS.escape(id)}"] [name=why]`)?.value ?? '';
+      await api.post(`/api/junctions/${id}/withdraw`, { why });
+      toast(`паспорт ${id} возвращён в черновик, команды на перекрёстке сняты`);
+      return loadJunctions();
+    }
     if (act === 'revoke' || act === 'restore') return api.post(`/api/devices/${id}/status`, { status: act === 'revoke' ? 'revoked' : 'active' });
     if (act === 'approve-group' || act === 'reject-group') {
       const results = await api.post('/api/commands/group', { ids: id.split(','), approve: act === 'approve-group' });
@@ -89,6 +117,26 @@ const panel = createPanel(scene, S, {
     return api.post(`/api/commands/${id}/${act}`);
   }),
 });
+
+// junction passports: fetched at sign-in and whenever the tab opens or a passport changes
+async function loadJunctions() {
+  if (!S.user) return;
+  try {
+    S.junctions = await api.get('/api/junctions');
+    panel.refresh();
+  } catch (e) { if (e.message === 'нужно войти заново') signedOut(); }
+}
+function passportChange(id) {
+  const form = document.querySelector(`form[data-passport="${CSS.escape(id)}"]`);
+  const approaches = {}, phases = {};
+  for (const [name, value] of new FormData(form)) {
+    const [field, key] = name.split(':');
+    if (!key || value === '') continue;
+    if (field === 'lanes' || field === 'zone') (approaches[key] ??= { id: key })[field] = Number(value);
+    else (phases[key] ??= { index: Number(key) })[field] = Number(value);
+  }
+  return { approaches: Object.values(approaches), phases: Object.values(phases) };
+}
 
 // history comes from the store, not from live frames: fetched when the tab is open
 let historyTimer = null;
@@ -129,15 +177,21 @@ function renderOperator() {
   $('op-link').classList.toggle('on', !S.link);
   panel.render();
 }
-function renderMode() {
+function renderMode(city) {
   const field = S.mode === 'field';
+  $('brand').querySelector('span').textContent = field ? `${city || 'город не настроен'} · центр управления` : 'Фергана · демо-двойник';
+  document.title = field ? `URBAN · ${city || 'центр управления'}` : 'URBAN · демо-двойник';
+  if (field) for (const k of DEMO_LAYERS) show[k] = false;
+  base = staticLayers(scene, show);
+  camBase = null;
+  drawLayerMenu();
   const chip = $('modechip');
   chip.textContent = field ? 'ОБОРУДОВАНИЕ' : 'ЭМУЛЯЦИЯ';
   chip.className = `chip ${field ? 'ok' : 'shadow'}`;
   chip.title = field ? 'Платформа работает с реальными устройствами URBAN Edge' : 'Оборудование в демо смоделировано';
   $('foot-note').textContent = field
-    ? 'Режим оборудования: очереди и состояние шкафов приходят от устройств URBAN Edge; трафик на карте не показывается (видеопотока нет); сеть и здания из OSM.'
-    : 'Демо на синтетических данных: трафик, автобусные линии, телеметрия, камеры и сами светофоры смоделированы; сеть и здания из OSM.';
+    ? 'Карта и перекрёстки из OpenStreetMap. Очереди и состояние шкафов — от блоков URBAN Edge. Перекрёсток с черновым паспортом только наблюдается.'
+    : 'Демо-двойник для показа: трафик, автобусные линии, телеметрия, камеры и сами светофоры смоделированы; сеть и здания из OSM.';
 }
 function signedOut() {
   S.user = null;
@@ -358,11 +412,12 @@ function connect() {
     ws.send(JSON.stringify({ token: api.wsToken() }));
     try {
       const snap = await api.get('/api/state');
-      S.mode = snap.mode ?? 'simulation';
       S.corridor = !!snap.corridor;
+      panel.setMode(snap.mode ?? 'simulation');
       setClockMode(S.mode === 'field');
-      renderMode();
+      renderMode(snap.city);
       S.applySnapshot(snap);
+      loadJunctions();
     } catch { /* the socket will tell us if the session is gone */ }
     renderOperator();
   };

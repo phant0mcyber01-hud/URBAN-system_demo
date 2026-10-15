@@ -53,7 +53,7 @@ def run_arm(task: tuple) -> dict:
     seed, corridor, scale = task
     meta = json.loads((c.OUT / "meta.json").read_text())
     equipment: queue.Queue = queue.Queue()
-    platform = Platform(meta["center"], meta["radius"], load_all_junctions(), send=equipment.put)
+    platform = Platform(meta["center"], meta["radius"], load_all_junctions(c.OUT), send=equipment.put)
     trips = c.DATA / f"tripinfo-corridor-{scale}-{int(corridor)}-{seed}.xml"
     units: dict[str, dict] = {}  # dispatch id -> {unit, t, last: route index of its last signalised approach, crossed}
 

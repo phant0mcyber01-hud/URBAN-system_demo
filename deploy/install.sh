@@ -44,7 +44,7 @@ cat <<EOF
 
 URBAN installed in $APP. Next:
   1. edit $APP/.env (DEVICE_NAME, URBAN_SOURCE=field)
-  2. put the map data in $APP/data/out (python -m urban.pipeline here or on a workstation)
+  2. sudo -u urban $APP/.venv/bin/python -m urban.city create --name "<city>" --bbox <w,s,e,n>   (or --osm file.osm)
   3. sudo -u urban $APP/.venv/bin/python -m urban.provision --host <DEVICE_NAME>; move data/pki/ca.key off the server
   4. TLS certificate for nginx (certbot --nginx or your CA), then: nginx -t && systemctl reload nginx
   5. systemctl start urban && journalctl -u urban -f   (the first start prints the admin password)

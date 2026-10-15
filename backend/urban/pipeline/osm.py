@@ -8,10 +8,11 @@ from .. import config as c
 from .paths import OSM, dump
 
 
-def download():
-    if OSM.exists() and OSM.stat().st_size > 0:
+def download(bbox=None, path=OSM):
+    if path.exists() and path.stat().st_size > 0:
         return
-    w, s, e, n = c.BBOX.split(",")
+    bbox = bbox or c.BBOX
+    w, s, e, n = bbox.split(",")
     q = (f"[out:xml][timeout:180];(nwr({s},{w},{n},{e});"
          f"rel[route~'^(bus|trolleybus|share_taxi)$']({s},{w},{n},{e}););(._;>;);out meta;")
     overpass = urllib.parse.urlencode({"data": q}).encode()
@@ -20,11 +21,11 @@ def download():
                ("https://overpass-api.de/api/interpreter", overpass),
                ("https://overpass.kumi.systems/api/interpreter", overpass)]
     for url, data in sources:
-        print(">> downloading OSM for bbox", c.BBOX, "from", url.split("/")[2])
-        req = urllib.request.Request(url, data=data, headers={"User-Agent": "urban-demo/0.1"})
+        print(">> downloading OSM for bbox", bbox, "from", url.split("/")[2])
+        req = urllib.request.Request(url, data=data, headers={"User-Agent": "urban-platform/0.2"})
         try:
             with urllib.request.urlopen(req, timeout=300) as r:
-                OSM.write_bytes(r.read())
+                path.write_bytes(r.read())
             return
         except OSError as err:
             print("   failed:", err)
@@ -92,7 +93,7 @@ def building_height(way_id, tags, ring):
     return round(lo + (hi - lo) * r, 1), True
 
 
-def export_osm_layers():
+def export_osm_layers(osm=OSM, out=None):
     """Buildings plus context layers (green, water, paths, trees, signals) straight from OSM."""
     nodes, buildings, areas, lines, points, pois = {}, [], [], [], [], []
 
@@ -101,7 +102,7 @@ def export_osm_layers():
             pois.append({"type": "Feature", "properties": {"kind": tags["amenity"], "name": tags.get("name", "")},
                          "geometry": {"type": "Point", "coordinates": xy}})
 
-    for _, el in ET.iterparse(OSM, events=("end",)):
+    for _, el in ET.iterparse(osm, events=("end",)):
         if el.tag == "node":
             xy = (float(el.get("lon")), float(el.get("lat")))
             nodes[el.get("id")] = xy
@@ -135,8 +136,8 @@ def export_osm_layers():
                 lines.append({"type": "Feature", "properties": {"kind": k},
                               "geometry": {"type": "LineString", "coordinates": pts}})
             el.clear()
-    dump("buildings.geojson", buildings)
-    dump("areas.geojson", areas)
-    dump("lines.geojson", lines)
-    dump("points.geojson", points)
-    dump("pois.geojson", pois)
+    dump("buildings.geojson", buildings, out)
+    dump("areas.geojson", areas, out)
+    dump("lines.geojson", lines, out)
+    dump("points.geojson", points, out)
+    dump("pois.geojson", pois, out)

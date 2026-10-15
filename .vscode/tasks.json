@@ -5,7 +5,7 @@
   "tasks": [
     {
       "label": "1. Подготовить проект (один раз)",
-      "detail": "окружение .venv, зависимости, сборка интерфейса, данные района из OSM",
+      "detail": "окружение .venv, зависимости, сборка интерфейса, город и демо-двойник из OSM",
       "type": "shell",
       "command": "powershell -ExecutionPolicy Bypass -File scripts/setup.ps1",
       "problemMatcher": []
@@ -15,6 +15,14 @@
       "detail": "http://localhost:8080 — пароль admin при первом запуске появится здесь",
       "type": "shell",
       "command": "powershell -ExecutionPolicy Bypass -File scripts/run.ps1",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Демо-двойник для показа",
+      "detail": "трафик SUMO, синтетические перекрёстки, эмулированные блоки; своя история в data/demo",
+      "type": "shell",
+      "command": "powershell -ExecutionPolicy Bypass -File scripts/demo.ps1",
       "isBackground": true,
       "problemMatcher": []
     },
@@ -43,10 +51,10 @@
       "problemMatcher": []
     },
     {
-      "label": "6. Пересобрать карту района",
-      "detail": "только слои карты из OSM; сервер перед этим остановить",
+      "label": "6. Обновить город из OSM",
+      "detail": "карта и новые перекрёстки; утверждённые и правленые паспорта не трогаются; сервер перед этим остановить",
       "type": "shell",
-      "command": "${workspaceFolder}/.venv/Scripts/python -m urban.pipeline --geo",
+      "command": "${workspaceFolder}/.venv/Scripts/python -m urban.city create",
       "problemMatcher": []
     },
     {
@@ -60,6 +68,12 @@
       "label": "Обследование: итог по таблице",
       "type": "shell",
       "command": "${workspaceFolder}/.venv/Scripts/python -m urban.survey summary data/survey/survey.csv",
+      "problemMatcher": []
+    },
+    {
+      "label": "Город: перекрёстки и паспорта",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/python -m urban.city list",
       "problemMatcher": []
     },
     {

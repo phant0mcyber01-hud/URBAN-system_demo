@@ -215,3 +215,24 @@ button.cam span:last-child { color: var(--text-2); white-space: nowrap; font-siz
   #layers { display: none; }
   .maplibregl-ctrl-bottom-right { right: 0 !important; bottom: calc(42% + var(--foot)) !important; }
 }
+
+/* ---- junction passports -------------------------------------------------------------------------- */
+button.jn { display: grid; gap: 4px; width: 100%; text-align: left; background: none; border: 0; border-bottom: 1px solid var(--line);
+            padding: 9px 6px; margin: 0 -6px; width: calc(100% + 12px); border-radius: 3px; cursor: pointer; }
+button.jn:hover { background: var(--surface-2); }
+button.jn .meta { justify-content: flex-start; gap: 4px 12px; color: var(--text-2); font-size: 12px; }
+button.back { background: none; border: 0; padding: 0; margin-bottom: 10px; color: var(--accent); cursor: pointer; }
+button.back:hover { text-decoration: underline; }
+#panel h3 { margin: 0; font-size: 14px; font-weight: 600; }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 12px 0; font-size: 12.5px; }
+.kv > :nth-child(odd) { color: var(--text-3); }
+.kv b { font-weight: 500; }
+.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.tbl th { text-align: left; font-weight: 500; color: var(--text-3); padding: 4px 6px 4px 0; border-bottom: 1px solid var(--line-2); }
+.tbl td { padding: 5px 6px 5px 0; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.tbl td:nth-child(n+3), .tbl th:nth-child(n+3) { text-align: right; font-family: var(--mono); }
+.tbl b { font-weight: 500; }
+input.num { width: 64px; padding: 3px 6px; text-align: right; font: 12.5px var(--mono); color: var(--text);
+            background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 3px; }
+input.num:focus { border-color: var(--accent); outline: none; }
+.btns input { flex: 1; min-width: 0; padding: 5px 8px; color: var(--text); background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 3px; font: inherit; }

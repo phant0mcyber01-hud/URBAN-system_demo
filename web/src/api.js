@@ -26,6 +26,7 @@ async function call(method, path, body) {
     const err = new Error(ERRORS[r.status] ?? `ошибка ${r.status}`);
     err.status = r.status;
     try { err.detail = (await r.json()).detail; } catch { /* no body */ }
+    if (typeof err.detail === 'string' && /[а-яё]/i.test(err.detail)) err.message = err.detail;  // already in words for people
     throw err;
   }
   return r.json();

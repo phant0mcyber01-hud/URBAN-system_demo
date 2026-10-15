@@ -129,6 +129,8 @@ class Platform:
         # one direction is overloaded while another has green to spare -> propose an approved plan
         self.gateway.keep_muted({pr["tls"] for pr in problems})
         for pr in problems:
+            if pr["tls"] not in self.gateway.plans:
+                continue  # no approved passport: the junction is watched, never commanded
             if self.spillback and self.full_ahead(pr["tls"], pr["give"]):
                 continue  # more green here would only move the cars into the next queue
             self.gateway.propose(
@@ -197,6 +199,20 @@ class Platform:
             if q is not None and q >= SPILL * self._zone.get(d["approach"], 100.0):
                 return d["junction"]
         return None
+
+    def update_junction(self, j: dict, why: str):
+        """A passport was approved, edited or withdrawn: take the new description and plan table at once."""
+        old = self._by_tls.get(j["tls"])
+        if old is None:
+            return
+        old.clear()
+        old.update(j)  # the same object is shared with the queue monitor and the corridors
+        self._zone.update({a["id"]: a.get("zone", 100.0) for a in j["approaches"]})
+        for ph in j.get("phases", []):
+            self._downstream[(j["tls"], ph["index"])] = ph.get("downstream", [])
+        self.monitor.forget(j["id"])
+        table = {pl["id"] for pl in j["plans"]} if j.get("passport", {}).get("status") == "approved" else None
+        self.gateway.set_plans(j["tls"], table, why, self.t)
 
     def devices(self, rows: list[dict], t: int) -> list[dict]:
         """Take the hub's view of the fleet, judge each unit, lock junctions whose unit cannot be trusted.

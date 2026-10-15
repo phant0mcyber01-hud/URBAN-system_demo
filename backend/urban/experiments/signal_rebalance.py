@@ -40,7 +40,7 @@ HIGHER_IS_BETTER = {"finished"}
 def run_arm(task: tuple) -> dict:
     seed, horizon, control, scale, coverage, spillback = task
     meta = json.loads((c.OUT / "meta.json").read_text())
-    cameras = load_all_junctions() if coverage == "all" else load_cameras()
+    cameras = load_all_junctions(c.OUT) if coverage == "all" else load_cameras(c.OUT)
     equipment: queue.Queue = queue.Queue()
     platform = Platform(meta["center"], meta["radius"], cameras, send=equipment.put, spillback=spillback)
     trips = c.DATA / f"tripinfo-{coverage}-{scale}-{int(control)}-{int(spillback)}-{seed}.xml"

@@ -196,6 +196,23 @@ class CommandGateway:
             self.audit.append(t, "junction-unlocked", "-", "-", tls, why, actor="equipment", mode="approval")
         self.version += 1
 
+    def set_plans(self, tls: str, plans: set[int] | None, why: str, t: int):
+        """The approved plan table of a junction changed: its passport was approved, edited or withdrawn.
+        Commands made against the old table end: running ones go back to the base plan, pending ones are
+        withdrawn. None: no approved table, the junction is only watched."""
+        for p in list(self.proposals.values()):
+            if p["tls"] != tls:
+                continue
+            if p["status"] in ("approved", "active"):
+                self.release(p["id"], why, t)
+            elif p["status"] == "pending":
+                self.withdraw(p["id"], why, t)
+        if plans:
+            self.plans[tls] = set(plans)
+        else:
+            self.plans.pop(tls, None)
+        self.version += 1
+
     def set_link(self, up: bool, actor: str, t: int):
         """Demo control: cut the platform-to-equipment link to prove that equipment reverts by itself."""
         self.link_up = up

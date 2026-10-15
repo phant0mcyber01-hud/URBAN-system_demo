@@ -5,13 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "urban"
 version = "0.1.0"
-description = "URBAN city infrastructure platform: pilot demo (read-only, shadow Command Gateway)"
+description = "URBAN: city infrastructure platform and the software of its URBAN Edge units"
 requires-python = ">=3.11"
 dependencies = [
-  "eclipse-sumo",
-  "traci",
-  "sumolib",
-  "pyproj",
   "fastapi",
   "uvicorn[standard]",
   "websockets",
@@ -19,12 +15,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pysnmp>=7.1,<8"]  # pysnmp: an independent agent for the SNMPv3 tests only
+demo = ["eclipse-sumo", "traci", "sumolib", "pyproj"]  # the demo twin and the measurements, not the real system
+dev = ["pytest", "pysnmp>=7.1,<8", "urban[demo]"]  # pysnmp: an independent agent for the SNMPv3 tests only
 edge = ["pyserial"]  # a unit in a cabinet with a relay board on a serial port
 
 [project.scripts]
 urban-prepare = "urban.pipeline.__main__:main"
 urban-serve = "urban.__main__:main"
+urban-city = "urban.city.__main__:main"
 
 [tool.setuptools.packages.find]
 include = ["urban*"]

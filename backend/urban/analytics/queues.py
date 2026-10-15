@@ -54,6 +54,20 @@ class QueueMonitor:
                 covered = max((zone.get(e, 100.0) for e in ph["edges"]), default=100.0)
                 self._loaded_min[(j["id"], ph["index"])] = min(LOADED_MIN, LOADED_SHARE * covered)
 
+    def forget(self, junction_id: str):
+        """The junction's passport changed (phases, zones): start its averages over with the new description."""
+        j = self._by_id.get(junction_id)
+        if j is None:
+            return
+        for key in [k for k in self._hist if k[0] == junction_id]:
+            self._hist.pop(key, None)
+            self._sum.pop(key, None)
+        zone = {a["id"]: a.get("zone", 100.0) for a in j["approaches"]}
+        for ph in j.get("phases", []):
+            covered = max((zone.get(e, 100.0) for e in ph["edges"]), default=100.0)
+            self._loaded_min[(junction_id, ph["index"])] = min(LOADED_MIN, LOADED_SHARE * covered)
+        self.demands[junction_id] = {}
+
     def demand(self, junction_id: str) -> dict[int, float]:
         """Mean queue metres per green phase over the window ({} until the window is full)."""
         j = self._by_id.get(junction_id)

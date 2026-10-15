@@ -1,14 +1,22 @@
-"""Run the platform:  python -m urban
+"""Run the platform:
+
+    python -m urban           the real system: the city from data/city, real URBAN Edge units
+    python -m urban --demo    the demo twin for presentations: SUMO traffic, synthetic junctions, emulated units
 
 Two listeners in one process: the UI and API on plain HTTP (for this machine, or for a reverse
 proxy on a server), and the device endpoint on TLS. Addresses come from .env: HOST, PORT,
 DEVICE_HOST, DEVICE_PORT. The Edge units are a separate process (see urban.edge).
 """
 import asyncio
+import os
+import sys
 
 import uvicorn
 
-from . import config as c
+if "--demo" in sys.argv:  # before the settings are read
+    os.environ["URBAN_SOURCE"] = "simulation"
+
+from . import config as c  # noqa: E402
 
 
 async def serve():

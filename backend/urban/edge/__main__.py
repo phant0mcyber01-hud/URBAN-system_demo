@@ -57,7 +57,7 @@ FIELD_PATIENCE = 20  # seconds without the field link before a demo fleet gives 
 
 class Fleet:
     def __init__(self, only: str | None):
-        junctions = [j for j in load_all_junctions() if only in (None, j["id"])]
+        junctions = [j for j in load_all_junctions(c.OUT) if only in (None, j["id"])]  # the demo twin
         gateway_public = crypto.load_public((c.PKI / "gateway.pub").read_text())
         root_public = crypto.load_public((c.PKI / "root.pub").read_text()) if (c.PKI / "root.pub").exists() else None
         self.field_ws = None

@@ -18,7 +18,8 @@ def run(cmd, check=True):
     return subprocess.run([str(x) for x in cmd], env=c.sumo_env(), check=check, cwd=c.DATA)
 
 
-def dump(name, feats):
-    with open(c.OUT / name, "w", encoding="utf-8") as f:
+def dump(name, feats, out=None):
+    """A GeoJSON layer into the map folder (data/out for the demo twin, data/city for a real city)."""
+    with open((out or c.OUT) / name, "w", encoding="utf-8") as f:
         json.dump({"type": "FeatureCollection", "features": feats}, f, ensure_ascii=False, separators=(",", ":"))
     print(f"   {name}: {len(feats)}")

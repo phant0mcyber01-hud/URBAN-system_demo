@@ -137,6 +137,16 @@ class DeviceHub:
             await _close(ws)
         return rec
 
+    async def set_plans(self, tls: str, plans: set[int] | None):
+        """A junction's approved plans changed: its unit is reconnected so it learns them at session start."""
+        if plans:
+            self.plans[tls] = set(plans)
+        else:
+            self.plans.pop(tls, None)
+        for rec in self.registry.devices.values():
+            if rec["tls"] == tls and (ws := self.sessions.pop(rec["id"], None)) is not None:
+                await _close(ws)
+
     async def set_status(self, device: str, status: str) -> dict | None:
         rec = self.registry.set_status(device, status)
         if rec is not None and status == REVOKED:

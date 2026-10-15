@@ -3,7 +3,7 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "▶ URBAN: платформа (демо)",
+      "name": "▶ URBAN: платформа",
       "type": "debugpy",
       "request": "launch",
       "module": "urban",
@@ -12,10 +12,21 @@
       "justMyCode": true
     },
     {
-      "name": "▶ URBAN: платформа без демо-блоков",
+      "name": "▶ URBAN: демо-двойник",
       "type": "debugpy",
       "request": "launch",
       "module": "urban",
+      "args": ["--demo"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "▶ URBAN: демо без демо-блоков",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "urban",
+      "args": ["--demo"],
       "cwd": "${workspaceFolder}",
       "env": { "URBAN_EDGE": "manual" },
       "console": "integratedTerminal"
@@ -27,6 +38,7 @@
       "module": "urban.edge",
       "args": ["--keep-running"],
       "cwd": "${workspaceFolder}",
+      "env": { "URBAN_SOURCE": "simulation" },
       "console": "integratedTerminal"
     },
     {
@@ -41,8 +53,8 @@
   ],
   "compounds": [
     {
-      "name": "▶ URBAN: платформа и блоки (два процесса)",
-      "configurations": ["▶ URBAN: платформа без демо-блоков", "▶ URBAN: демо-блоки отдельно"],
+      "name": "▶ URBAN: демо и блоки (два процесса)",
+      "configurations": ["▶ URBAN: демо без демо-блоков", "▶ URBAN: демо-блоки отдельно"],
       "stopAll": true
     }
   ]

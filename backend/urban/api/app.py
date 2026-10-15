@@ -38,9 +38,10 @@ from ..core.bus import PLATFORM_FRAME, SOURCE_FRAME, Bus
 from ..devices import crypto
 from ..devices.hub import DeviceHub
 from ..devices.registry import ACTIVE, REVOKED, Registry, provision
-from ..junctions import approved_plans, load_all_junctions, load_cameras
+from ..city.passport import PassportError, Passports, problems
+from ..junctions import APPROVED, DRAFT, _junction, approved, approved_plans, load_all_junctions, load_cameras
 from ..platform import Platform
-from ..sources import clock, sumo
+from ..sources import clock
 from ..sources.field import FieldEmulator
 from ..export import Exporter, sinks_from_env
 from ..store import Store
@@ -48,7 +49,9 @@ from ..store import Store
 FIELD = c.SOURCE == "field"  # real units, no simulation, no demo fleet, no field link
 SPAWN_EDGE = os.getenv("URBAN_EDGE", "auto") != "manual" and not FIELD  # manual: start `python -m urban.edge` yourself
 
+c.MAP.mkdir(parents=True, exist_ok=True)
 junctions = load_all_junctions() or load_cameras()
+passports = Passports(c.MAP / "signals.json")
 # the demo generates every unit's key here; in field mode units bring their own and are enrolled one by one
 provision(junctions, c.PKI, host=c.DEVICE_NAME, demo_devices=not FIELD)
 FIELD_TOKEN = secrets.token_urlsafe(24)  # new on every start; the Edge process reads it from the pki folder
@@ -59,7 +62,16 @@ FIRST_PASSWORD = accounts.bootstrap()
 
 bus = Bus()
 field = FieldEmulator(FIELD_TOKEN)
-meta = json.loads((c.OUT / "meta.json").read_text())
+def _meta() -> dict:
+    """The city: name, centre and radius of the map. Before `python -m urban.city create` only the area from .env."""
+    path = c.MAP / "meta.json"
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    w, s, e, n = (float(v) for v in c.BBOX.split(","))
+    return {"name": "", "center": [(w + e) / 2, (s + n) / 2], "radius": 1200}
+
+
+meta = _meta()
 GATEWAY_CERT = json.loads((c.PKI / "gateway.cert.json").read_text())
 hub = DeviceHub(Registry(c.PKI / "devices.json"), crypto.load_private((c.PKI / "gateway.key").read_text()),
                 on_report=lambda rec, report: platform.on_report(rec["tls"], report), clock=lambda: platform.t,
@@ -67,7 +79,7 @@ hub = DeviceHub(Registry(c.PKI / "devices.json"), crypto.load_private((c.PKI / "
 store = Store(c.DB, mode=c.SOURCE, retention_days=c.HISTORY_DAYS)
 platform = Platform(meta["center"], meta["radius"], junctions, send=hub.send, reachable=hub.online, store=store,
                     corridor=c.GREEN_CORRIDOR)
-exporter = Exporter(store, crypto.load_private((c.PKI / "audit.key").read_text()), sinks_from_env(c.DATA))
+exporter = Exporter(store, crypto.load_private((c.PKI / "audit.key").read_text()), sinks_from_env(c.STATE))
 clients: set[WebSocket] = set()
 
 
@@ -103,6 +115,7 @@ def source_thread(loop: asyncio.AbstractEventLoop, stop: threading.Event):
     if FIELD:
         clock.run(publish, stop)
         return
+    from ..sources import sumo  # the demo twin only: the real system does not need SUMO installed
     while not stop.is_set():  # loop the scenario for the demo
         try:
             sumo.run(publish, field=field)
@@ -122,7 +135,7 @@ async def lifespan(_):
         print(f"\n  Accounts: {len(accounts.users)} (manage with python -m urban.users)", flush=True)
     print(f"  History: {c.DB.name}, run #{store.run}, audit chain {store.chain['records']} records; "
           f"the full check runs in the background and every {CHAIN_CHECK // 60} min", flush=True)
-    marker = c.DATA / "gateway.epoch"
+    marker = c.STATE / "gateway.epoch"
     seen = int(marker.read_text()) if marker.exists() else None
     if seen != GATEWAY_CERT["epoch"]:
         if seen is not None:
@@ -130,8 +143,12 @@ async def lifespan(_):
                                           crypto.fingerprint(GATEWAY_CERT["gateway"]), actor="provision", mode="approval")
         marker.write_text(str(GATEWAY_CERT["epoch"]))
     print(f"  Gateway key: epoch {GATEWAY_CERT['epoch']}, {crypto.fingerprint(GATEWAY_CERT['gateway'])}", flush=True)
-    print("  Mode: FIELD: no simulation, waiting for real URBAN Edge units\n" if FIELD
-          else "  Mode: simulation (SUMO), demo Edge fleet\n", flush=True)
+    if FIELD:
+        ready = sum(approved(j) for j in junctions)
+        print(f"  City: {meta.get('name') or 'not set up (python -m urban.city create)'}, {len(junctions)} junctions, "
+              f"{ready} with an approved passport\n  Mode: real equipment, waiting for URBAN Edge units\n", flush=True)
+    else:
+        print("  Mode: DEMO twin (SUMO, synthetic junctions, emulated Edge fleet)\n", flush=True)
     field.loop = asyncio.get_running_loop()
     stop = threading.Event()
     threading.Thread(target=source_thread, args=(field.loop, stop), daemon=True).start()
@@ -367,7 +384,75 @@ def health():
 
 @app.get("/api/state")
 def state(who: str = Depends(viewer)):
-    return {**platform.snapshot(), "mode": c.SOURCE, "corridor": platform.corridor_on}
+    return {**platform.snapshot(), "mode": c.SOURCE, "corridor": platform.corridor_on, "city": meta.get("name", "")}
+
+
+# ---- junction passports: what the engineer approved; drafts are watched, never commanded ----
+def _passport_view(raw: dict) -> dict:
+    return {**raw, "problems": problems(_junction(raw, DRAFT if FIELD else APPROVED))}
+
+
+@app.get("/api/junctions")
+def junction_list(who: str = Depends(viewer)):
+    return [_passport_view(j) for j in passports.items]
+
+
+class PassportEdit(BaseModel):
+    name: str | None = None
+    approaches: list[dict] = []
+    phases: list[dict] = []
+
+
+class Withdrawal(BaseModel):
+    why: str = ""
+
+
+async def _passport_changed(raw: dict, event: str, who: str, detail: str):
+    """Apply a passport to the running platform, the gateway and the unit, and record it."""
+    j = _junction(raw, DRAFT)
+    platform.update_junction(j, event)
+    await hub.set_plans(j["tls"], {pl["id"] for pl in j["plans"]} if approved(j) else None)
+    platform.gateway.audit.append(platform.t, event, "-", "-", j["id"], detail, actor=who, mode="approval")
+
+
+def _editable():
+    if not FIELD:
+        raise HTTPException(409, "demo twin: its junctions are synthetic and cannot be edited")
+
+
+@app.post("/api/junctions/{ident}/passport")
+async def passport_edit(ident: str, body: PassportEdit, who: str = Depends(admin)):
+    _editable()
+    change = {"approaches": body.approaches, "phases": body.phases, **({"name": body.name} if body.name else {})}
+    try:
+        raw = passports.edit(ident, change, who)
+    except PassportError as err:
+        raise HTTPException(400, str(err))
+    await _passport_changed(raw, "passport-edited", who, f"version {raw['passport']['version']}, draft")
+    return _passport_view(raw)
+
+
+@app.post("/api/junctions/{ident}/approve")
+async def passport_approve(ident: str, who: str = Depends(admin)):
+    _editable()
+    try:
+        raw = passports.approve(ident, who)
+    except PassportError as err:
+        raise HTTPException(400, str(err))
+    p = raw["passport"]
+    await _passport_changed(raw, "passport-approved", who, f"version {p['version']}, hash {p['hash']}")
+    return _passport_view(raw)
+
+
+@app.post("/api/junctions/{ident}/withdraw")
+async def passport_withdraw(ident: str, body: Withdrawal, who: str = Depends(admin)):
+    _editable()
+    try:
+        raw = passports.withdraw(ident, who, body.why)
+    except PassportError as err:
+        raise HTTPException(400, str(err))
+    await _passport_changed(raw, "passport-withdrawn", who, body.why[:120] or "back to draft")
+    return _passport_view(raw)
 
 
 @app.get("/api/audit")
@@ -522,6 +607,6 @@ async def ws_endpoint(ws: WebSocket):
         clients.discard(ws)
 
 
-app.mount("/data", StaticFiles(directory=c.OUT), name="data")
+app.mount("/data", StaticFiles(directory=c.MAP), name="data")
 if c.WEB_DIST.exists():
     app.mount("/", StaticFiles(directory=c.WEB_DIST, html=True), name="web")

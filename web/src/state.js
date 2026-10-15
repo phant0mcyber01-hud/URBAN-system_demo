@@ -11,7 +11,9 @@ export function createState(scene) {
     tab: 'overview', cam: null, pin: null,
     user: null, // {name, role} of the signed-in account
     history: null, // from /api/history*, loaded when the tab opens
-    mode: 'simulation', // 'simulation' (SUMO, emulated equipment) or 'field' (real URBAN Edge units)
+    junctions: null, // passports from /api/junctions
+    junction: null, // the passport open in the junctions tab
+    mode: 'field', // 'field' (the real system: URBAN Edge units) or 'simulation' (the demo twin)
     corridor: false, // green corridor proposals switched on (GREEN_CORRIDOR)
     can: (role) => (RANK[S.user?.role] ?? -1) >= RANK[role],
   };

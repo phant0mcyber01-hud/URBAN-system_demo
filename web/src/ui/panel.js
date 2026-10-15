@@ -33,6 +33,8 @@ const END_REASON = {
   corridor: 'уступил место зелёному коридору для экстренной машины',
 };
 
+const PASSPORT = { approved: ['ok', 'утверждён'], draft: ['warn', 'черновик'] };
+const DEMO_ONLY = new Set(['cameras', 'emergency', 'infra']);  // the twin's scenarios: no real source behind them yet
 const when = (at) => (at ? new Date(at * 1000).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—');
 const RUN_MODE = { simulation: 'симуляция', field: 'оборудование' };
 // the copy of the audit log outside this server: without one, a rebuilt chain cannot be told from the real one
@@ -162,6 +164,73 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
     }).join('');
   };
 
+  // junction passports: what the engineer checked against the controller; a draft is watched, never commanded
+  const unitChip = (id) => {
+    const d = S.dev[id];
+    if (!d) return chip('info', 'блока нет');
+    return d.s === 'revoked' ? chip('bad', 'блок отозван') : d.lock ? chip('bad', 'заблокирован') : d.o ? '' : chip('warn', 'блок не на связи');
+  };
+  const passportList = () => {
+    const list = S.junctions;
+    const ready = list.filter((j) => j.passport.status === 'approved').length;
+    const units = list.filter((j) => S.dev[j.id]).length;
+    return `<div class="grid">
+        ${kpi('перекрёстков', list.length)}${kpi('паспорт утверждён', ready, ready < list.length ? 'warn' : '')}
+        ${kpi('с блоком URBAN Edge', units)}${kpi('блоков на связи', list.filter((j) => S.dev[j.id]?.o).length)}
+      </div>
+      <p class="muted">Паспорт перекрёстка — подъезды, фазы и таблица планов. Пока он черновик, платформа только
+        наблюдает за перекрёстком: ничего не предлагает, а блок не выполнит ни одной команды.
+        ${S.mode === 'field' ? 'Черновики собраны из OpenStreetMap; инженер сверяет их с контроллером и утверждает.' : 'В демо паспорта синтетические.'}</p>
+      ${list.map((j) => {
+        const [cls, label] = PASSPORT[j.passport.status] ?? ['info', j.passport.status];
+        const q = S.cams[j.id]?.[2];
+        return `<button class="item jn" data-junction="${esc(j.id)}">
+          <span><b>${esc(j.id)}</b> ${esc(j.name)}</span>
+          <span class="row meta">${chip(cls, label)}${unitChip(j.id)}<span>${q == null ? 'нет данных' : `очередь ${q} м`}</span></span></button>`;
+      }).join('')}`;
+  };
+  const passportView = (j) => {
+    const p = j.passport, edit = S.mode === 'field' && S.can('admin');
+    const [cls, label] = PASSPORT[p.status] ?? ['info', p.status];
+    const num = (name, value, lo, hi) => (edit
+      ? `<input class="num" name="${name}" type="number" min="${lo}" max="${hi}" value="${value}" />` : `<b>${value}</b>`);
+    const shifts = j.plans.length - 1;
+    const unit = S.dev[j.id];
+    return `<button class="back" data-junction="">‹ Все перекрёстки</button>
+      <div class="row"><h3>${esc(j.id)} · ${esc(j.name)}</h3>${chip(cls, label)}</div>
+      <div class="kv"><span>Версия</span><b>${p.version ?? 1}</b>
+        ${p.status === 'approved' ? `<span>Утвердил</span><b>${esc(p.approved_by)} · ${esc(p.approved_at)}</b><span>Хэш</span><code>${esc(p.hash)}</code>`
+          : `<span>Источник</span><b>${p.source === 'osm' ? 'OpenStreetMap' : esc(p.source ?? '—')}</b>`}
+        ${p.edited_by ? `<span>Правил</span><b>${esc(p.edited_by)} · ${esc(p.edited_at)}</b>` : ''}
+        <span>Блок</span><span>${unit ? `${esc(unit.id)} ${unitChip(j.id) || 'на связи'}` : 'не установлен'}</span>
+      </div>
+      ${p.note ? `<p class="muted">${esc(p.note)}</p>` : ''}
+      ${j.problems.length ? `<div class="item">${chip('warn', 'нельзя утвердить')} ${j.problems.map(esc).join('; ')}</div>` : ''}
+      <form data-passport="${esc(j.id)}" onsubmit="return false">
+      <h4>Подъезды</h4>
+      <table class="tbl"><tr><th>Откуда</th><th>Улица</th><th>Полос</th><th>Зона датчика, м</th></tr>
+        ${j.approaches.map((a) => `<tr><td>${esc(a.from ?? a.id)}</td><td>${esc(a.name || '—')}</td>
+          <td>${num(`lanes:${a.id}`, a.lanes ?? 1, 1, 8)}</td><td>${num(`zone:${a.id}`, Math.round(a.zone), 10, 300)}</td></tr>`).join('')}</table>
+      <h4>Фазы · цикл ${j.cycle ?? '—'} с</h4>
+      <table class="tbl"><tr><th>Фаза</th><th>Зелёный получают</th><th>Зелёный, с</th><th>Минимум, с</th></tr>
+        ${j.phases.map((ph) => `<tr><td>${ph.index}</td>
+          <td>${ph.edges.map((e) => esc(j.approaches.find((a) => a.id === e)?.from ?? e)).join(', ')}</td>
+          <td>${num(`duration:${ph.index}`, ph.duration, 5, 120)}</td><td>${num(`min_green:${ph.index}`, ph.min_green, 5, 60)}</td></tr>`).join('')}</table>
+      <p class="muted">Таблица планов строится из фаз: базовый план и ${shifts} ${shifts % 10 === 1 && shifts % 100 !== 11 ? 'сдвиг' : [2, 3, 4].includes(shifts % 10) && ![12, 13, 14].includes(shifts % 100) ? 'сдвига' : 'сдвигов'} зелёного на 5, 10 или 15 с
+        между фазами — цикл не меняется, минимум каждой фазы соблюдён. Платформа может выбрать только из неё.</p>
+      ${edit ? `<div class="btns">
+          <button data-act="passport-save" data-id="${esc(j.id)}">Сохранить черновик</button>
+          ${p.status === 'approved'
+            ? `<input name="why" placeholder="причина" maxlength="200" /><button data-act="passport-withdraw" data-id="${esc(j.id)}">Вернуть в черновик</button>`
+            : `<button class="go" data-act="passport-approve" data-id="${esc(j.id)}" ${j.problems.length ? 'disabled' : ''}>Утвердить</button>`}
+        </div>
+        <p class="muted">Любая правка делает паспорт черновиком новой версии: действующие команды на перекрёстке снимаются.
+          Утверждение записывается в журнал вместе с хэшем паспорта; блок получает новую таблицу планов сразу.</p>`
+        : `<p class="muted">${S.mode === 'field' ? 'Править и утверждать паспорта может администратор.' : 'В демо паспорта синтетические и не правятся.'}</p>`}
+      </form>
+      <div class="btns"><button data-fly="${esc(j.id)}">Показать на карте</button></div>`;
+  };
+
   const TABS = {
     overview: ['Обзор', () => {
       const inc = S.activeIncidents.length, bad = S.infraBad.length, jam = S.jamRoads.length, wait = S.pending().length;
@@ -173,29 +242,57 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
         ...S.cmd.map((c) => ({ t: c.t, html: `${tag('пробка')} ${esc(c.street || c.cam)}: очередь в среднем ${c.queue0} м` })),
         ...S.devAlerts.map((a) => ({ t: a.t, html: `${tag('устройство')} ${esc(a.device)}: ${esc(a.text)}` })),
       ].sort((a, b) => b.t - a.t).slice(0, 8);
+      const field = S.mode === 'field';
+      const units = Object.values(S.dev), online = units.filter((d) => d.o).length;
+      const ready = (S.junctions ?? []).filter((j) => j.passport.status === 'approved').length;
+      const running = S.cmd.filter((c) => ['approved', 'active', 'revoking'].includes(c.status)).length;
       return `<div class="grid">
-          ${kpi('проблем ждут решения', wait, wait ? 'warn' : '')}${kpi('активных происшествий', inc, inc ? 'bad' : '')}
-          ${kpi('авто в районе', S.stats?.cars ?? '—')}${kpi('ср. скорость, км/ч', S.stats?.mean_speed_kmh ?? '—')}
-          ${kpi('сегментов с затором', jam, jam ? 'warn' : '')}${kpi('объектов с отклонением', bad, bad ? 'warn' : '')}
+          ${kpi('проблем ждут решения', wait, wait ? 'warn' : '')}${field
+            ? `${kpi('команд действует', running)}
+               ${kpi('паспортов утверждено', S.junctions ? `${ready} / ${S.junctions.length}` : '—', S.junctions && ready < S.junctions.length ? 'warn' : '')}
+               ${kpi('блоков на связи', units.length ? `${online} / ${units.length}` : '0', units.length && online < units.length ? 'warn' : '')}`
+            : `${kpi('активных происшествий', inc, inc ? 'bad' : '')}
+               ${kpi('авто в районе', S.stats?.cars ?? '—')}${kpi('ср. скорость, км/ч', S.stats?.mean_speed_kmh ?? '—')}
+               ${kpi('сегментов с затором', jam, jam ? 'warn' : '')}${kpi('объектов с отклонением', bad, bad ? 'warn' : '')}`}
         </div>
+        ${field && S.junctions && !S.junctions.length ? `<div class="item">${chip('warn', 'город не настроен')}
+          На сервере: <code>python -m urban.city create --name … --bbox …</code> — карта и перекрёстки из OpenStreetMap.</div>` : ''}
+        ${field && S.junctions && S.junctions.length && !ready ? `<div class="item">${chip('warn', 'нет утверждённых паспортов')}
+          Перекрёстки только наблюдаются. Паспорт сверяет и утверждает инженер — раздел «Перекрёстки».</div>` : ''}
+        ${field && !units.length ? `<div class="item">${chip('info', 'блоков нет')}
+          Ни один блок URBAN Edge ещё не подключён. Как поставить и зарегистрировать блок — deploy/README.md.</div>` : ''}
         ${wait ? `<h4>Ждут решения</h4>${withGroups(S.pending())}` : ''}
         <h4>Сводка анализа</h4>
         ${feed.length ? feed.map((f) => `<div class="item"><time>${clock(f.t)}</time> ${f.html}</div>`).join('') : empty('событий пока нет')}`;
+    }],
+    junctions: ['Перекрёстки', () => {
+      if (!S.junctions) return empty('загрузка паспортов…');
+      if (!S.junctions.length) {
+        return `<p class="muted">Город ещё не настроен. На сервере: <code>python -m urban.city create --name … --bbox …</code> —
+          карта и перекрёстки из OpenStreetMap, без симулятора.</p>`;
+      }
+      const j = S.junction && S.junctions.find((x) => x.id === S.junction);
+      return j ? passportView(j) : passportList();
     }],
     transport: ['Пробки и светофоры', () => {
       const streets = jamStreets(), jam = S.jamRoads.length;
       const skipped = S.cmd.filter((c) => c.status === 'expired' || c.status === 'rejected').length;
       const cards = [...S.cmd].filter((c) => c.status !== 'expired' && c.status !== 'rejected').reverse()
         .sort((a, b) => (b.status === 'pending') - (a.status === 'pending'));  // what waits for a decision goes first
+      const field = S.mode === 'field';
       return `<div class="grid">
-          ${kpi('ср. скорость, км/ч', S.stats?.mean_speed_kmh ?? '—')}${kpi('потери автобуса, с', S.stats?.bus_avg_loss ?? '—')}
-          ${kpi('сегментов с затором', jam, jam ? 'warn' : '')}${kpi(S.mode === 'field' ? 'команд передано оборудованию' : 'команд передано, эмуляция', S.audit.applied ?? 0)}
+          ${field
+            ? `${kpi('ждут решения', S.pending().length, S.pending().length ? 'warn' : '')}
+               ${kpi('команд действует', S.cmd.filter((c) => ['approved', 'active', 'revoking'].includes(c.status)).length)}`
+            : `${kpi('ср. скорость, км/ч', S.stats?.mean_speed_kmh ?? '—')}${kpi('потери автобуса, с', S.stats?.bus_avg_loss ?? '—')}
+               ${kpi('сегментов с затором', jam, jam ? 'warn' : '')}`}
+          ${kpi(field ? 'команд передано оборудованию' : 'команд передано, эмуляция', S.audit.applied ?? 0)}
         </div>
         <h4>Проблемы, найденные камерами и детекторами</h4>
         ${cards.length ? withGroups(cards) : empty('перекосов нет: нигде одно направление не стоит при свободном поперечном')}
         ${skipped ? `<p class="muted">Без решения или отклонено: ${skipped}</p>` : ''}
-        <h4>Заторы сейчас</h4>
-        ${streets.length ? streets.slice(0, 6).map(([n, c]) => `<div class="item row"><span>${esc(n)}</span><span>${c} сегм.</span></div>`).join('') : empty('заторов нет')}`;
+        ${field ? '' : `<h4>Заторы сейчас</h4>
+        ${streets.length ? streets.slice(0, 6).map(([n, c]) => `<div class="item row"><span>${esc(n)}</span><span>${c} сегм.</span></div>`).join('') : empty('заторов нет')}`}`;
     }],
     cameras: ['Камеры', () => `<p class="muted">Очереди считаются на всех ${scene.cams.length + scene.detectors.length} регулируемых перекрёстках района.
         У ${scene.cams.length} из них есть окно камеры; остальные показаны на карте кружками. Только поток и очереди: без лиц и номеров.</p>
@@ -280,7 +377,11 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
 
   const panel = $('panel'), tabs = $('tabs');
   let last = '';
-  tabs.innerHTML = Object.entries(TABS).map(([k, [label]]) => `<button data-tab="${k}">${label}</button>`).join('');
+  const visible = () => Object.entries(TABS).filter(([k]) => S.mode !== 'field' || !DEMO_ONLY.has(k));
+  const drawTabs = () => {
+    tabs.innerHTML = visible().map(([k, [label]]) => `<button data-tab="${k}" class="${k === S.tab ? 'sel' : ''}">${label}</button>`).join('');
+  };
+  drawTabs();
 
   const api = {
     render() {
@@ -291,7 +392,16 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
       tabs.querySelector('[data-tab=transport]').dataset.badge = wait || '';
       const devBad = Object.values(S.dev).filter((d) => !d.o || d.lock || d.al.length || d.s === 'revoked').length;
       tabs.querySelector('[data-tab=devices]').dataset.badge = devBad || '';
+      const drafts = (S.junctions ?? []).filter((j) => j.passport.status !== 'approved').length;
+      tabs.querySelector('[data-tab=junctions]').dataset.badge = S.mode === 'field' && drafts ? drafts : '';
     },
+    setMode(mode) {
+      S.mode = mode;
+      drawTabs();
+      if (!visible().some(([k]) => k === S.tab)) api.setTab('overview');
+      else api.render();
+    },
+    refresh() { last = ''; api.render(); },
     setTab(tab) {
       S.tab = tab;
       for (const b of tabs.children) b.classList.toggle('sel', b.dataset.tab === tab);
@@ -303,6 +413,8 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
   };
   tabs.onclick = (e) => e.target.dataset.tab && api.setTab(e.target.dataset.tab);
   panel.onclick = (e) => {
+    const jn = e.target.closest('[data-junction]');
+    if (jn) { S.junction = jn.dataset.junction || null; last = ''; api.render(); $('side').scrollTop = 0; return; }
     const cam = e.target.closest('[data-cam]');
     if (cam) return onCamera(cam.dataset.cam);
     const act = e.target.closest('[data-act]');
