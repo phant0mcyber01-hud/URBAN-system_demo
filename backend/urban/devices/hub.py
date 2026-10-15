@@ -82,6 +82,7 @@ class DeviceHub:
                 await ws.close(code=4401)
                 return
             device = rec["id"]
+            self.registry.mark_seen(device)
             old = self.sessions.pop(device, None)
             if old is not None:  # the same unit reconnected: one session per device
                 await _close(old)
@@ -145,7 +146,15 @@ class DeviceHub:
             self.plans.pop(tls, None)
         for rec in self.registry.devices.values():
             if rec["tls"] == tls and (ws := self.sessions.pop(rec["id"], None)) is not None:
-                await _close(ws)
+                await _close(ws, CLOSED_PLANS)
+
+    async def remove(self, device: str) -> dict | None:
+        rec = self.registry.remove(device)
+        ws = self.sessions.pop(device, None)
+        if ws is not None:
+            await _close(ws)
+        self.seen.pop(device, None)
+        return rec
 
     async def set_status(self, device: str, status: str) -> dict | None:
         rec = self.registry.set_status(device, status)
@@ -163,6 +172,7 @@ class DeviceHub:
             seen = self.seen.get(rec["id"], {})
             out.append({"id": rec["id"], "junction": rec["junction"], "tls": rec["tls"], "name": rec.get("name", ""),
                         "serial": rec.get("serial", ""), "enrolled": rec.get("enrolled", ""),
+                        "first_seen": rec.get("first_seen"),
                         "fingerprint": crypto.fingerprint(rec["public_key"]),
                         "gateway_epoch": self.epochs.get(rec["id"]),
                         "status": rec["status"], "online": rec["id"] in self.sessions,
@@ -172,8 +182,11 @@ class DeviceHub:
         return out
 
 
-async def _close(ws: WebSocket):
+CLOSED_TRUST, CLOSED_PLANS = 4403, 4012  # key or status changed / the junction's plan table changed
+
+
+async def _close(ws: WebSocket, code: int = CLOSED_TRUST):
     try:
-        await ws.close(code=4403)
+        await ws.close(code=code)
     except Exception:
         pass

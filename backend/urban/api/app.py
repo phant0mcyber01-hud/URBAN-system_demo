@@ -29,6 +29,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -37,7 +38,8 @@ from ..accounts import Accounts, CodeRequired, allows
 from ..core.bus import PLATFORM_FRAME, SOURCE_FRAME, Bus
 from ..devices import crypto
 from ..devices.hub import DeviceHub
-from ..devices.registry import ACTIVE, REVOKED, Registry, provision
+from ..devices.enrolment import make_kit, parse_code
+from ..devices.registry import ACTIVE, REVOKED, Registry, device_id, provision
 from ..city.passport import PassportError, Passports, problems
 from ..junctions import APPROVED, DRAFT, _junction, approved, approved_plans, load_all_junctions, load_cameras
 from ..platform import Platform
@@ -507,6 +509,59 @@ class Enrolment(BaseModel):
     junction: str        # junction id, e.g. J-21
     public_key: str      # hex, printed by `python -m urban.edge --keygen` on the unit
     serial: str = ""
+
+
+class CodeEnrolment(BaseModel):
+    code: str       # printed by `python -m urban.edge --keygen` on the unit
+    junction: str   # junction id the unit is installed at
+
+
+@app.post("/api/devices/enroll-code")
+async def device_enroll_code(body: CodeEnrolment, who: str = Depends(admin)):
+    """Enrol a unit from the code it printed: installation, or a replaced box at the same junction."""
+    try:
+        code = parse_code(body.code)
+    except ValueError as err:
+        raise HTTPException(400, str(err))
+    junction = next((j for j in junctions if j["id"] == body.junction), None)
+    if junction is None:
+        raise HTTPException(404, "нет такого перекрёстка")
+    if code["device"] != device_id(junction["id"]):
+        raise HTTPException(400, f"код сделан для блока {code['device']}, а у перекрёстка {junction['id']} блок "
+                                 f"{device_id(junction['id'])}: на блоке нужен ключ с --unit {device_id(junction['id'])}")
+    before = hub.registry.devices.get(code["device"])
+    try:
+        rec = await hub.enroll(code["device"], junction, code["public"], code["serial"])
+    except ValueError as err:
+        raise HTTPException(400, str(err))
+    fp = crypto.fingerprint(rec["public_key"])
+    replaced = before is not None and before["public_key"] != rec["public_key"]
+    platform.gateway.audit.append(platform.t, "device-enrolled", "-", "-", rec["id"],
+                                  f"{junction['id']} key {fp}{' (box replaced)' if replaced else ''}", actor=who, mode="approval")
+    return {"id": rec["id"], "junction": rec["junction"], "serial": rec["serial"], "fingerprint": fp, "replaced": replaced}
+
+
+@app.get("/api/devices/{device}/kit")
+def device_kit(device: str, who: str = Depends(admin)):
+    """The unit's kit: the platform's address, ca.pem and root.pub, bound to the enrolled key's fingerprint."""
+    rec = hub.registry.devices.get(device)
+    if rec is None:
+        raise HTTPException(404, "unknown device")
+    kit = make_kit(rec, c.PKI, c.DEVICE_NAME, c.DEVICE_PORT)
+    return JSONResponse(kit, headers={"Content-Disposition": f'attachment; filename="urban-{device}.json"'})
+
+
+@app.post("/api/devices/{device}/remove")
+async def device_remove(device: str, who: str = Depends(admin)):
+    """Forget a revoked unit for good (box taken out of service); the junction is free for another unit."""
+    try:
+        rec = await hub.remove(device)
+    except ValueError:
+        raise HTTPException(409, "сначала отзовите блок")
+    if rec is None:
+        raise HTTPException(404, "unknown device")
+    platform.gateway.audit.append(platform.t, "device-removed", "-", "-", device, rec["junction"], actor=who, mode="approval")
+    return {"ok": True}
 
 
 @app.post("/api/devices/{device}/enroll")

@@ -250,8 +250,12 @@ class Platform:
                 "id": row["id"], "serial": row.get("serial", ""), "o": int(row["online"]), "s": row["status"],
                 "v": h.get("version"), "t": h.get("temp"), "d": h.get("door"), "c": h.get("controller"),
                 "l": h.get("leases"), "u": h.get("uptime"), "a": row.get("age"), "n": row.get("connects", 0),
+                "f": int(bool(row.get("first_seen"))),
                 "al": [[a["level"], a["text"]] for a in alerts], "lock": row.get("tls") in self.gateway.locked,
             }
+        present = {row["junction"] for row in rows}
+        for junction in [j for j in self.dev if j not in present]:  # removed from the registry
+            del self.dev[junction]
         self.dev_alerts = self.dev_alerts[-200:]
         return new
 

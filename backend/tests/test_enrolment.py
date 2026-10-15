@@ -7,8 +7,9 @@ from types import SimpleNamespace
 import pytest
 
 from urban.devices import crypto
+from urban.devices.enrolment import install_kit, make_code, make_kit, parse_code
 from urban.devices.hub import DeviceHub
-from urban.devices.registry import ACTIVE, Registry, provision
+from urban.devices.registry import ACTIVE, REVOKED, Registry, provision
 from urban.edge.__main__ import keygen
 from urban.platform import Platform
 
@@ -29,10 +30,12 @@ def test_field_provisioning_makes_no_unit_keys(field_pki):
 
 def test_keygen_on_the_unit_then_enrol_the_public_half(tmp_path, field_pki, capsys):
     unit_pki = tmp_path / "unit"
-    args = SimpleNamespace(unit="edge-J-01", key=None, pki=str(unit_pki))
+    args = SimpleNamespace(unit="edge-J-01", key=None, pki=str(unit_pki), serial="URB-0001")
     keygen(args)
     out = capsys.readouterr().out
-    public = out.split("public key:")[1].split()[0]
+    code = parse_code(next(line for line in out.splitlines() if "URBAN1:" in line))
+    public = code["public"]
+    assert code["device"] == "edge-J-01" and code["serial"] == "URB-0001"
     with pytest.raises(SystemExit):
         keygen(args)  # never overwrites
     key = crypto.load_private((unit_pki / "edge" / "edge-J-01.key").read_text())
@@ -106,3 +109,59 @@ def test_platform_audits_a_key_change():
     rec = p.gateway.records[-1] if p.gateway.records[-1]["event"] == "device-key-changed" else \
         next(r for r in p.gateway.records if r["event"] == "device-key-changed")
     assert rec["target"] == "edge-J-01" and "1111-2222-3333-4444" in rec["note"]
+
+
+def test_enrolment_code_survives_copying_and_catches_damage():
+    public = crypto.public_hex(crypto.new_key())
+    code = make_code("edge-J-07", "URB-0042", public)
+    assert parse_code(code) == {"device": "edge-J-07", "serial": "URB-0042", "public": public}
+    assert parse_code("  " + code[:30] + chr(10) + code[30:] + " ")["public"] == public  # wrapped by a messenger
+    damaged = code.replace(public[:4], "0000" if public[:4] != "0000" else "1111")
+    with pytest.raises(ValueError, match="контрольная сумма"):
+        parse_code(damaged)
+    with pytest.raises(ValueError, match="не код подключения"):
+        parse_code(public)
+    with pytest.raises(ValueError):
+        make_code("J-07", "", public)  # not a unit id
+
+
+def test_the_kit_goes_in_place_only_on_its_own_unit(tmp_path, field_pki):
+    unit_pki = tmp_path / "unit" / "pki"
+    keygen(SimpleNamespace(unit="edge-J-01", key=None, pki=str(unit_pki), serial=""))
+    key = crypto.load_private((unit_pki / "edge" / "edge-J-01.key").read_text())
+    reg = Registry(field_pki / "devices.json")
+    rec = reg.enroll("edge-J-01", JUNCTIONS[0], crypto.public_hex(key), "URB-0001")
+    kit = make_kit(rec, field_pki, "city.example", 8443)
+    assert kit["platform"] == "city.example:8443" and kit["root_pub"] and kit["gateway_pub"] is None
+    assert not any("PRIVATE" in str(v) for v in kit.values())  # nothing secret in it
+
+    env = tmp_path / "unit" / "edge-edge-J-01.env"
+    written = install_kit(kit, "edge-J-01", unit_pki / "edge" / "edge-J-01.key", unit_pki, env)
+    assert (unit_pki / "ca.pem").read_text() == (field_pki / "ca.pem").read_text()
+    assert (unit_pki / "root.pub").read_text().strip() == (field_pki / "root.pub").read_text().strip()
+    assert "PLATFORM=city.example:8443" in env.read_text() and str(env) in written
+
+    # a second setup keeps what the installer wrote and only moves the platform
+    env.write_text(env.read_text().replace("ADAPTER=none", "ADAPTER=ntcip"))
+    install_kit({**kit, "platform": "new.example:8443", "server_name": "new.example"}, "edge-J-01",
+                unit_pki / "edge" / "edge-J-01.key", unit_pki, env)
+    text = env.read_text()
+    assert "ADAPTER=ntcip" in text and "PLATFORM=new.example:8443" in text and "SERVER_NAME=new.example" in text
+
+    with pytest.raises(ValueError, match="for edge-J-01"):
+        install_kit(kit, "edge-J-02", unit_pki / "edge" / "edge-J-01.key", unit_pki, env)
+    other = reg.enroll("edge-J-01", JUNCTIONS[0], crypto.public_hex(crypto.new_key()))  # the box was replaced
+    with pytest.raises(ValueError, match="made for key"):
+        install_kit(make_kit(other, field_pki, "city.example", 8443), "edge-J-01",
+                    unit_pki / "edge" / "edge-J-01.key", unit_pki, env)
+
+
+def test_a_unit_is_removed_only_after_it_was_revoked(field_pki):
+    reg = Registry(field_pki / "devices.json")
+    reg.enroll("edge-J-01", JUNCTIONS[0], crypto.public_hex(crypto.new_key()))
+    with pytest.raises(ValueError):
+        reg.remove("edge-J-01")
+    reg.set_status("edge-J-01", REVOKED)
+    assert reg.remove("edge-J-01")["id"] == "edge-J-01"
+    assert reg.by_tls("T1") is None and Registry(field_pki / "devices.json").devices == {}
+    reg.enroll("edge-J-01b", JUNCTIONS[0], crypto.public_hex(crypto.new_key()))  # the junction is free again

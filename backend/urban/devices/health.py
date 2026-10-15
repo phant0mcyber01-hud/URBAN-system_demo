@@ -42,6 +42,8 @@ def assess(row: dict) -> list[dict]:
     h = row.get("health") or {}
     if row["status"] == "revoked":
         out.append({"kind": "revoked", "level": "alert", "text": "устройство отозвано"})
+    elif not row["online"] and "first_seen" in row and not row["first_seen"]:
+        pass  # enrolled, never connected with this key: the installer has not finished yet
     elif not row["online"]:
         age = row.get("age")
         out.append({"kind": "offline", "level": "warn",

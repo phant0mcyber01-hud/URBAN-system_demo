@@ -76,6 +76,8 @@ class Registry:
         if other is not None and other["id"] != device:
             raise ValueError(f"junction {junction['id']} already has unit {other['id']}; revoke and remove it first")
         rec = self.devices.get(device, {})
+        if rec.get("public_key") != public.strip().lower():
+            rec.pop("first_seen", None)  # a new key is a new box: it has not been seen yet
         rec.update({"id": device, "junction": junction["id"], "tls": junction["tls"], "name": junction.get("name", ""),
                     "public_key": public.strip().lower(), "status": ACTIVE,
                     "serial": serial or rec.get("serial") or f"URB-{secrets.token_hex(3).upper()}",
@@ -91,6 +93,24 @@ class Registry:
             return None
         ok = crypto.verify(crypto.load_public(rec["public_key"]), {"device": device, "nonce": nonce}, signature)
         return rec if ok else None
+
+    def mark_seen(self, device: str):
+        """The first session of a unit with its current key: installed and talking. Written once per key."""
+        rec = self.devices.get(device)
+        if rec is not None and not rec.get("first_seen"):
+            rec["first_seen"] = datetime.datetime.now().isoformat(timespec="seconds")
+            self._save()
+
+    def remove(self, device: str) -> dict | None:
+        """Forget a unit for good. Only a revoked one: removing must never be the first step."""
+        rec = self.devices.get(device)
+        if rec is None:
+            return None
+        if rec["status"] != REVOKED:
+            raise ValueError("revoke the unit first")
+        del self.devices[device]
+        self._save()
+        return rec
 
     def set_status(self, device: str, status: str) -> dict | None:
         rec = self.devices.get(device)

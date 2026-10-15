@@ -6,7 +6,7 @@
 
 ![статус](https://img.shields.io/badge/статус-готовим%20пилот-8a63d2)
 ![python](https://img.shields.io/badge/python-3.11+-3776ab)
-![tests](https://img.shields.io/badge/тесты-170%20проходят-2ea44f)
+![tests](https://img.shields.io/badge/тесты-177%20проходят-2ea44f)
 ![пилот](https://img.shields.io/badge/пилот-Фергана-5cc8ff)
 
 ![Центр управления: камера заметила пробку, оператор переключил светофор на утверждённый план](docs/img/control.png)

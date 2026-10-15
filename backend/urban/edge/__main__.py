@@ -11,9 +11,11 @@ One real unit, on its own computer in a cabinet (the platform in field mode):
     python -m urban.edge --unit edge-J-21 --platform city.example:8443 --adapter ntcip --controller 192.168.10.2:161
 Trust: the unit carries the platform's ca.pem (whose TLS it accepts) and root.pub (whose gateway key it
 obeys; the key itself comes in a certificate at session start, and rotations follow, never back).
-Before the first start the unit makes its own key; only the public half leaves it:
-    python -m urban.edge --keygen --unit edge-J-21 [--pki /etc/urban/pki]
-and the administrator enrols that public key on the platform (python -m urban.provision enroll ...).
+Before the first start the unit makes its own key; only the public half leaves it, inside an enrolment code:
+    python -m urban.edge --keygen --unit edge-J-21 --serial URB-0042 [--pki /etc/urban/pki]
+The administrator pastes the code in the UI (Устройства -> Подключить блок) and downloads the unit's kit;
+on the unit it goes in place with one command (writes ca.pem, root.pub and /etc/urban/edge-<unit>.env):
+    python -m urban.edge --setup urban-edge-J-21.json --unit edge-J-21 [--pki /etc/urban/pki]
 It needs its key, the CA of the platform and the gateway's public key (--pki or --key/--ca/--gateway-pub),
 learns its junction and the approved plan table from the platform at session start, ticks on its own
 wall clock, and reads queue lengths from --sensors (a JSON file {approach id: metres} that the camera
@@ -40,6 +42,7 @@ import websockets
 
 from .. import config as c
 from ..devices import crypto
+from ..devices.enrolment import install_kit, load_kit, make_code
 from ..devices.registry import device_id
 from ..equipment.adapter import NoController
 from ..equipment.modbus import ModbusRelayBoard
@@ -48,10 +51,13 @@ from ..equipment.relay import RelayAdapter
 from ..equipment.snmp import SnmpClient, SnmpV3Client
 from ..junctions import approved_plans, load_all_junctions
 from .device import EdgeDevice
+from .probe import Probe
 from ..sources.field import SUPERSEDED
 from .field import FieldAdapter
 
 RETRY = 2            # seconds between connection attempts
+CLOSED = {4012: "the junction's passport changed on the platform, learning the new plan table",
+          4403: "the platform ended the session: this unit's key or status changed"}
 FIELD_PATIENCE = 20  # seconds without the field link before a demo fleet gives up
 
 
@@ -232,9 +238,11 @@ class Unit:
         if gateway_public is None and root_public is None:
             raise SystemExit(f"neither {root_path} nor {gw_path}: the unit would not know whose commands to obey")
         self.adapter = make_adapter(args)
+        self.probe = Probe(args.temp, args.door, args.door_open)
         self.dev = EdgeDevice(self.id, args.junction, key, gateway_public, self.adapter,
                               state_path=Path(args.state or pki / "edge" / f"{self.id}.seq"),
-                              root_public=root_public, gateway_state=pki / "edge" / f"{self.id}.gateway.json")
+                              root_public=root_public, gateway_state=pki / "edge" / f"{self.id}.gateway.json",
+                              probe=self.probe)
         self.sensors = Path(args.sensors) if args.sensors else None
         self.url = f"wss://{args.platform}/device"
         self.server_name = args.server_name
@@ -277,6 +285,9 @@ class Unit:
                         msg = json.loads(text)
                         if isinstance(msg, dict) and msg.get("type") == "cmd":
                             self.dev.on_command(msg)
+            except websockets.ConnectionClosed as err:
+                code = err.rcvd.code if err.rcvd is not None else None
+                print(f"edge: {CLOSED.get(code, f'session closed ({code})')}, reconnecting", flush=True)
             except (OSError, websockets.WebSocketException, ConnectionError, json.JSONDecodeError, KeyError,
                     TypeError, AttributeError) as err:
                 print(f"edge: platform unreachable ({err.__class__.__name__}), retrying", flush=True)
@@ -285,7 +296,8 @@ class Unit:
             await asyncio.sleep(RETRY)
 
     async def run(self):
-        print(f"edge: unit {self.id}, platform {self.url}, adapter {self.adapter.__class__.__name__}", flush=True)
+        print(f"edge: unit {self.id}, platform {self.url}, adapter {self.adapter.__class__.__name__}, "
+              f"{self.probe.describe()}", flush=True)
         await asyncio.gather(self.ticker(), self.session())
 
 
@@ -305,15 +317,34 @@ def keygen(args):
         pass
     public = crypto.public_hex(key)
     print(f"private key: {path} (stays on this unit)")
-    print(f"public key:  {public}")
-    print(f"fingerprint: {crypto.fingerprint(public)}")
-    print(f"on the platform: python -m urban.provision enroll {args.unit} --junction <id> --public {public}")
-    print("this unit also needs the platform's ca.pem and root.pub next to its key")
+    print(f"fingerprint: {crypto.fingerprint(public)}   <- the administrator must see the same one")
+    print("enrolment code (paste it in the UI: Устройства -> Подключить блок):")
+    print(f"\n    {make_code(args.unit, args.serial, public)}\n")
+    print(f"then download the unit's kit there and run: python -m urban.edge --setup <kit.json> --unit {args.unit}")
+
+
+def setup(args):
+    """Put the kit downloaded from the platform in place: whom to trust and where the platform is."""
+    if not args.unit:
+        raise SystemExit("--setup needs --unit <device id>, e.g. edge-J-21")
+    pki = Path(args.pki)
+    key_path = Path(args.key or pki / "edge" / f"{args.unit}.key")
+    env_path = Path(args.env or pki.parent / f"edge-{args.unit}.env")
+    try:
+        written = install_kit(load_kit(Path(args.setup)), args.unit, key_path, pki, env_path)
+    except ValueError as err:
+        raise SystemExit(str(err))
+    for path in written:
+        print(f"wrote {path}")
+    print(f"set ADAPTER and CONTROLLER in {env_path}, then: systemctl enable --now urban-edge@{args.unit}")
 
 
 def main():
     ap = argparse.ArgumentParser(description="URBAN Edge units")
-    ap.add_argument("--keygen", action="store_true", help="make this unit's key and print its public half, then exit")
+    ap.add_argument("--keygen", action="store_true", help="make this unit's key and print its enrolment code, then exit")
+    ap.add_argument("--serial", default="", help="--keygen: the serial number printed on the box")
+    ap.add_argument("--setup", metavar="KIT", help="put the kit downloaded from the platform in place, then exit")
+    ap.add_argument("--env", help="--setup: the unit's env file (default: next to the pki folder, edge-<unit>.env)")
     ap.add_argument("--only", help="demo fleet: run a single unit, by junction id (for example J-21)")
     ap.add_argument("--keep-running", action="store_true", help="demo fleet: do not stop when the field link disappears")
     ap.add_argument("--unit", help="one real unit: its device id (for example edge-J-21)")
@@ -330,12 +361,18 @@ def main():
                     help="ntcip: 3 = SNMPv3 authPriv (default; credentials from SNMP_* env), 1 = v2c, 0 = v1")
     ap.add_argument("--backup-time", type=int, default=180, help="ntcip: unitBackupTime set before the first plan, seconds")
     ap.add_argument("--sensors", help="JSON file {approach id: metres} rewritten by the camera pipeline")
+    ap.add_argument("--temp", help="cabinet temperature file (DS18B20 w1_slave or a thermal zone); default: the board's own")
+    ap.add_argument("--door", help="door switch file (a GPIO value); without it the door is unknown, not 'closed'")
+    ap.add_argument("--door-open", default="1", help="content of the door file that means open")
     ap.add_argument("--pki", default=str(c.PKI), help="folder with ca.pem, gateway.pub and edge/<unit>.key")
     for name in ("--key", "--ca", "--gateway-pub", "--root", "--state"):
         ap.add_argument(name)
     args = ap.parse_args()
     if args.keygen:
         keygen(args)
+        return
+    if args.setup:
+        setup(args)
         return
     runner = Unit(args) if args.unit else Fleet(args.only)  # configuration errors stop here, with their message
     try:

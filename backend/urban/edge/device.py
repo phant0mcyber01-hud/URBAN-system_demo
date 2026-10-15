@@ -26,18 +26,21 @@ MAX_SKEW = 30  # seconds between the issue time of a command and the clock of th
 class EdgeDevice:
     def __init__(self, device_id: str, tls: str | None, key, gateway_public, adapter: ControllerAdapter,
                  state_path: Path | None = None, wall=time.time, script: dict | None = None,
-                 root_public=None, gateway_state: Path | None = None):
+                 root_public=None, gateway_state: Path | None = None, probe=None):
         """tls: the junction this unit is installed at, or None to take it from the platform's welcome;
         gateway_public: gateway.pub, or None for a unit that takes the gateway key from the root's certificate;
         state_path: where the last accepted sequence number is kept; wall(): wall-clock seconds;
         script: demo faults, e.g. {"heat": (120, 540)} or {"door": (420, 500)} in simulation seconds;
         root_public: the installed root key, to follow gateway key rotations (devices/trust.py);
-        gateway_state: where the accepted gateway certificate is kept."""
+        gateway_state: where the accepted gateway certificate is kept;
+        probe(): {"temp", "door"} from the cabinet's real sensors (edge/probe.py), None in either when absent.
+        Without a probe the unit is a demo one and its temperature and door follow `script`."""
         self.id, self.tls, self.key = device_id, tls, key
         self.trust = GatewayTrust(root_public, gateway_public, gateway_state)
         self.adapter = adapter
         self.controller = EdgeController(adapter)
         self.script = script or {}
+        self.probe = probe
         self.started = time.monotonic()
         self.state_path, self.wall = state_path, wall
         self.last_seq = 0
@@ -115,8 +118,11 @@ class EdgeDevice:
         self.clock = now
         self.outbox += self.controller.tick(now)
 
-    def report(self, queues: dict) -> dict:
-        """What goes up to the platform: aggregates, lease events and the unit's own health."""
+    def cabinet(self) -> tuple[float | None, str | None]:
+        """Temperature and door: measured on a real unit, scripted on a demo one."""
+        if self.probe is not None:
+            seen = self.probe()
+            return seen.get("temp"), seen.get("door")
         self._temp += random.uniform(-0.2, 0.2)
         heat = self.script.get("heat")
         if heat is not None:  # demo: a cabinet in the sun for a while, then it cools down again
@@ -126,9 +132,14 @@ class EdgeDevice:
                 self._temp -= 0.06
         door = self.script.get("door")
         door_open = door is not None and door[0] <= self.clock < door[1]
+        return round(self._temp, 1), "open" if door_open else "closed"
+
+    def report(self, queues: dict) -> dict:
+        """What goes up to the platform: aggregates, lease events and the unit's own health."""
+        temp, door = self.cabinet()
         events, self.outbox = self.outbox, []
         return {"type": "report", "t": self.clock, "queues": queues, "events": events, "epoch": self.trust.epoch,
-                "health": {"version": VERSION, "temp": round(self._temp, 1), "door": "open" if door_open else "closed",
+                "health": {"version": VERSION, "temp": temp, "door": door,
                            "controller": getattr(self.adapter, "last_error", None) or "ok",
                            "leases": len(self.controller.leases), "uptime": round(time.monotonic() - self.started)}}
 

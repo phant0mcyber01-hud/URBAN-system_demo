@@ -63,23 +63,42 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
   };
 
   // URBAN Edge units: the registry with live health, one row per junction
+  const waiting = (d) => !d.o && !d.f && d.s !== 'revoked';  // enrolled, never connected with this key
   const devState = (d) => (d.s === 'revoked' ? chip('bad', 'отозвано') : d.lock ? chip('bad', 'заблокирован')
-    : d.o ? (d.al.length ? chip(d.al[0][0] === 'alert' ? 'bad' : 'warn', d.al[0][1]) : chip('ok', 'норма')) : chip('warn', 'нет связи'));
+    : d.o ? (d.al.length ? chip(d.al[0][0] === 'alert' ? 'bad' : 'warn', d.al[0][1]) : chip('ok', 'норма'))
+      : waiting(d) ? chip('info', 'ждёт первого подключения') : chip('warn', 'нет связи'));
   const devButton = (d) => (S.can('admin')
-    ? `<button data-act="${d.s === 'revoked' ? 'restore' : 'revoke'}" data-id="${esc(d.id)}">${d.s === 'revoked' ? 'Доверять' : 'Отозвать'}</button>` : '');
+    ? `${S.mode === 'field' && d.s !== 'revoked' ? `<button data-act="kit" data-id="${esc(d.id)}" title="Адрес платформы, её сертификат и корневой ключ — для установки на блок">Комплект</button>` : ''}
+       <button data-act="${d.s === 'revoked' ? 'restore' : 'revoke'}" data-id="${esc(d.id)}">${d.s === 'revoked' ? 'Доверять' : 'Отозвать'}</button>
+       ${d.s === 'revoked' && S.mode === 'field' ? `<button data-act="remove" data-id="${esc(d.id)}" title="Блок выведен из работы: забыть его, перекрёсток освободится">Убрать</button>` : ''}` : '');
   const age = (s) => (s == null ? '—' : s < 60 ? `${s} с` : `${Math.floor(s / 60)} мин`);
   const deviceSummary = () => {
     const all = Object.values(S.dev);
     if (!all.length) return empty('ожидание устройств');
     const online = all.filter((d) => d.o).length;
-    const bad = all.filter((d) => !d.o || d.lock || d.al.length || d.s === 'revoked');
+    const bad = all.filter((d) => (!d.o && !waiting(d)) || d.lock || d.al.length || d.s === 'revoked');
     return `<div class="item">${chip(online === all.length && !bad.length ? 'ok' : 'warn', `${online} из ${all.length} на связи`)}
         ${bad.length ? `${bad.length} с замечаниями, подробности во вкладке «Устройства».` : 'Замечаний нет.'}</div>`;
   };
+  const enrolButton = (junction = '') => (S.mode === 'field' && S.can('admin')
+    ? `<div class="btns"><button class="go" data-act="enrol" data-id="${esc(junction)}">Подключить блок</button></div>` : '');
   const devicesTab = () => {
     const all = Object.entries(S.dev);
-    if (!all.length) return empty('ожидание устройств');
+    if (!all.length) {
+      return S.mode === 'field'
+        ? `<p class="muted">Блоков URBAN Edge пока нет. Блок ставится в шкаф светофора: он видит очереди через камеры и
+            выбирает планы в контроллере по командам, которые утвердил оператор.</p>
+          <h4>Как подключить</h4>
+          <div class="item"><b>1.</b> На блоке создать ключ — он не покидает блок:
+            <code>python -m urban.edge --keygen --unit edge-J-07 --serial URB-0042</code>. Блок напечатает код подключения и отпечаток ключа.</div>
+          <div class="item"><b>2.</b> Здесь: «Подключить блок», вставить код, выбрать перекрёсток, сверить отпечаток с тем, что напечатал блок.</div>
+          <div class="item"><b>3.</b> Скачать комплект и поставить его на блок:
+            <code>python -m urban.edge --setup urban-edge-J-07.json --unit edge-J-07</code>, затем запустить службу блока.</div>
+          ${enrolButton() || '<p class="muted">Подключать блоки может администратор.</p>'}`
+        : empty('ожидание устройств');
+    }
     const online = all.filter(([, d]) => d.o).length;
+    const pendingUnits = all.filter(([, d]) => waiting(d)).length;
     const alerts = all.filter(([, d]) => d.al.some((a) => a[0] === 'alert') || d.lock || d.s === 'revoked').length;
     const warns = all.filter(([, d]) => d.al.length && !d.al.some((a) => a[0] === 'alert') && !d.lock && d.s !== 'revoked').length;
     const hot = all.map(([, d]) => d.t).filter((t) => typeof t === 'number');
@@ -105,7 +124,9 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
         ${kpi('макс. температура, °C', hot.length ? Math.max(...hot) : '—')}
       </div>
       <p class="muted">Реестр устройств URBAN Edge: у каждого свой ключ, команды подписаны шлюзом. Вскрытый шкаф или
-        потеря контроллера блокируют перекрёсток: команды снимаются, новые не принимаются.</p>
+        потеря контроллера блокируют перекрёсток: команды снимаются, новые не принимаются.
+        ${pendingUnits ? `Ждут первого подключения: ${pendingUnits}.` : ''}</p>
+      ${enrolButton()}
       ${recent.length ? `<h4>Последние события</h4>${recent.map((a) => `<div class="item"><time>${clock(a.t)}</time>
         ${chip(a.level === 'alert' ? 'bad' : 'warn', KIND_RU[a.kind] ?? esc(a.kind))} ${esc(a.device)}: ${esc(a.text)}</div>`).join('')}` : ''}
       <h4>Все устройства</h4>
@@ -168,7 +189,8 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
   const unitChip = (id) => {
     const d = S.dev[id];
     if (!d) return chip('info', 'блока нет');
-    return d.s === 'revoked' ? chip('bad', 'блок отозван') : d.lock ? chip('bad', 'заблокирован') : d.o ? '' : chip('warn', 'блок не на связи');
+    return d.s === 'revoked' ? chip('bad', 'блок отозван') : d.lock ? chip('bad', 'заблокирован') : d.o ? ''
+      : waiting(d) ? chip('info', 'блок ждёт подключения') : chip('warn', 'блок не на связи');
   };
   const passportList = () => {
     const list = S.junctions;
@@ -204,6 +226,7 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
         ${p.edited_by ? `<span>Правил</span><b>${esc(p.edited_by)} · ${esc(p.edited_at)}</b>` : ''}
         <span>Блок</span><span>${unit ? `${esc(unit.id)} ${unitChip(j.id) || 'на связи'}` : 'не установлен'}</span>
       </div>
+      ${!unit ? enrolButton(j.id) : ''}
       ${p.note ? `<p class="muted">${esc(p.note)}</p>` : ''}
       ${j.problems.length ? `<div class="item">${chip('warn', 'нельзя утвердить')} ${j.problems.map(esc).join('; ')}</div>` : ''}
       <form data-passport="${esc(j.id)}" onsubmit="return false">
@@ -390,7 +413,7 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
       $('clock').textContent = clock(S.t);
       const wait = S.pending().length;
       tabs.querySelector('[data-tab=transport]').dataset.badge = wait || '';
-      const devBad = Object.values(S.dev).filter((d) => !d.o || d.lock || d.al.length || d.s === 'revoked').length;
+      const devBad = Object.values(S.dev).filter((d) => (!d.o && !waiting(d)) || d.lock || d.al.length || d.s === 'revoked').length;
       tabs.querySelector('[data-tab=devices]').dataset.badge = devBad || '';
       const drafts = (S.junctions ?? []).filter((j) => j.passport.status !== 'approved').length;
       tabs.querySelector('[data-tab=junctions]').dataset.badge = S.mode === 'field' && drafts ? drafts : '';

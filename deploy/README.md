@@ -65,19 +65,28 @@ cd /opt/urban && sudo -u urban .venv/bin/python -m urban.provision --host urban.
 перевыпуска сертификата при смене имени хоста, `root.key` — только для ротации ключа шлюза. Без них украденный
 сервер не может ни выдать себя за другой сервер, ни навсегда подменить ключ, которому верят блоки.
 
-Учёт блока (при установке и при замене коробки):
+Подключение блока (при установке и при замене коробки) — три шага, файлы руками не копируются:
 
 ```bash
-# на блоке: ключ рождается здесь и никуда не уходит; печатаются открытый ключ и отпечаток
-sudo -u urban /opt/urban/.venv/bin/python -m urban.edge --keygen --unit edge-J-21 --pki /etc/urban/pki
-# на сервере: учесть открытый ключ; отпечаток сверить с тем, что напечатал блок (по телефону, глазами)
-sudo -u urban /opt/urban/.venv/bin/python -m urban.provision enroll edge-J-21 --junction J-21 --public <hex> --serial URB-...
+# 1. на блоке: ключ рождается здесь и никуда не уходит; блок печатает код подключения и отпечаток ключа
+sudo -u urban /opt/urban/.venv/bin/python -m urban.edge --keygen --unit edge-J-21 --serial URB-0042 --pki /etc/urban/pki
 ```
 
-Работающая платформа подхватывает учёт за секунды; если у блока был старый ключ, его сессия рвётся, а в журнале
-появляется `device-key-changed`. То же делает администратор через `POST /api/devices/<id>/enroll`. На блок
-кроме его собственного ключа кладутся два открытых файла сервера: `ca.pem` и `root.pub`; ключ шлюза блок получает
-сам, в сертификате от корня. Следующий шаг — ключ в защищённом элементе (ATECC608 и подобные), чтобы его нельзя было
+2. В интерфейсе администратор открывает «Устройства → Подключить блок», вставляет код, выбирает перекрёсток и
+сверяет отпечаток с напечатанным на блоке (по телефону, глазами). Затем скачивает комплект `urban-edge-J-21.json`:
+адрес платформы, её `ca.pem` и `root.pub`. Секретов в комплекте нет.
+
+```bash
+# 3. на блоке: поставить комплект; блок проверит, что комплект сделан для его ключа
+sudo -u urban /opt/urban/.venv/bin/python -m urban.edge --setup urban-edge-J-21.json --unit edge-J-21 --pki /etc/urban/pki
+sudo nano /etc/urban/edge-edge-J-21.env      # ADAPTER, CONTROLLER, датчики шкафа
+sudo systemctl enable --now urban-edge@edge-J-21
+```
+
+Работающая платформа подхватывает учёт сразу; если у блока был старый ключ, его сессия рвётся, а в журнале
+появляется `device-key-changed`. Без интерфейса — `python -m urban.provision enroll edge-J-21 --junction J-21 --public <hex>`.
+Ключ шлюза блок получает сам, в сертификате от корня. Выведенный из работы блок отзывают и затем убирают из
+реестра («Убрать»): перекрёсток освобождается для нового. Следующий шаг — ключ в защищённом элементе (ATECC608 и подобные), чтобы его нельзя было
 скопировать даже с вычислителя.
 
 Ротация ключа шлюза (утечка, плановая смена; подробно в `backend/urban/devices/trust.py`):
@@ -108,21 +117,34 @@ sudo systemctl start urban && sudo journalctl -u urban -f
 Проверка снаружи: `https://urban.example.uz/api/health` отвечает `{"ok": true, "mode": "field", ...}`.
 
 Блок на своём вычислителе: установить так же (`install.sh` ставит и платформу, и блок; на вычислителе платформа не
-запускается), сделать ключ (`--keygen`, выше), положить `ca.pem` и `root.pub` сервера в `/etc/urban/pki/`,
-параметры в `/etc/urban/edge-edge-J-21.env`:
+запускается) и подключить (три шага выше). `--setup` создаёт `/etc/urban/edge-edge-J-21.env`; в нём остаётся
+указать связь с контроллером и датчики. **systemd не понимает комментарии после значения** — только отдельной строкой:
 
 ```
 PLATFORM=urban.example.uz:8443
 SERVER_NAME=urban.example.uz
-ADAPTER=none            # none | relay (плата реле по Modbus RTU) | ntcip (SNMP к контроллеру)
-CONTROLLER=             # relay: порт платы, например /dev/ttyUSB0; ntcip: адрес контроллера, например 192.168.10.2:161
-SNMP_USER=urban          # ntcip: SNMPv3 authPriv (по умолчанию); пароли от 8 символов, файл с правами 600
+# none | relay (плата реле по Modbus RTU) | ntcip (SNMP к контроллеру)
+ADAPTER=ntcip
+# relay: порт платы, например /dev/ttyUSB0; ntcip: адрес контроллера, например 192.168.10.2:161
+CONTROLLER=192.168.10.2:161
+# ntcip: SNMPv3 authPriv (по умолчанию); пароли от 8 символов, файл с правами 600
+SNMP_USER=urban
 SNMP_AUTH_PASS=...
 SNMP_PRIV_PASS=...
-SNMP_AUTH=sha            # sha (HMAC-SHA-96) или sha256 (HMAC-SHA-256-192), как настроено в контроллере
-# EXTRA=--snmp-version 1 --community ...   только если контроллер не умеет SNMPv3 и линия до него изолирована
-SENSORS=/run/urban/queues.json   # пишет камерный конвейер: python -m urban.sensors --calibration /etc/urban/cameras.json --out /run/urban/queues.json
+# sha (HMAC-SHA-96) или sha256 (HMAC-SHA-256-192), как настроено в контроллере
+SNMP_AUTH=sha
+# только если контроллер не умеет SNMPv3 и линия до него изолирована:
+# EXTRA=--snmp-version 1 --community ...
+# пишет камерный конвейер: python -m urban.sensors --calibration /etc/urban/cameras.json --out /run/urban/queues.json
+SENSORS=/run/urban/queues.json
+# температура в шкафу: датчик DS18B20 (1-Wire); пусто — температура платы вычислителя
+TEMP_SENSOR=/sys/bus/w1/devices/28-0123456789ab/w1_slave
+# концевик двери (файл значения GPIO); пусто — дверь «неизвестно», а не «закрыта»
+DOOR_SENSOR=/sys/class/gpio/gpio17/value
 ```
+
+Блок сообщает только то, что измеряет: нет датчика — в интерфейсе прочерк, а не придуманное число. Открытая
+дверь шкафа блокирует перекрёсток.
 
 ```bash
 sudo systemctl enable --now urban-edge@edge-J-21

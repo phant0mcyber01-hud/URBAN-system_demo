@@ -11,7 +11,8 @@ Group=urban
 WorkingDirectory=/opt/urban
 EnvironmentFile=/etc/urban/edge-%i.env
 ExecStart=/opt/urban/.venv/bin/python -m urban.edge --unit %i --platform ${PLATFORM} --server-name ${SERVER_NAME} \
-    --adapter ${ADAPTER} --controller "${CONTROLLER}" --sensors "${SENSORS}" --pki /etc/urban/pki $EXTRA
+    --adapter ${ADAPTER} --controller "${CONTROLLER}" --sensors "${SENSORS}" --temp "${TEMP_SENSOR}" --door "${DOOR_SENSOR}" \
+    --pki /etc/urban/pki $EXTRA
 Restart=always
 RestartSec=2
 NoNewPrivileges=true

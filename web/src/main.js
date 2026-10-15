@@ -88,6 +88,14 @@ const panel = createPanel(scene, S, {
     if (tab === 'junctions') loadJunctions();
   },
   onAction: (act, id) => run(async () => {
+    if (act === 'enrol') return openEnrol(id);
+    if (act === 'kit') return downloadKit(id);
+    if (act === 'remove') {
+      if (!window.confirm(`Убрать блок ${id} из реестра?\n\nОн уже отозван и не может подключиться. После удаления перекрёсток `
+        + 'свободен для нового блока; запись об этом останется в журнале.')) return null;
+      await api.post(`/api/devices/${id}/remove`);
+      return toast(`блок ${id} убран из реестра`);
+    }
     if (act === 'passport-save') {
       await api.post(`/api/junctions/${id}/passport`, passportChange(id));
       toast(`паспорт ${id} сохранён черновиком`);
@@ -117,6 +125,65 @@ const panel = createPanel(scene, S, {
     return api.post(`/api/commands/${id}/${act}`);
   }),
 });
+
+// enrolment of a unit: the code it printed -> the registry; then its kit for the installer
+const UNIT_CODE = /URBAN1:edge-([A-Za-z0-9._-]+):/i;
+async function openEnrol(junction = '') {
+  if (!S.junctions) await loadJunctions();
+  const options = (S.junctions ?? []).map((j) => {
+    const unit = S.dev[j.id];
+    return `<option value="${esc(j.id)}" ${j.id === junction ? 'selected' : ''}>${esc(j.id)} · ${esc(j.name)}${unit ? ' — замена блока' : ''}</option>`;
+  }).join('');
+  $('enrol-body').innerHTML = `<form data-form="enrol">
+      <p class="muted">На блоке: <code>python -m urban.edge --keygen --unit edge-J-07 --serial URB-0042</code> — ключ
+        рождается на блоке и не покидает его, наружу идёт только код с открытой половиной.</p>
+      <label>Код подключения <textarea name="code" rows="3" required spellcheck="false" placeholder="URBAN1:edge-J-07:…"></textarea></label>
+      <label>Перекрёсток <select name="junction" required>${options}</select></label>
+      <button type="submit">Подключить</button>
+      <small class="err" data-err></small>
+    </form>`;
+  const form = $('enrol-body').querySelector('form');
+  form.code.oninput = () => {  // the code names its unit, and the unit its junction
+    const m = UNIT_CODE.exec(form.code.value);
+    if (m && [...form.junction.options].some((o) => o.value === m[1])) form.junction.value = m[1];
+  };
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    form.querySelector('[data-err]').textContent = '';
+    try {
+      const r = await api.post('/api/devices/enroll-code', { code: form.code.value, junction: form.junction.value });
+      enrolDone(r);
+    } catch (err) { form.querySelector('[data-err]').textContent = err.message; }
+  };
+  $('enrol').hidden = false;
+  form.code.focus();
+}
+function enrolDone(r) {
+  $('enrol-body').innerHTML = `<div class="item">${chipHtmlRaw('ok', r.replaced ? 'ключ заменён' : 'блок учтён')}
+      <b>${esc(r.id)}</b> на перекрёстке ${esc(r.junction)} · серийный номер ${esc(r.serial)}</div>
+    <p class="muted">Отпечаток ключа — сверьте с тем, что напечатал блок (по телефону, глазами). Не совпадает —
+      отзовите блок в разделе «Устройства»: код подменили.</p>
+    <p class="fp">${esc(r.fingerprint)}</p>
+    <h4>Дальше на блоке</h4>
+    <div class="item"><b>1.</b> Скачать комплект и перенести на блок: адрес платформы, её сертификат и корневой ключ. Секретов в нём нет.</div>
+    <div class="item"><b>2.</b> <code>python -m urban.edge --setup urban-${esc(r.id)}.json --unit ${esc(r.id)}</code> — блок сам проверит,
+      что комплект сделан для его ключа.</div>
+    <div class="item"><b>3.</b> Указать в <code>/etc/urban/edge-${esc(r.id)}.env</code> связь с контроллером (ADAPTER, CONTROLLER) и
+      запустить: <code>systemctl enable --now urban-edge@${esc(r.id)}</code>. В «Устройствах» блок появится на связи.</div>
+    <div class="btns"><button class="go" data-kit="${esc(r.id)}">Скачать комплект</button></div>`;
+  $('enrol-body').querySelector('[data-kit]').onclick = () => run(() => downloadKit(r.id));
+}
+async function downloadKit(id) {
+  const kit = await api.get(`/api/devices/${encodeURIComponent(id)}/kit`);
+  const url = URL.createObjectURL(new Blob([JSON.stringify(kit, null, 1)], { type: 'application/json' }));
+  const a = Object.assign(document.createElement('a'), { href: url, download: `urban-${id}.json` });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+const chipHtmlRaw = (cls, text) => `<span class="chip ${cls}">${esc(text)}</span>`;
+$('enrol-close').onclick = () => { $('enrol').hidden = true; };
 
 // junction passports: fetched at sign-in and whenever the tab opens or a passport changes
 async function loadJunctions() {
@@ -197,6 +264,7 @@ function signedOut() {
   S.user = null;
   if (ws) { const w = ws; ws = null; w.close(); }
   $('users').hidden = true;
+  $('enrol').hidden = true;
   $('login').hidden = false;
   $('login-pass').value = '';
   $('login-code').value = '';
@@ -363,7 +431,8 @@ createSearch(scene, {
 
 window.addEventListener('keydown', (ev) => {
   if (ev.key !== 'Escape') return;
-  if (card.open) { card.hide(); S.pin = null; } else if (S.cam) cameras.close();
+  if (!$('enrol').hidden) $('enrol').hidden = true;
+  else if (card.open) { card.hide(); S.pin = null; } else if (S.cam) cameras.close();
 });
 
 // ---- render loop ----
@@ -385,7 +454,7 @@ function frame(now) {
   frames++;
   busy += performance.now() - started;
   if (now - fpsAt >= 1000) {
-    $('perf').textContent = `${Math.round((frames * 1000) / (now - fpsAt))} к/с · ${(busy / frames).toFixed(2)} мс на кадр · ${live.n} ТС`;
+    $('perf').textContent = `${Math.round((frames * 1000) / (now - fpsAt))} к/с · ${(busy / frames).toFixed(2)} мс на кадр${S.mode === 'field' ? '' : ` · ${live.n} ТС`}`;
     frames = 0; busy = 0; fpsAt = now;
   }
   requestAnimationFrame(frame);
