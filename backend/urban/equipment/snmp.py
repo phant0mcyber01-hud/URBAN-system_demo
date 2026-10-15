@@ -66,6 +66,23 @@ def encode_set(community: str, oid: str, value: int, request_id: int, version: i
     return _tlv(SEQUENCE, _int(version) + _tlv(OCTET_STRING, community.encode()) + pdu)
 
 
+def encode_get(community: str, oid: str, request_id: int, version: int = 1) -> bytes:
+    """A GetRequest for one object."""
+    binding = _tlv(SEQUENCE, _oid(oid) + _tlv(NULL, b""))
+    pdu = _tlv(0xA0, _int(request_id) + _int(0) + _int(0) + _tlv(SEQUENCE, binding))
+    return _tlv(SEQUENCE, _int(version) + _tlv(OCTET_STRING, community.encode()) + pdu)
+
+
+NUMBERS = {INTEGER, 0x41, 0x42, 0x43}  # INTEGER, Counter32, Gauge32, TimeTicks
+
+
+def _number(tag: int, body: bytes) -> int:
+    """The value of a varbind as an integer; ValueError for anything else (noSuchObject, a string...)."""
+    if tag not in NUMBERS:
+        raise ValueError(f"not a number (tag 0x{tag:02x})")
+    return int.from_bytes(body, "big", signed=tag == INTEGER)
+
+
 # ---- decoding, only as far as the response status
 def _read(data: bytes, at: int) -> tuple[int, bytes, int]:
     """(tag, body, index after) of the TLV at `at`; ValueError if the data ends before the TLV does."""
@@ -98,8 +115,24 @@ def decode_response(data: bytes) -> tuple[int, int]:
     return int.from_bytes(rid, "big", signed=True), int.from_bytes(status, "big", signed=True)
 
 
+def decode_value(data: bytes) -> int:
+    """The first varbind value of a response, as an integer."""
+    tag, msg, _ = _read(data, 0)
+    _, _, at = _read(msg, 0)
+    _, _, at = _read(msg, at)
+    _, pdu, _ = _read(msg, at)
+    _, _, at = _read(pdu, 0)
+    _, _, at = _read(pdu, at)
+    _, _, at = _read(pdu, at)
+    _, binds, _ = _read(pdu, at)
+    _, bind, _ = _read(binds, 0)
+    _, _, at = _read(bind, 0)
+    tag, body, _ = _read(bind, at)
+    return _number(tag, body)
+
+
 class SnmpClient:
-    """Sets one integer object at a time and waits for the controller to confirm it."""
+    """Sets or reads one integer object at a time and waits for the controller's answer."""
 
     def __init__(self, host: str, port: int = 161, community: str = "private", version: int = 1,
                  timeout: float = 2.0, retries: int = 2):
@@ -109,7 +142,18 @@ class SnmpClient:
     def set(self, oid: str, value: int) -> None:
         """Raises OSError when the controller does not answer or refuses the write."""
         request_id = secrets.randbelow(0x7FFFFFFF)
-        packet = encode_set(self.community, oid, value, request_id, self.version)
+        self._request(encode_set(self.community, oid, value, request_id, self.version), request_id, "write")
+
+    def get(self, oid: str) -> int:
+        """Read one numeric object. Raises OSError when there is no usable answer."""
+        request_id = secrets.randbelow(0x7FFFFFFF)
+        data = self._request(encode_get(self.community, oid, request_id, self.version), request_id, "read")
+        try:
+            return decode_value(data)
+        except (ValueError, IndexError) as err:
+            raise OSError(f"controller answered {oid} with {err}") from err
+
+    def _request(self, packet: bytes, request_id: int, what: str) -> bytes:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.settimeout(self.timeout)
             last = None
@@ -124,8 +168,8 @@ class SnmpClient:
                 if rid != request_id:
                     continue  # an answer to something else
                 if status:
-                    raise OSError(f"controller refused the write: {ERRORS.get(status, status)}")
-                return
+                    raise OSError(f"controller refused the {what}: {ERRORS.get(status, status)}")
+                return data
         raise OSError(f"no answer from the controller ({last.__class__.__name__ if last else 'silent'})")
 
 
@@ -187,7 +231,7 @@ def _decode_oid(b: bytes) -> str:
 
 
 def _pdu(tag: int, request_id: int, oid: str | None, value: int | None) -> bytes:
-    binding = _seq(_oid(oid) + _int(value)) if oid else b""
+    binding = _seq(_oid(oid) + (_int(value) if value is not None else _tlv(NULL, b""))) if oid else b""
     return _tlv(tag, _int(request_id) + _int(0) + _int(0) + _seq(binding))
 
 
@@ -216,17 +260,18 @@ def _parse_message(data: bytes) -> dict:
             "user": usm[3][1], "auth": usm[4][1], "priv": usm[5][1], "data": items[3]}
 
 
-def _parse_scoped(data: bytes) -> tuple[int, int, int, list[str]]:
-    """ScopedPDU -> (pdu tag, request id, error status, oids in the varbinds)."""
+def _parse_scoped(data: bytes) -> tuple[int, int, int, list[str], list[tuple[int, bytes]]]:
+    """ScopedPDU -> (pdu tag, request id, error status, oids in the varbinds, their values as (tag, bytes))."""
     tag, body, _ = _read(data, 0)
     if tag != SEQUENCE:
         raise ValueError("not a scoped PDU")
     items = _items(body)
     pdu_tag, pdu = items[2]
     fields = _items(pdu)
-    oids = [_decode_oid(_items(vb)[0][1]) for _, vb in _items(fields[3][1])]
+    binds = [_items(vb) for _, vb in _items(fields[3][1])]
     return (pdu_tag, int.from_bytes(fields[0][1], "big", signed=True),
-            int.from_bytes(fields[1][1], "big", signed=True), oids)
+            int.from_bytes(fields[1][1], "big", signed=True),
+            [_decode_oid(b[0][1]) for b in binds], [b[1] for b in binds if len(b) > 1])
 
 
 class SnmpV3Client:
@@ -279,11 +324,11 @@ class SnmpV3Client:
         self._learn(msg)
 
     # ---- authPriv messages
-    def _set_packet(self, oid: str, value: int, msg_id: int, request_id: int) -> bytes:
+    def _set_packet(self, oid: str, value: int | None, msg_id: int, request_id: int, tag: int = SET_REQUEST) -> bytes:
         boots, etime = self.boots, self.etime + int(time.monotonic() - self._synced)
         self._salt = (self._salt + 1) % (1 << 64)  # a new IV for every message
         salt = self._salt.to_bytes(8, "big")
-        scoped = _seq(_octets(self.engine), _octets(b""), _pdu(SET_REQUEST, request_id, oid, value))
+        scoped = _seq(_octets(self.engine), _octets(b""), _pdu(tag, request_id, oid, value))
         enc = Cipher(algorithms.AES(self._priv_key), CFB(struct.pack(">II", boots, etime) + salt)).encryptor()
         data = _octets(enc.update(scoped) + enc.finalize())
         blank = _octets(b"\x00" * self.mac_len)
@@ -294,7 +339,7 @@ class SnmpV3Client:
         mac = hmac.new(self._auth_key, whole, self.hash).digest()[:self.mac_len]
         return whole[:at] + mac + whole[at + self.mac_len:]
 
-    def _open(self, msg: dict, raw: bytes) -> tuple[int, int, int, list[str]]:
+    def _open(self, msg: dict, raw: bytes) -> tuple:
         """Check and decrypt an answer. Unauthenticated answers are accepted only as Reports (RFC 3414 3.2)."""
         if msg["flags"] & 0x01:
             if len(msg["auth"]) != self.mac_len or msg["engine"] != self.engine:
@@ -320,6 +365,18 @@ class SnmpV3Client:
 
     def set(self, oid: str, value: int) -> None:
         """Raises OSError when the controller does not answer, does not authenticate, or refuses the write."""
+        self._request(SET_REQUEST, oid, value)
+
+    def get(self, oid: str) -> int:
+        """Read one numeric object over authPriv. Raises OSError when there is no usable answer."""
+        values = self._request(GET_REQUEST, oid, None)
+        try:
+            return _number(*values[0])
+        except (ValueError, IndexError) as err:
+            raise OSError(f"controller answered {oid} with {err}") from err
+
+    def _request(self, pdu_tag: int, oid: str, value: int | None) -> list:
+        what = "write" if pdu_tag == SET_REQUEST else "read"
         family = socket.AF_INET6 if ":" in self.address[0] else socket.AF_INET
         with socket.socket(family, socket.SOCK_DGRAM) as sock:
             sock.settimeout(self.timeout)
@@ -327,9 +384,9 @@ class SnmpV3Client:
                 self.discover(sock)
             for attempt in range(2):  # once more after resynchronising time or engine
                 msg_id, request_id = secrets.randbelow(0x7FFFFFFF), secrets.randbelow(0x7FFFFFFF)
-                msg, raw = self._exchange(sock, self._set_packet(oid, value, msg_id, request_id), msg_id)
+                msg, raw = self._exchange(sock, self._set_packet(oid, value, msg_id, request_id, pdu_tag), msg_id)
                 try:
-                    tag, rid, status, oids = self._open(msg, raw)
+                    tag, rid, status, oids, values = self._open(msg, raw)
                 except (ValueError, IndexError) as err:
                     raise OSError(f"snmpv3: {err}") from err
                 if tag == REPORT:
@@ -341,5 +398,5 @@ class SnmpV3Client:
                 if rid != request_id:
                     raise OSError("snmpv3: answer to another request")
                 if status:
-                    raise OSError(f"controller refused the write: {ERRORS.get(status, status)}")
-                return
+                    raise OSError(f"controller refused the {what}: {ERRORS.get(status, status)}")
+                return values

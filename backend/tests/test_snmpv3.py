@@ -111,3 +111,13 @@ def test_ntcip_over_snmpv3_turns_a_refusal_into_an_adapter_error():
     ad = NtcipAdapter(lambda tls, oid, value: c.set(oid, value), {"J1": {0, 2}})
     with pytest.raises(AdapterError, match="snmp"):
         ad.select("J1", 2)  # the agent has no NTCIP objects: no positive answer, so never taken as applied
+
+
+def test_reading_numbers_back_over_snmpv3():
+    port = _agent("sha")
+    c = client(port)
+    up = c.get("1.3.6.1.2.1.1.3.0")             # sysUpTime: TimeTicks
+    assert isinstance(up, int) and up >= 0
+    assert c.get("1.3.6.1.6.3.10.2.1.3.0") >= 0   # snmpEngineTime: INTEGER
+    with pytest.raises(OSError):
+        c.get(SYS_DESCR)                         # a string, not a number

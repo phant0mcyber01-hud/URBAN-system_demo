@@ -50,6 +50,19 @@
       "problemMatcher": []
     },
     {
+      "label": "Обследование: листы и таблица",
+      "detail": "data/survey/sheets.html (печать) и survey.csv (ответы)",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/python -m urban.survey sheets",
+      "problemMatcher": []
+    },
+    {
+      "label": "Обследование: итог по таблице",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/python -m urban.survey summary data/survey/survey.csv",
+      "problemMatcher": []
+    },
+    {
       "label": "Учётные записи: список",
       "type": "shell",
       "command": "${workspaceFolder}/.venv/Scripts/python -m urban.users list",
