@@ -1,0 +1,66 @@
+{
+  // ---- Explorer: only what a person works with ------------------------------------------
+  // Generated and tool folders are hidden; they are still on disk and still ignored by git.
+  "files.exclude": {
+    "**/.git": true,
+    "**/__pycache__": true,
+    "**/.pytest_cache": true,
+    "**/*.egg-info": true,
+    "**/node_modules": true,
+    ".venv": true,
+    ".claude": true,
+    "web/dist": true
+  },
+
+  // Related files fold under their main one (click the arrow to see them).
+  "explorer.fileNesting.enabled": true,
+  "explorer.fileNesting.expand": false,
+  "explorer.fileNesting.patterns": {
+    ".env.example": ".env",
+    ".gitignore": ".gitattributes, .editorconfig",
+    "package.json": "package-lock.json, vite.config.js",
+    "README.md": "CONTEXT.md"
+  },
+  "explorer.sortOrder": "foldersNestsFiles",
+  "explorer.compactFolders": false,
+
+  // Search skips generated data, builds and lock files.
+  "search.exclude": {
+    "data": true,
+    "web/dist": true,
+    "**/node_modules": true,
+    "**/package-lock.json": true,
+    ".venv": true
+  },
+  "files.watcherExclude": {
+    "data/**": true,
+    ".venv/**": true,
+    "**/node_modules/**": true
+  },
+
+  // ---- Python ---------------------------------------------------------------------------
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
+  "python.terminal.activateEnvironment": true,
+  "python.analysis.extraPaths": ["backend"],
+  "python.testing.pytestEnabled": true,
+  "python.testing.unittestEnabled": false,
+  "python.testing.cwd": "${workspaceFolder}/backend",
+  "python.testing.pytestArgs": ["-q"],
+
+  // ---- Editor ---------------------------------------------------------------------------
+  "files.eol": "\n",
+  "files.insertFinalNewline": true,
+  "files.trimTrailingWhitespace": true,
+  "[python]": { "editor.rulers": [120], "editor.tabSize": 4 },
+  "[javascript]": { "editor.rulers": [120], "editor.tabSize": 2 },
+  "[markdown]": { "editor.wordWrap": "on", "files.trimTrailingWhitespace": false },
+
+  "files.associations": {
+    "*.service": "ini",
+    ".env.example": "properties",
+    ".env": "properties"
+  },
+
+  // Russian prose in docs and UI strings is not a typo.
+  "cSpell.enabled": false
+}

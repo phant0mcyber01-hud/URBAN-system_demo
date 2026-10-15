@@ -1,0 +1,49 @@
+{
+  // Run and debug (F5, or the "Run and Debug" panel on the left).
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "▶ URBAN: платформа (демо)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "urban",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "▶ URBAN: платформа без демо-блоков",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "urban",
+      "cwd": "${workspaceFolder}",
+      "env": { "URBAN_EDGE": "manual" },
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "▶ URBAN: демо-блоки отдельно",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "urban.edge",
+      "args": ["--keep-running"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "▶ URBAN: тесты",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["-q"],
+      "cwd": "${workspaceFolder}/backend",
+      "console": "integratedTerminal"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "▶ URBAN: платформа и блоки (два процесса)",
+      "configurations": ["▶ URBAN: платформа без демо-блоков", "▶ URBAN: демо-блоки отдельно"],
+      "stopAll": true
+    }
+  ]
+}

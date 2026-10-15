@@ -1,0 +1,59 @@
+{
+  // Terminal → Run Task… (or Ctrl+Shift+P → "Tasks: Run Task").
+  "version": "2.0.0",
+  "options": { "cwd": "${workspaceFolder}" },
+  "tasks": [
+    {
+      "label": "1. Подготовить проект (один раз)",
+      "detail": "окружение .venv, зависимости, сборка интерфейса, данные района из OSM",
+      "type": "shell",
+      "command": "powershell -ExecutionPolicy Bypass -File scripts/setup.ps1",
+      "problemMatcher": []
+    },
+    {
+      "label": "2. Запустить платформу",
+      "detail": "http://localhost:8080 — пароль admin при первом запуске появится здесь",
+      "type": "shell",
+      "command": "powershell -ExecutionPolicy Bypass -File scripts/run.ps1",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "3. Собрать интерфейс",
+      "detail": "после правок в web/src",
+      "type": "shell",
+      "command": "npm run build",
+      "options": { "cwd": "${workspaceFolder}/web" },
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "4. Тесты",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/python -m pytest -q",
+      "options": { "cwd": "${workspaceFolder}/backend" },
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "5. Замер пользы управления",
+      "detail": "несколько минут, итог — таблица как в docs/benchmark.md",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/python -m urban.experiments.signal_rebalance",
+      "problemMatcher": []
+    },
+    {
+      "label": "6. Пересобрать карту района",
+      "detail": "только слои карты из OSM; сервер перед этим остановить",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/python -m urban.pipeline --geo",
+      "problemMatcher": []
+    },
+    {
+      "label": "Учётные записи: список",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/python -m urban.users list",
+      "problemMatcher": []
+    }
+  ]
+}

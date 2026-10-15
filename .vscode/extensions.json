@@ -1,0 +1,10 @@
+{
+  // VS Code offers these when the folder is opened. None is required to run the project.
+  "recommendations": [
+    "ms-python.python",
+    "ms-python.vscode-pylance",
+    "bierner.markdown-mermaid",
+    "editorconfig.editorconfig",
+    "ms-vscode.powershell"
+  ]
+}
