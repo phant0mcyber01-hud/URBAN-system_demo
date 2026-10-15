@@ -1,13 +1,14 @@
-// Visual constants shared by the scene and the UI.
-export const BG = [10, 13, 18];
-export const GROUND = [22, 27, 35];
+// Visual constants shared by the scene and the UI. The basemap is deliberately grey and quiet:
+// on an operator's screen colour belongs to what is not normal (jams, incidents, devices in trouble).
+export const BG = [14, 16, 19];
+export const GROUND = [26, 29, 33];
 export const FADE = 0.22; // share of the scene radius used for the fade-out at the rim
 export const MAX_PIXEL_RATIO = 1.5; // cap HiDPI rendering: 2x+ quadruples fill cost for little gain
 
 export const ROAD = {
-  trunk: [150, 164, 186], primary: [150, 164, 186], secondary: [124, 138, 160], tertiary: [102, 115, 136],
+  trunk: [96, 102, 110], primary: [96, 102, 110], secondary: [82, 88, 96], tertiary: [70, 76, 84],
 };
-export const ROAD_DEFAULT = [78, 89, 107];
+export const ROAD_DEFAULT = [56, 61, 68];
 export const MAJOR = new Set(['trunk', 'primary', 'secondary', 'tertiary']);
 export const ROAD_RU = {
   trunk: 'магистраль', primary: 'главная улица', secondary: 'районная улица', tertiary: 'местная улица',
@@ -15,11 +16,11 @@ export const ROAD_RU = {
 };
 
 export const BUILDING = {
-  apartments: [96, 108, 128], residential: [92, 102, 120], house: [104, 98, 96], detached: [104, 98, 96],
-  school: [118, 110, 96], university: [118, 110, 96], kindergarten: [118, 110, 96], hospital: [112, 118, 124],
-  retail: [110, 104, 122], commercial: [100, 108, 130], industrial: [86, 90, 98], mosque: [104, 122, 118],
+  apartments: [62, 66, 72], residential: [60, 64, 70], house: [64, 62, 60], detached: [64, 62, 60],
+  school: [66, 64, 60], university: [66, 64, 60], kindergarten: [66, 64, 60], hospital: [64, 67, 70],
+  retail: [63, 62, 67], commercial: [61, 65, 71], industrial: [56, 58, 61], mosque: [62, 67, 66],
 };
-export const BUILDING_DEFAULT = [90, 100, 116];
+export const BUILDING_DEFAULT = [59, 63, 68];
 export const BUILDING_RU = {
   apartments: 'Жилой дом', residential: 'Жилой дом', house: 'Частный дом', detached: 'Частный дом',
   school: 'Школа', university: 'Университет', kindergarten: 'Детский сад', hospital: 'Больница',
@@ -27,23 +28,23 @@ export const BUILDING_RU = {
   garage: 'Гараж', garages: 'Гаражи', office: 'Офисное здание', hotel: 'Гостиница', public: 'Общественное здание',
 };
 
-export const AREA = { green: [34, 62, 48], water: [30, 58, 88], pitch: [44, 82, 58], parking: [34, 40, 50] };
+export const AREA = { green: [31, 40, 34], water: [28, 39, 50], pitch: [33, 43, 36], parking: [31, 34, 38] };
 export const MINOR = {
-  service: { width: 3.4, color: [56, 65, 79] }, path: { width: 1.6, color: [86, 82, 70] },
-  water: { width: 4, color: [38, 74, 110] }, rail: { width: 2, color: [120, 110, 110] },
+  service: { width: 3.4, color: [44, 48, 54] }, path: { width: 1.6, color: [54, 53, 50] },
+  water: { width: 4, color: [36, 52, 68] }, rail: { width: 2, color: [74, 72, 72] },
 };
 
 export const POI = {
-  hospital: { label: 'Больница', color: [255, 110, 130] },
-  clinic: { label: 'Клиника', color: [255, 110, 130] },
-  police: { label: 'Полиция', color: [110, 150, 255] },
-  fire_station: { label: 'Пожарная часть', color: [255, 150, 70] },
+  hospital: { label: 'Больница', color: [214, 128, 138] },
+  clinic: { label: 'Клиника', color: [214, 128, 138] },
+  police: { label: 'Полиция', color: [128, 156, 214] },
+  fire_station: { label: 'Пожарная часть', color: [214, 156, 104] },
 };
 
-export const STATUS = { ok: [70, 190, 150], warn: [255, 190, 70], alert: [255, 80, 80] };
+export const STATUS = { ok: [120, 128, 138], warn: [227, 163, 58], alert: [229, 83, 75] };
 
 // vehicle kinds by index: [length, width, height] in metres and colour
 export const KINDS = ['car', 'bus', 'emg'];
 export const VEHICLE_SIZE = [[4.4, 1.9, 1.5], [11.5, 2.6, 3.2], [6.2, 2.2, 2.7]];
-export const VEHICLE_COLOR = [[92, 200, 255], [255, 168, 38], [255, 60, 60]];
-export const EMG_BLINK = [[255, 60, 60], [80, 130, 255]];
+export const VEHICLE_COLOR = [[178, 186, 196], [126, 158, 204], [255, 70, 64]];  // car, bus, emergency
+export const EMG_BLINK = [[255, 70, 64], [90, 140, 255]];

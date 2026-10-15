@@ -11,6 +11,8 @@
     "@deck.gl/layers": "^9.4.0",
     "@deck.gl/mapbox": "^9.4.0",
     "@deck.gl/mesh-layers": "^9.4.0",
+    "@fontsource/ibm-plex-mono": "5.1.1",
+    "@fontsource/ibm-plex-sans": "5.1.1",
     "@luma.gl/engine": "^9.4.2",
     "maplibre-gl": "4.7.1",
     "qrcode-generator": "1.4.4"

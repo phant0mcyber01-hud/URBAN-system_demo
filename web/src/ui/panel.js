@@ -9,8 +9,11 @@ export const clock = (t) => (wallClock
   ? new Date(t * 1000).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
   : `${Math.floor(t / 60)}:${String(Math.floor(t) % 60).padStart(2, '0')}`);
 const chip = (cls, text) => `<span class="chip ${cls}">${text}</span>`;
+const tag = (text) => `<span class="tag">${text}</span>`;  // what kind of record: a label, not a status
 const kpi = (label, value, cls = '') => `<div class="kpi ${cls}"><b>${value}</b><span>${label}</span></div>`;
 const empty = (text) => `<p class="muted">${text}</p>`;
+const KIND_RU = { heat: 'температура', door: 'дверь', controller: 'контроллер', offline: 'нет связи', silent: 'молчит',
+  version: 'версия ПО', revoked: 'отозвано' };
 const UNIT_TEXT = { en_route: 'в пути', arrived: 'на месте' };
 const STATUS_CHIP = { ok: ['ok', 'норма'], warn: ['warn', 'отклонение'], alert: ['bad', 'порог'] };
 const CMD_STATUS = {
@@ -102,7 +105,7 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
       <p class="muted">Реестр устройств URBAN Edge: у каждого свой ключ, команды подписаны шлюзом. Вскрытый шкаф или
         потеря контроллера блокируют перекрёсток: команды снимаются, новые не принимаются.</p>
       ${recent.length ? `<h4>Последние события</h4>${recent.map((a) => `<div class="item"><time>${clock(a.t)}</time>
-        ${chip(a.level === 'alert' ? 'bad' : 'warn', esc(a.kind))} ${esc(a.device)}: ${esc(a.text)}</div>`).join('')}` : ''}
+        ${chip(a.level === 'alert' ? 'bad' : 'warn', KIND_RU[a.kind] ?? esc(a.kind))} ${esc(a.device)}: ${esc(a.text)}</div>`).join('')}` : ''}
       <h4>Все устройства</h4>
       ${rows}`;
   };
@@ -164,11 +167,11 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
       const inc = S.activeIncidents.length, bad = S.infraBad.length, jam = S.jamRoads.length, wait = S.pending().length;
       const feed = [
         ...S.events.map((e) => ({ t: e.t, html: e.type === 'incident'
-          ? `${chip(e.status === 'active' ? 'bad' : 'ok', e.status === 'active' ? 'ДТП' : 'снято')} ${esc(e.street || e.edge)}`
-          : `${chip('info', esc(e.unit))} ${UNIT_TEXT[e.status]} · от «${esc(e.from)}»` })),
-        ...S.alerts.map((a) => ({ t: a.t, html: `${chip(a.level === 'alert' ? 'bad' : 'warn', 'прогноз')} ${esc(a.text)}` })),
-        ...S.cmd.map((c) => ({ t: c.t, html: `${chip('warn', 'пробка')} ${esc(c.street || c.cam)}: очередь в среднем ${c.queue0} м` })),
-        ...S.devAlerts.map((a) => ({ t: a.t, html: `${chip(a.level === 'alert' ? 'bad' : 'warn', 'устройство')} ${esc(a.device)}: ${esc(a.text)}` })),
+          ? `${e.status === 'active' && S.activeIncidents.some((x) => x.id === e.id) ? chip('bad', 'ДТП') : tag(e.status === 'active' ? 'ДТП' : 'снято')} ${esc(e.street || e.edge)}`
+          : `${tag(esc(e.unit))} ${UNIT_TEXT[e.status]} · от «${esc(e.from)}»` })),
+        ...S.alerts.map((a) => ({ t: a.t, html: `${tag('прогноз')} ${esc(a.text)}` })),
+        ...S.cmd.map((c) => ({ t: c.t, html: `${tag('пробка')} ${esc(c.street || c.cam)}: очередь в среднем ${c.queue0} м` })),
+        ...S.devAlerts.map((a) => ({ t: a.t, html: `${tag('устройство')} ${esc(a.device)}: ${esc(a.text)}` })),
       ].sort((a, b) => b.t - a.t).slice(0, 8);
       return `<div class="grid">
           ${kpi('проблем ждут решения', wait, wait ? 'warn' : '')}${kpi('активных происшествий', inc, inc ? 'bad' : '')}

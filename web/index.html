@@ -8,22 +8,27 @@
 <body>
   <div id="map"></div>
 
-  <div id="top" class="glass">
-    <div id="brand">URBAN <span>· Фергана</span></div>
-    <nav id="tabs"></nav>
-    <div id="mode">
-      <span id="link" class="chip ok">связь с оборудованием</span>
+  <header id="top">
+    <div id="brand"><b>URBAN</b><span>Фергана · центр управления</span></div>
+    <div id="sys">
       <span id="modechip" class="chip shadow" title="Оборудование в демо смоделировано">ЭМУЛЯЦИЯ</span>
-      <span id="op-tools" hidden>
-        <span id="op-user" class="chip ok"></span>
-        <button id="op-link" title="Имитация: платформа перестаёт продлевать команды">Отключить связь</button>
-        <button id="op-revoke" class="danger" title="Немедленно вернуть все светофоры к базовому плану">Отозвать всё</button>
-        <button id="op-users">Учётные записи</button>
-        <button id="op-logout">Выйти</button>
-      </span>
-      <span id="clock">0:00</span>
+      <span id="link" class="chip ok">связь с оборудованием</span>
     </div>
-  </div>
+    <div id="op-tools" hidden>
+      <button id="op-revoke" class="danger" title="Немедленно вернуть все светофоры к базовому плану">Отозвать всё</button>
+      <div id="op-account">
+        <button id="op-user" class="chip ok" aria-haspopup="menu"></button>
+        <div id="op-menu" role="menu" hidden>
+          <button id="op-users" role="menuitem">Учётные записи</button>
+          <button id="op-link" role="menuitem" title="Имитация: платформа перестаёт продлевать команды">Отключить связь</button>
+          <button id="op-logout" role="menuitem">Выйти</button>
+        </div>
+      </div>
+    </div>
+    <span id="clock">0:00</span>
+  </header>
+
+  <nav id="rail" aria-label="Разделы"><div id="tabs"></div></nav>
 
   <div id="left">
     <div id="search" class="glass">
@@ -53,7 +58,7 @@
 
   <div id="login" hidden>
     <form id="login-form" class="glass" autocomplete="on">
-      <div id="brand">URBAN <span>· Фергана · центр управления</span></div>
+      <div class="login-brand"><b>URBAN</b><span>Фергана · центр управления</span></div>
       <p class="muted">Вход только по учётной записи. Роли: наблюдатель, оператор, администратор.</p>
       <label>Имя <input id="login-name" autocomplete="username" required autofocus /></label>
       <label>Пароль <input id="login-pass" type="password" autocomplete="current-password" required /></label>
@@ -68,7 +73,7 @@
     <button id="layers-btn">Слои</button>
     <div id="layers-menu" hidden></div>
   </div>
-  <div id="foot" class="glass">
+  <div id="foot">
     <span id="foot-note">Демо на синтетических данных: трафик, автобусные линии, телеметрия, камеры и сами светофоры смоделированы; сеть и здания из OSM.</span>
     <span id="perf"></span>
   </div>

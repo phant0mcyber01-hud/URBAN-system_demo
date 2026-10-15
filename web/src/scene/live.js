@@ -9,7 +9,7 @@ import { EMG_BLINK, KINDS, VEHICLE_COLOR, VEHICLE_SIZE } from '../config.js';
 
 const cube = new CubeGeometry();
 const HALF = VEHICLE_SIZE.map(([l, w, h]) => [l / 2, w / 2, h / 2]);
-const GLOW_RADIUS = [2.2, 5, 9];
+const GLOW_RADIUS = [0, 0, 9];  // only emergency vehicles glow: everything else is ordinary traffic
 const EMG = KINDS.indexOf('emg');
 
 export class Live {
@@ -91,8 +91,8 @@ export class Live {
     };
     return [
       new ScatterplotLayer({
-        ...shared, id: 'veh-glow', radiusUnits: 'meters', radiusMinPixels: 2.2,
-        getRadius: (_, { index: i }) => GLOW_RADIUS[kind[i]], getFillColor: color(0.55),
+        ...shared, id: 'veh-glow', radiusUnits: 'meters',
+        getRadius: (_, { index: i }) => GLOW_RADIUS[kind[i]], getFillColor: color(0.45), radiusMinPixels: 0,
         updateTriggers: { getPosition: tick, getFillColor: tick, getRadius: tick },
       }),
       new SimpleMeshLayer({

@@ -1,5 +1,10 @@
 // Entry point: loads the scene, wires map, camera window, search, place card and the panel,
 // then runs one animation loop that only updates what moves.
+import '@fontsource/ibm-plex-sans/400.css';
+import '@fontsource/ibm-plex-sans/500.css';
+import '@fontsource/ibm-plex-sans/600.css';
+import '@fontsource/ibm-plex-mono/400.css';
+import '@fontsource/ibm-plex-mono/500.css';
 import './style.css';
 import { loadScene } from './scene/scene.js';
 import { staticLayers } from './scene/staticLayers.js';
@@ -113,7 +118,7 @@ function renderOperator() {
   $('op-tools').hidden = !S.user;
   if (S.user) {
     $('op-user').textContent = `${S.user.name} · ${ROLE_TEXT[S.user.role] ?? S.user.role}${S.user.mfa_setup ? ' · нужен второй фактор' : ''}`;
-    $('op-user').className = `chip ${S.user.mfa_setup ? 'warn' : S.user.role === 'viewer' ? 'info' : 'ok'}`;
+    $('op-user').className = `chip${S.user.mfa_setup ? ' warn' : ''}`;  // who you are is not a status: no colour unless something is missing
   }
   $('op-link').hidden = $('op-revoke').hidden = !S.can('operator');
   $('op-users').textContent = S.can('admin') ? 'Учётные записи' : 'Мой пароль';
@@ -222,6 +227,12 @@ async function renderUsers() {
 }
 const chipHtml = (role) => (role === 'off' ? '<span class="chip bad">отключена</span>'
   : `<span class="chip ${role === 'viewer' ? 'info' : 'ok'}">${ROLE_TEXT[role] ?? esc(role)}</span>`);
+// the account menu: password and accounts, the demo link switch, sign-out
+const menu = (open) => { $('op-menu').hidden = !open; $('op-user').setAttribute('aria-expanded', String(open)); };
+$('op-user').onclick = (e) => { e.stopPropagation(); menu($('op-menu').hidden); };
+document.addEventListener('click', (e) => { if (!e.target.closest('#op-account')) menu(false); });
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape') menu(false); });
+$('op-menu').addEventListener('click', () => menu(false));
 $('op-users').onclick = () => { $('users').hidden = !$('users').hidden; if (!$('users').hidden) renderUsers(); };
 $('users-close').onclick = () => { $('users').hidden = true; };
 $('users-body').onsubmit = (e) => {

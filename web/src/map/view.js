@@ -13,9 +13,9 @@ export const mapStyle = {
 };
 export const pixelRatio = () => Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO);
 export const lighting = () => new LightingEffect({
-  ambient: new AmbientLight({ color: [255, 255, 255], intensity: 1.15 }),
-  sun: new DirectionalLight({ color: [255, 240, 220], intensity: 1.5, direction: [-1.5, -2.5, -3] }),
-  fill: new DirectionalLight({ color: [150, 180, 255], intensity: 0.6, direction: [2, 1.5, -1] }),
+  ambient: new AmbientLight({ color: [255, 255, 255], intensity: 1.2 }),
+  sun: new DirectionalLight({ color: [255, 248, 238], intensity: 1.1, direction: [-1.5, -2.5, -3] }),
+  fill: new DirectionalLight({ color: [210, 220, 240], intensity: 0.45, direction: [2, 1.5, -1] }),
 });
 
 const PITCH_3D = 56;
@@ -55,6 +55,17 @@ export function createMap(scene, { onClick }) {
     getCursor: ({ isDragging, isHovering }) => (isDragging ? 'grabbing' : isHovering ? 'pointer' : 'grab'),
   });
   map.addControl(overlay);
+  // the visible map is what the section rail and the work panel leave free: centre on that, not on the window
+  const frame = () => {
+    const css = getComputedStyle(document.documentElement);
+    const px = (name) => parseFloat(css.getPropertyValue(name)) || 0;
+    const narrow = window.innerWidth <= 900;
+    map.setPadding(narrow
+      ? { top: px('--top') + 44, bottom: window.innerHeight * 0.42 + px('--foot'), left: 0, right: 0 }
+      : { top: px('--top'), bottom: px('--foot'), left: px('--rail'), right: px('--side') });
+  };
+  frame();
+  window.addEventListener('resize', frame);
   map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'bottom-right');
   map.addControl(new ViewButtons(home), 'bottom-right');
   map.addControl(new maplibregl.ScaleControl({ unit: 'metric', maxWidth: 120 }), 'bottom-right');
