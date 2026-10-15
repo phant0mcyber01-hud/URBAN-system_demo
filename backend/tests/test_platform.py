@@ -203,12 +203,13 @@ def test_tls_events_in_a_report_only_touch_commands_of_that_junction():
     assert cmd["status"] == "active"
 
 
-def test_incident_dispatch_stays_shadow_only_and_restart_resets_state():
+def test_dispatch_without_a_route_proposes_nothing_and_restart_resets_state():
     p = Platform([71.785, 40.385], 1200)
     ev = {"id": "d1", "type": "dispatch", "status": "en_route", "t": 5, "unit": "Скорая", "from": "Клиника", "ref": "inc-5"}
     out = p.handle(frame(5, events=[ev]))
-    assert out["shadow"][0]["command"] == "tls.preempt" and out["shadow"][0]["executed"] is False
+    assert "shadow" not in out and not p.gateway.proposals  # no route, no corridor (see test_corridor.py)
     assert p.snapshot()["events"] == [ev]
+    p.gateway.audit.append(5, "login", "-", "-", "ops", "")
     again = p.handle(frame(0))
     assert again["reset"] is True and p.snapshot()["events"] == []
     assert p.audit()["count"] == 1  # the audit log survives restarts

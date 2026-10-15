@@ -6,6 +6,7 @@ actions go through the Command Gateway, which needs an operator's decision.
 import math
 
 from .analytics import traffic
+from .corridor import Corridors
 from .analytics.infra import Detector
 from .analytics.queues import RELIEVED, WINDOW, QueueMonitor
 from .devices import health
@@ -20,7 +21,8 @@ M_LAT = 111320.0
 
 
 class Platform:
-    def __init__(self, center, radius, cameras=(), send=lambda msg: None, reachable=lambda tls: True, store=None):
+    def __init__(self, center, radius, cameras=(), send=lambda msg: None, reachable=lambda tls: True, store=None,
+                 corridor: bool = True):
         """center: [lon, lat], radius: metres,
         cameras: junctions with a queue sensor, as loaded by urban.junctions
                  (camera: True when the junction also has a camera window),
@@ -33,6 +35,8 @@ class Platform:
         self.store = store
         self._saved_version, self._queue_sampled, self._dev_sampled = -1, None, None
         self.gateway = CommandGateway(send, approved_plans(self.cameras), reachable, store=store)
+        self.corridors = Corridors(self.cameras)
+        self.corridor_on = corridor  # propose green corridors for emergency units (config GREEN_CORRIDOR)
         self._by_tls = {c["tls"]: c for c in self.cameras}
         self.sensors: dict[str, tuple[int, dict]] = {}  # junction id -> (report time, queues) from its Edge unit
         self.dev: dict[str, dict] = {}        # junction id -> brief of its Edge unit, for the UI
@@ -48,6 +52,8 @@ class Platform:
         self.events, self.shadow, self.alerts, self.infra = [], [], [], []
         self.gateway.reset()
         self.monitor = QueueMonitor(self.cameras)
+        if hasattr(self, "corridors"):
+            self.corridors.reset()
 
     def local(self, lon, lat):
         """lon/lat -> metres east/north of the scene centre."""
@@ -101,9 +107,19 @@ class Platform:
             if ev["type"] == "tls":  # equipment report, not a city event
                 self.gateway.on_equipment(ev, t)
                 continue
+            if ev["type"] == "dispatch":
+                if ev["status"] == "en_route" and ev.get("route") and self.corridor_on:
+                    incident = next((e for e in reversed(self.events) if e.get("id") == ev.get("ref")), {})
+                    self.corridors.open(self.gateway, ev, t, incident.get("street", ""))
+                elif ev["status"] == "arrived":
+                    self.corridors.close(self.gateway, ev["id"], "arrived", t)
+                ev = {k: v for k, v in ev.items() if k != "route"}  # the route stays here, not in every client
             self.events.append(ev)
             frame["events"].append(ev)
             shadow += self._respond(ev)
+        if self.corridors.active:
+            self.corridors.follow(self.gateway, {v.id: v.edge for v in raw["vehicles"]
+                                                 if v.id in self.corridors.active}, t)
 
         # one direction is overloaded while another has green to spare -> propose an approved plan
         self.gateway.keep_muted({pr["tls"] for pr in problems})
@@ -117,7 +133,7 @@ class Platform:
         self.gateway.tick(t, demand)
         # going back to the base plan needs nobody's approval: release as soon as it stops helping
         for p in list(self.gateway.proposals.values()):
-            if p["status"] != "active" or t - p.get("applied_at", t) < SETTLE:
+            if p["status"] != "active" or p["command"] != "tls.select_plan" or t - p.get("applied_at", t) < SETTLE:
                 continue
             loaded, donor = demand.get((p["tls"], p["give"])), demand.get((p["tls"], p["take"]))
             if loaded is None or donor is None:
@@ -236,12 +252,7 @@ class Platform:
                                           str(ev.get("reason")), actor="equipment", mode="approval")
 
     def _respond(self, ev: dict) -> list[dict]:
-        street = ev.get("street") or ev.get("edge", "")
-        if ev["type"] == "dispatch" and ev["status"] == "en_route":
-            return [self.gateway.propose_shadow(ev["t"], ev["ref"], "tls.preempt",
-                                                f"маршрут: {ev['unit']} от «{ev['from']}»",
-                                                "зелёный коридор по маршруту следования")]
-        return []
+        return []  # city events answered by a record only; the green corridor is a real proposal now (corridor.py)
 
     def audit(self) -> dict:
         return {"count": self.gateway.count, "head": self.gateway.head, "applied": self.gateway.applied}

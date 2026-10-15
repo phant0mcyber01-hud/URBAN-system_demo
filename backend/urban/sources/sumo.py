@@ -169,7 +169,8 @@ def run(publish, commands=None, *, field=None, seed=42, incident_at=None, realti
                             responders[rid] = {"id": rid, "type": "dispatch", "status": "en_route", "t": now,
                                                "unit": unit, "from": best[0], "eta": round(best[1].travelTime),
                                                "ref": incident["id"]}
-                            events.append(dict(responders[rid]))
+                            # the route goes to the platform once, for the green corridor (an AVL feed on the street)
+                            events.append({**responders[rid], "route": list(best[1].edges)})
             elif incident and incident["status"] == "active":
                 for rid, ev in responders.items():
                     if ev["status"] == "en_route" and rid in where and \

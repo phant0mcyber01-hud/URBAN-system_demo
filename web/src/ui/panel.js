@@ -25,6 +25,9 @@ const END_REASON = {
   released: 'возврат к базовому плану', restart: 'перезапуск сценария',
   relieved: 'очередь ушла, платформа сама вернула базовый план',
   balance: 'начало загружаться направление, отдававшее зелёный: базовый план возвращён',
+  passed: 'экстренная машина проехала перекрёсток, возврат к базовому плану',
+  arrived: 'экстренная машина на месте, коридор снят',
+  corridor: 'уступил место зелёному коридору для экстренной машины',
 };
 
 const when = (at) => (at ? new Date(at * 1000).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—');
@@ -120,8 +123,11 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
     return `<div class="item cmd ${c.status}">
       <div class="row"><b>${esc(c.street || c.cam)}</b>${chip(cls, label)}</div>
       <div>${esc(c.reason)}</div>
-      <small>Предложение платформы: включить <b>план ${c.plan}</b> из утверждённых для ${esc(c.cam)}:
-        +${c.shift} с зелёного для «${esc(c.street)}» за счёт «${esc(c.from_street)}». Длина цикла не меняется.</small>
+      ${c.command === 'tls.corridor'
+        ? `<small>Зелёный коридор: <b>план ${c.plan}</b> для ${esc(c.cam)} — +${c.shift} с зелёного подъезду «${esc(c.street)}»,
+            пока ${esc(c.unit || 'экстренная машина')} не проедет перекрёсток. Длина цикла не меняется.</small>`
+        : `<small>Предложение платформы: включить <b>план ${c.plan}</b> из утверждённых для ${esc(c.cam)}:
+            +${c.shift} с зелёного для «${esc(c.street)}» за счёт «${esc(c.from_street)}». Длина цикла не меняется.</small>`}
       ${live ? `${both(c.queue, c.other, 'сейчас')}
         <small>Действует до ${clock(c.until)} (осталось ${Math.max(0, c.until - S.t)} с). Снимется раньше, если очередь уйдёт
         или начнёт страдать направление, отдающее зелёный.</small>` : ''}
@@ -145,8 +151,9 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
         : '';
       return `<div class="item group">
         <div class="row"><b>${esc(c.group_street)}</b>${chip('warn', `${members.length} ${members.length < 5 ? 'перекрёстка' : 'перекрёстков'}`)}</div>
-        <small>Перекосы на одной улице сразу в нескольких местах. Можно решить для всей улицы одной кнопкой —
-          каждый перекрёсток всё равно проверяется и записывается в журнал отдельно — или по одному ниже.</small>
+        <small>${c.command === 'tls.corridor'
+          ? 'Экстренная машина едет к происшествию. Светофоры на её маршруте дадут больше зелёного её подъезду, каждый — пока она не проедет. Подтвердите коридор целиком или по перекрёсткам.'
+          : 'Перекосы на одной улице сразу в нескольких местах. Можно решить для всей улицы одной кнопкой — каждый перекрёсток всё равно проверяется и записывается в журнал отдельно — или по одному ниже.'}</small>
         ${buttons}
         <div class="members">${members.map(cmdCard).join('')}</div></div>`;
     }).join('');
@@ -204,8 +211,15 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
           ${dis.filter((d) => d.ref === i.id).map((d) => `<div class="unit">${chip(d.status === 'arrived' ? 'ok' : 'info', UNIT_TEXT[d.status])}
             <b>${esc(d.unit)}</b> от «${esc(d.from)}»<br><small>расчётное время ${clock(d.eta)}${d.took != null ? ` · фактическое ${clock(d.took)}` : ''}</small></div>`).join('')}
           </div>`).join('') : empty('происшествий нет')}
-        <h4>Зелёный коридор (пока только запись)</h4>
-        ${shadowList((p) => p.command === 'tls.preempt')}`;
+        <h4>Зелёный коридор</h4>
+        ${S.corridor
+          ? (() => {
+              const cor = S.cmd.filter((c) => c.command === 'tls.corridor').reverse();
+              return cor.length ? withGroups(cor) : empty('коридоров нет: экстренные машины сейчас не едут');
+            })()
+          : `<p class="muted">Выключен (<code>GREEN_CORRIDOR=off</code>). Механизм готов, но замер не показал явной пользы:
+              выбор утверждённого плана даёт экстренной машине лишь +15 с зелёного в цикле. Настоящий приоритет —
+              функция самого контроллера; подробно в docs/corridor.md.</p>`}`;
     }],
     infra: ['Инфраструктура', () => `<p class="muted">Телеметрия синтетическая. Анализ: отклонение от собственного базового уровня объекта и прогноз по тренду.</p>
         ${S.infra.length ? S.infra.map((a) => `<div class="item asset">

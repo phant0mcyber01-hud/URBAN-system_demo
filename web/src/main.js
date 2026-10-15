@@ -348,6 +348,7 @@ function connect() {
     try {
       const snap = await api.get('/api/state');
       S.mode = snap.mode ?? 'simulation';
+      S.corridor = !!snap.corridor;
       setClockMode(S.mode === 'field');
       renderMode();
       S.applySnapshot(snap);

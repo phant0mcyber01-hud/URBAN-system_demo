@@ -31,7 +31,12 @@ class Policy:
 # tls.select_plan: switch a junction to one of the plans its traffic engineer approved.
 # Timings follow the real signal cycle (about 90 s): a controller changes plan at a cycle
 # boundary, so a lease has to outlive a cycle and the effect needs a few cycles to show.
-POLICY = {"tls.select_plan": Policy(lease_ttl=180, window=900, cooldown=180, pending_ttl=120)}
+# tls.corridor: the same kind of command (an approved plan) for an emergency unit's route: shorter
+# in every way, it lives only until the unit has passed, and takes precedence over a rebalancing
+# command at that junction, which is released first (going back to base is always allowed).
+POLICY = {"tls.select_plan": Policy(lease_ttl=180, window=900, cooldown=180, pending_ttl=120),
+          "tls.corridor": Policy(lease_ttl=90, window=300, cooldown=0, pending_ttl=60)}
+CORRIDOR = "tls.corridor"
 
 
 class CommandGateway:
@@ -87,16 +92,20 @@ class CommandGateway:
         if not plan or plan not in self.plans.get(tls, ()):  # plan 0 is the base plan: nothing to propose
             self.audit.append(t, "denied", "-", command, str(tls), "plan is not in the approved table")
             return None
-        if tls in self.muted or tls in self.locked or any(
-                p["status"] in OPEN and p["tls"] == tls for p in self.proposals.values()):
-            return None
-        if t - self._last_done.get(tls, -10**9) < pol.cooldown:
+        corridor = command == CORRIDOR
+        if tls in self.locked:
+            return None  # an untrusted unit gets nothing, an emergency included
+        if any(p["status"] in OPEN and p["tls"] == tls and (not corridor or p["command"] == CORRIDOR)
+               for p in self.proposals.values()):
+            return None  # one rebalancing at a time; a corridor may override rebalancing, not another corridor
+        if not corridor and (tls in self.muted or t - self._last_done.get(tls, -10**9) < pol.cooldown):
             return None
         self._n += 1
         p = {"id": f"cmd-{self._n}", "t": t, "command": command, "tls": tls, "cam": params.get("cam"),
              "plan": plan, "shift": params.get("shift", 0), "give": params.get("give"), "take": params.get("take"),
              "street": params.get("street", ""), "from_street": params.get("from_street", ""),
              "status": "pending", "reason": reason,
+             **({"corridor": params.get("corridor"), "unit": params.get("unit", "")} if corridor else {}),
              "queue0": params.get("queue", 0), "other0": params.get("other", 0),
              "queue": params.get("queue", 0), "other": params.get("other", 0),
              "until": None, "result": None}
@@ -115,10 +124,18 @@ class CommandGateway:
         p["actor"] = actor
         if not approve:
             p["status"] = "rejected"
-            self._last_done[p["tls"]] = t
-            self.muted.add(p["tls"])
+            if p["command"] != CORRIDOR:  # saying no to a corridor says nothing about the junction's queues
+                self._last_done[p["tls"]] = t
+                self.muted.add(p["tls"])
             self.audit.append(t, "rejected", pid, p["command"], self._target(p), "", actor=actor, mode="approval")
         else:
+            if p["command"] == CORRIDOR:  # the emergency goes first: rebalancing at this junction steps aside
+                for other in list(self.proposals.values()):
+                    if other is not p and other["tls"] == p["tls"] and other["command"] != CORRIDOR:
+                        if other["status"] in ("approved", "active"):
+                            self.release(other["id"], "corridor", t)
+                        elif other["status"] == "pending":
+                            self.withdraw(other["id"], "corridor", t)
             p["status"], p["until"], p["renewed"] = "approved", t + pol.window, t
             self._lease(p, pol)
             self.audit.append(t, "approved", pid, p["command"], self._target(p),
@@ -134,6 +151,15 @@ class CommandGateway:
         self.send({"op": "release", "id": pid, "tls": p["tls"]})
         p["status"], p["end"] = "revoking", why
         self.audit.append(t, "released", pid, p["command"], self._target(p), why, mode="approval")
+        self.version += 1
+
+    def withdraw(self, pid: str, why: str, t: int):
+        """The platform takes back a proposal nobody decided on yet (its reason is gone)."""
+        p = self.proposals.get(pid)
+        if p is None or p["status"] != "pending":
+            return
+        p["status"], p["end"] = "expired", why
+        self.audit.append(t, "withdrawn", pid, p["command"], self._target(p), why, mode="approval")
         self.version += 1
 
     def revoke_all(self, actor: str, t: int):
@@ -189,7 +215,8 @@ class CommandGateway:
             st = p["status"]
             if st == "pending" and t - p["t"] > POLICY[p["command"]].pending_ttl:
                 p["status"] = "expired"
-                self._last_done[p["tls"]] = t
+                if p["command"] != CORRIDOR:  # an unanswered corridor says nothing about this junction's queues
+                    self._last_done[p["tls"]] = t
                 self.audit.append(t, "expired", p["id"], p["command"], p["tls"], "no operator decision", mode="approval")
                 self.version += 1
             elif st in ("approved", "active"):
@@ -261,9 +288,19 @@ class CommandGateway:
         self.version += 1
 
     def public(self) -> list[dict]:
-        """The recent proposals for the UI; pending ones on a shared street carry the same `group`."""
-        recent = list(self.proposals.values())[-12:]
-        groups = street_groups([p for p in recent if p["status"] == "pending"])
+        """The recent proposals for the UI; pending ones on a shared street, or of one corridor, carry the same `group`."""
+        recent = list(self.proposals.values())[-16:]
+        groups = street_groups([p for p in recent if p["status"] == "pending" and p["command"] != CORRIDOR])
+        corridors: dict[str, list[dict]] = {}
+        for p in recent:
+            if p["status"] == "pending" and p["command"] == CORRIDOR:
+                corridors.setdefault(p["corridor"], []).append(p)
+        for key, ps in corridors.items():
+            if len(ps) < 2:
+                continue  # a corridor through one junction is just one card
+            for p in ps:
+                groups[p["id"]] = {"group": key, "group_street": f"Зелёный коридор: {p.get('unit') or 'экстренная служба'}",
+                                   "group_size": len(ps)}
         return [{**p, **groups[p["id"]]} if p["id"] in groups else p for p in recent]
 
     def decide_many(self, pids: list[str], approve: bool, actor: str, t: int) -> dict[str, str | None]:
@@ -276,7 +313,8 @@ class CommandGateway:
             results[pid] = p["status"] if p else None
         done = [pid for pid, st in results.items() if st]
         if done:
-            self.audit.append(t, "group-approved" if approve else "group-rejected", ",".join(done), "tls.select_plan",
+            command = self.proposals[done[0]]["command"]
+            self.audit.append(t, "group-approved" if approve else "group-rejected", ",".join(done), command,
                               f"{len(done)} junctions", "", actor=actor, mode="approval")
         return results
 

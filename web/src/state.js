@@ -12,6 +12,7 @@ export function createState(scene) {
     user: null, // {name, role} of the signed-in account
     history: null, // from /api/history*, loaded when the tab opens
     mode: 'simulation', // 'simulation' (SUMO, emulated equipment) or 'field' (real URBAN Edge units)
+    corridor: false, // green corridor proposals switched on (GREEN_CORRIDOR)
     can: (role) => (RANK[S.user?.role] ?? -1) >= RANK[role],
   };
 

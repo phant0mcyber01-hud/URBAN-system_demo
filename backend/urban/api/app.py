@@ -65,7 +65,8 @@ hub = DeviceHub(Registry(c.PKI / "devices.json"), crypto.load_private((c.PKI / "
                 on_report=lambda rec, report: platform.on_report(rec["tls"], report), clock=lambda: platform.t,
                 plans=approved_plans(junctions), gateway_cert=GATEWAY_CERT)
 store = Store(c.DB, mode=c.SOURCE, retention_days=c.HISTORY_DAYS)
-platform = Platform(meta["center"], meta["radius"], junctions, send=hub.send, reachable=hub.online, store=store)
+platform = Platform(meta["center"], meta["radius"], junctions, send=hub.send, reachable=hub.online, store=store,
+                    corridor=c.GREEN_CORRIDOR)
 exporter = Exporter(store, crypto.load_private((c.PKI / "audit.key").read_text()), sinks_from_env(c.DATA))
 clients: set[WebSocket] = set()
 
@@ -366,7 +367,7 @@ def health():
 
 @app.get("/api/state")
 def state(who: str = Depends(viewer)):
-    return {**platform.snapshot(), "mode": c.SOURCE}
+    return {**platform.snapshot(), "mode": c.SOURCE, "corridor": platform.corridor_on}
 
 
 @app.get("/api/audit")
