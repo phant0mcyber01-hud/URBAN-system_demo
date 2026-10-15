@@ -143,6 +143,9 @@ button.cam span:last-child { color: var(--muted); white-space: nowrap; }
 .btns button.go { background: #143328; border-color: #1f5a43; color: var(--ok); font-weight: 600; }
 .btns button:disabled { opacity: .4; cursor: not-allowed; }
 .cmd.pending { border-left: 3px solid var(--warn); padding-left: 8px; }
+.item.group { border-left: 3px solid var(--warn); padding-left: 8px; background: #17140c; border-radius: 6px; }
+.item.group .members { margin-top: 6px; }
+.item.group .members .cmd.pending { border-left: 2px solid #6b5320; }
 .cmd.active, .cmd.approved { border-left: 3px solid var(--ok); padding-left: 8px; }
 .cmd .stat { margin-top: 6px; padding: 4px 8px; background: #131a23; border-radius: 6px; font-variant-numeric: tabular-nums; }
 #tabs button[data-badge]:not([data-badge=""])::after { content: attr(data-badge); margin-left: 6px; background: var(--warn); color: #14100a; border-radius: 9px; padding: 0 6px; font-size: 11px; font-weight: 700; }

@@ -10,11 +10,13 @@ Rules, in order of importance:
 5. Every step is written to the hash-chained audit log.
 In this demo the equipment is emulated; the gateway has no other transport.
 """
+import re
 from dataclasses import dataclass
 
 from .audit import AuditLog
 
 OPEN = ("pending", "approved", "active")
+GROUP_MAX = 32  # proposals decided in one go at most
 SILENCE_MARGIN = 30  # seconds past the lease before a silent device is presumed to have reverted
 
 
@@ -259,7 +261,24 @@ class CommandGateway:
         self.version += 1
 
     def public(self) -> list[dict]:
-        return list(self.proposals.values())[-12:]
+        """The recent proposals for the UI; pending ones on a shared street carry the same `group`."""
+        recent = list(self.proposals.values())[-12:]
+        groups = street_groups([p for p in recent if p["status"] == "pending"])
+        return [{**p, **groups[p["id"]]} if p["id"] in groups else p for p in recent]
+
+    def decide_many(self, pids: list[str], approve: bool, actor: str, t: int) -> dict[str, str | None]:
+        """One decision for several pending proposals (a whole street). Each is still decided on its own,
+        with its own checks and audit record; returns pid -> new status, or None where it could not be done."""
+        pids = list(dict.fromkeys(pids))[:GROUP_MAX]
+        results = {}
+        for pid in pids:
+            p = self.decide(pid, approve, actor, t)
+            results[pid] = p["status"] if p else None
+        done = [pid for pid, st in results.items() if st]
+        if done:
+            self.audit.append(t, "group-approved" if approve else "group-rejected", ",".join(done), "tls.select_plan",
+                              f"{len(done)} junctions", "", actor=actor, mode="approval")
+        return results
 
     def unsettled(self) -> list[dict]:
         """Proposals whose record may still change: the recent ones and everything still open."""
@@ -273,3 +292,50 @@ class CommandGateway:
 
     def _lease(self, p: dict, pol: Policy):
         self.send({"op": "lease", "id": p["id"], "tls": p["tls"], "plan": p["plan"], "ttl": pol.lease_ttl})
+
+
+# ---- grouping proposals by street
+_APOSTROPHES = re.compile(r"[ʻʼ‘’`´']")
+
+
+def street_names(text: str) -> set[str]:
+    """'Tadbirkorlar koʻchasi, Universitet ko'chasi' -> {'tadbirkorlar ko'chasi', 'universitet ko'chasi'}:
+    OSM spells the same street with different apostrophes, and an approach may carry two names."""
+    return {_APOSTROPHES.sub("'", n).strip().lower() for n in (text or "").split(",") if n.strip()}
+
+
+def street_groups(pending: list[dict]) -> dict[str, dict]:
+    """Pending proposals that share a street (directly or through another one) form a group.
+    Returns pid -> {group, group_street, group_size} for groups of two or more."""
+    parent = {p["id"]: p["id"] for p in pending}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    owner: dict[str, str] = {}
+    for p in pending:
+        for name in street_names(p.get("street", "")):
+            if name in owner:
+                parent[find(p["id"])] = find(owner[name])
+            else:
+                owner[name] = p["id"]
+    members: dict[str, list[dict]] = {}
+    for p in pending:
+        members.setdefault(find(p["id"]), []).append(p)
+    out = {}
+    for ps in members.values():
+        if len(ps) < 2:
+            continue
+        counts: dict[str, int] = {}
+        for q in ps:
+            for name in street_names(q.get("street", "")):
+                counts[name] = counts.get(name, 0) + 1
+        common = max(counts, key=lambda n: (counts[n], n))
+        label = next(n.strip() for q in ps for n in q["street"].split(",")
+                     if _APOSTROPHES.sub("'", n).strip().lower() == common)
+        key = min(q["id"] for q in ps)
+        for q in ps:
+            out[q["id"]] = {"group": key, "group_street": label, "group_size": len(ps)}
+    return out

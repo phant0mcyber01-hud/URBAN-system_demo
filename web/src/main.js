@@ -73,9 +73,16 @@ const panel = createPanel(scene, S, {
   },
   onCamera: (id) => (id === S.cam ? cameras.close() : cameras.open(id)),
   onTab: (tab) => { clearInterval(historyTimer); if (tab === 'history') { loadHistory(); historyTimer = setInterval(loadHistory, 20000); } },
-  onAction: (act, id) => run(() => (act === 'revoke' || act === 'restore'
-    ? api.post(`/api/devices/${id}/status`, { status: act === 'revoke' ? 'revoked' : 'active' })
-    : api.post(`/api/commands/${id}/${act}`))),
+  onAction: (act, id) => run(async () => {
+    if (act === 'revoke' || act === 'restore') return api.post(`/api/devices/${id}/status`, { status: act === 'revoke' ? 'revoked' : 'active' });
+    if (act === 'approve-group' || act === 'reject-group') {
+      const results = await api.post('/api/commands/group', { ids: id.split(','), approve: act === 'approve-group' });
+      const failed = Object.values(results).filter((s) => !s).length;
+      if (failed) toast(`${failed} из ${Object.keys(results).length} не удалось: устройство не на связи или решение уже принято`);
+      return results;
+    }
+    return api.post(`/api/commands/${id}/${act}`);
+  }),
 });
 
 // history comes from the store, not from live frames: fetched when the tab is open

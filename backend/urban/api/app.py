@@ -456,6 +456,22 @@ async def reject(pid: str, who: str = Depends(operator)):
     return p
 
 
+class Group(BaseModel):
+    ids: list[str]
+    approve: bool
+
+
+@app.post("/api/commands/group")
+async def decide_group(body: Group, who: str = Depends(operator)):
+    """Apply or reject a whole street at once; every proposal is still checked and recorded on its own."""
+    if not body.ids:
+        raise HTTPException(400, "no proposals")
+    results = platform.gateway.decide_many(body.ids, body.approve, who, platform.t)
+    if not any(results.values()):
+        raise HTTPException(409, "none of these could be decided: not pending, the link is down, or devices offline")
+    return results
+
+
 @app.post("/api/revoke-all")
 async def revoke_all(who: str = Depends(operator)):
     platform.gateway.revoke_all(who, platform.t)

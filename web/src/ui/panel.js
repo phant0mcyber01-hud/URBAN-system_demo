@@ -130,6 +130,28 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
       ${buttons}</div>`;
   };
 
+  // pending proposals on one street come as a group: one decision for the whole street, the cards below it
+  const withGroups = (list) => {
+    const seen = new Set();
+    return list.map((c) => {
+      if (c.status !== 'pending' || !c.group) return cmdCard(c);
+      if (seen.has(c.group)) return '';
+      seen.add(c.group);
+      const members = list.filter((m) => m.status === 'pending' && m.group === c.group);
+      const ids = members.map((m) => m.id).join(',');
+      const buttons = S.can('operator')
+        ? `<div class="btns"><button class="go" data-act="approve-group" data-id="${ids}" ${S.link ? '' : 'disabled'}>Применить все (${members.length})</button>
+           <button data-act="reject-group" data-id="${ids}">Отклонить все</button></div>`
+        : '';
+      return `<div class="item group">
+        <div class="row"><b>${esc(c.group_street)}</b>${chip('warn', `${members.length} ${members.length < 5 ? 'перекрёстка' : 'перекрёстков'}`)}</div>
+        <small>Перекосы на одной улице сразу в нескольких местах. Можно решить для всей улицы одной кнопкой —
+          каждый перекрёсток всё равно проверяется и записывается в журнал отдельно — или по одному ниже.</small>
+        ${buttons}
+        <div class="members">${members.map(cmdCard).join('')}</div></div>`;
+    }).join('');
+  };
+
   const TABS = {
     overview: ['Обзор', () => {
       const inc = S.activeIncidents.length, bad = S.infraBad.length, jam = S.jamRoads.length, wait = S.pending().length;
@@ -146,20 +168,21 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
           ${kpi('авто в районе', S.stats?.cars ?? '—')}${kpi('ср. скорость, км/ч', S.stats?.mean_speed_kmh ?? '—')}
           ${kpi('сегментов с затором', jam, jam ? 'warn' : '')}${kpi('объектов с отклонением', bad, bad ? 'warn' : '')}
         </div>
-        ${wait ? `<h4>Ждут решения</h4>${S.pending().map(cmdCard).join('')}` : ''}
+        ${wait ? `<h4>Ждут решения</h4>${withGroups(S.pending())}` : ''}
         <h4>Сводка анализа</h4>
         ${feed.length ? feed.map((f) => `<div class="item"><time>${clock(f.t)}</time> ${f.html}</div>`).join('') : empty('событий пока нет')}`;
     }],
     transport: ['Пробки и светофоры', () => {
       const streets = jamStreets(), jam = S.jamRoads.length;
       const skipped = S.cmd.filter((c) => c.status === 'expired' || c.status === 'rejected').length;
-      const cards = [...S.cmd].filter((c) => c.status !== 'expired' && c.status !== 'rejected').reverse();
+      const cards = [...S.cmd].filter((c) => c.status !== 'expired' && c.status !== 'rejected').reverse()
+        .sort((a, b) => (b.status === 'pending') - (a.status === 'pending'));  // what waits for a decision goes first
       return `<div class="grid">
           ${kpi('ср. скорость, км/ч', S.stats?.mean_speed_kmh ?? '—')}${kpi('потери автобуса, с', S.stats?.bus_avg_loss ?? '—')}
           ${kpi('сегментов с затором', jam, jam ? 'warn' : '')}${kpi(S.mode === 'field' ? 'команд передано оборудованию' : 'команд передано, эмуляция', S.audit.applied ?? 0)}
         </div>
         <h4>Проблемы, найденные камерами и детекторами</h4>
-        ${cards.length ? cards.map(cmdCard).join('') : empty('перекосов нет: нигде одно направление не стоит при свободном поперечном')}
+        ${cards.length ? withGroups(cards) : empty('перекосов нет: нигде одно направление не стоит при свободном поперечном')}
         ${skipped ? `<p class="muted">Без решения или отклонено: ${skipped}</p>` : ''}
         <h4>Заторы сейчас</h4>
         ${streets.length ? streets.slice(0, 6).map(([n, c]) => `<div class="item row"><span>${esc(n)}</span><span>${c} сегм.</span></div>`).join('') : empty('заторов нет')}`;
