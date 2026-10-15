@@ -253,6 +253,8 @@ function renderMode(city) {
   camBase = null;
   drawLayerMenu();
   const chip = $('modechip');
+  chip.hidden = false;
+  $('link').hidden = false;
   chip.textContent = field ? 'ОБОРУДОВАНИЕ' : 'ЭМУЛЯЦИЯ';
   chip.className = `chip ${field ? 'ok' : 'shadow'}`;
   chip.title = field ? 'Платформа работает с реальными устройствами URBAN Edge' : 'Оборудование в демо смоделировано';

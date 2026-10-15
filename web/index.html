@@ -3,16 +3,16 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>URBAN · Фергана · центр управления</title>
+  <title>URBAN · центр управления</title>
 </head>
 <body>
   <div id="map"></div>
 
   <header id="top">
-    <div id="brand"><b>URBAN</b><span>Фергана · центр управления</span></div>
+    <div id="brand"><b>URBAN</b><span>центр управления</span></div>
     <div id="sys">
-      <span id="modechip" class="chip shadow" title="Оборудование в демо смоделировано">ЭМУЛЯЦИЯ</span>
-      <span id="link" class="chip ok">связь с оборудованием</span>
+      <span id="modechip" class="chip" hidden></span>
+      <span id="link" class="chip ok" hidden>связь с оборудованием</span>
     </div>
     <div id="op-tools" hidden>
       <button id="op-revoke" class="danger" title="Немедленно вернуть все светофоры к базовому плану">Отозвать всё</button>
@@ -63,7 +63,7 @@
 
   <div id="login" hidden>
     <form id="login-form" class="glass" autocomplete="on">
-      <div class="login-brand"><b>URBAN</b><span>Фергана · центр управления</span></div>
+      <div class="login-brand"><b>URBAN</b><span>центр управления</span></div>
       <p class="muted">Вход только по учётной записи. Роли: наблюдатель, оператор, администратор.</p>
       <label>Имя <input id="login-name" autocomplete="username" required autofocus /></label>
       <label>Пароль <input id="login-pass" type="password" autocomplete="current-password" required /></label>
@@ -79,7 +79,7 @@
     <div id="layers-menu" hidden></div>
   </div>
   <div id="foot">
-    <span id="foot-note">Демо на синтетических данных: трафик, автобусные линии, телеметрия, камеры и сами светофоры смоделированы; сеть и здания из OSM.</span>
+    <span id="foot-note"></span>
     <span id="perf"></span>
   </div>
 
