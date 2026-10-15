@@ -6,7 +6,7 @@
 
 ![статус](https://img.shields.io/badge/статус-готовим%20пилот-8a63d2)
 ![python](https://img.shields.io/badge/python-3.11+-3776ab)
-![tests](https://img.shields.io/badge/тесты-177%20проходят-2ea44f)
+![tests](https://img.shields.io/badge/тесты-183%20проходят-2ea44f)
 ![пилот](https://img.shields.io/badge/пилот-Фергана-5cc8ff)
 
 ![Центр управления: камера заметила пробку, оператор переключил светофор на утверждённый план](docs/img/control.png)
@@ -203,6 +203,7 @@ backend/urban/     платформа на Python
   devices/         реестр блоков, ключи, подписи
   edge/            программа блока на перекрёстке
   equipment/       связь блока с контроллером: реле, NTCIP по SNMPv3
+  vision/          зрение блока: камеры, нейросеть, калибровка
   sensors/         подсчёт очереди по камерам на блоке
   store.py         история в базе
   export.py        копия журнала за пределами сервера

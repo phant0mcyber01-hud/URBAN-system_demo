@@ -55,8 +55,9 @@ def parse_code(code: str) -> dict:
     return {"device": device, "serial": serial, "public": public}
 
 
-def make_kit(rec: dict, pki: Path, server_name: str, port: int) -> dict:
-    """What a unit needs besides its own key: where the platform is and whom to trust. All of it public."""
+def make_kit(rec: dict, pki: Path, server_name: str, port: int, approaches: list[dict] | None = None) -> dict:
+    """What a unit needs besides its own key: where the platform is and whom to trust, and the approaches of
+    its junction for the camera calibration page. All of it public."""
     root, gateway = pki / "root.pub", pki / "gateway.pub"
     return {
         "urban_kit": KIT_VERSION, "unit": rec["id"], "junction": rec["junction"], "name": rec.get("name", ""),
@@ -65,6 +66,7 @@ def make_kit(rec: dict, pki: Path, server_name: str, port: int) -> dict:
         "ca_pem": (pki / "ca.pem").read_text(),
         "root_pub": root.read_text().strip() if root.exists() else None,
         "gateway_pub": None if root.exists() else gateway.read_text().strip(),  # older setups without a root key
+        "approaches": [{k: a.get(k) for k in ("id", "name", "from", "lanes", "zone")} for a in approaches or []],
     }
 
 
@@ -126,6 +128,11 @@ def install_kit(kit: dict, unit: str, key_path: Path, pki: Path, env_path: Path)
     except OSError:
         pass
     written.append(str(env_path))
+    junction = env_path.parent / f"{unit}.junction.json"  # for the camera calibration page
+    junction.write_text(json.dumps({"junction": kit.get("junction"), "name": kit.get("name", ""),
+                                    "approaches": kit.get("approaches") or []}, ensure_ascii=False, indent=1),
+                        encoding="utf-8")
+    written.append(str(junction))
     return written
 
 

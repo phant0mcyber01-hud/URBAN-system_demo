@@ -547,7 +547,8 @@ def device_kit(device: str, who: str = Depends(admin)):
     rec = hub.registry.devices.get(device)
     if rec is None:
         raise HTTPException(404, "unknown device")
-    kit = make_kit(rec, c.PKI, c.DEVICE_NAME, c.DEVICE_PORT)
+    junction = next((j for j in junctions if j["id"] == rec["junction"]), {})
+    kit = make_kit(rec, c.PKI, c.DEVICE_NAME, c.DEVICE_PORT, junction.get("approaches"))
     return JSONResponse(kit, headers={"Content-Disposition": f'attachment; filename="urban-{device}.json"'})
 
 

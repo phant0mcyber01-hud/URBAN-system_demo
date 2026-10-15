@@ -146,6 +146,10 @@ DOOR_SENSOR=/sys/class/gpio/gpio17/value
 Блок сообщает только то, что измеряет: нет датчика — в интерфейсе прочерк, а не придуманное число. Открытая
 дверь шкафа блокирует перекрёсток.
 
+Камеры блока: зависимости `pip install -e "backend[edge,vision]"`, модель в `/opt/urban/models/yolox_nano.onnx`,
+калибровка на странице блока (`python -m urban.vision setup`), служба `urban-vision@edge-J-21` пишет
+`/run/urban/queues.json`. Подробно — [docs/vision.md](../docs/vision.md).
+
 ```bash
 sudo systemctl enable --now urban-edge@edge-J-21
 ```

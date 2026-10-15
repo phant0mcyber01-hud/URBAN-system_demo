@@ -288,7 +288,10 @@ URBAN смотрит на перекрёстки через камеры и де
 | `python -m urban.provision enroll edge-J-21 --junction J-21 --public <hex>` / `list` | учесть открытый ключ блока; список блоков с отпечатками |
 | `python -m urban.edge` / `--only J-21` | демо-блоки отдельно (`URBAN_EDGE=manual` для платформы) |
 | `python -m urban.edge --unit edge-J-21 --platform host:8443 --adapter none\|relay\|ntcip --controller … --sensors …` | один настоящий блок |
-| `python -m urban.sensors --calibration cameras.json --out queues.json < detections.jsonl` | камерный конвейер блока |
+| `python -m urban.vision run --cameras cameras.json --model yolox_nano.onnx --out queues.json` | зрение блока: камеры → очереди в метрах |
+| `python -m urban.vision setup --cameras cameras.json --unit edge-J-07` | страница калибровки камер на блоке |
+| `python -m urban.vision check --video запись.mp4 --camera cam-1 --cameras … --model … --out-video … --log …` | проверить зрение на записанном видео |
+| `python -m urban.sensors --calibration cameras.json --out queues.json < detections.jsonl` | очереди из готовых рамок (если камера сама распознаёт) |
 | `python -m urban.pipeline` | демо-двойник: сеть SUMO, спрос и синтетические перекрёстки |
 | `python -m urban.experiments.signal_rebalance` | замер эффекта управления (несколько минут) |
 | `python -m pytest backend` | тесты |

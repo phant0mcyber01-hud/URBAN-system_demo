@@ -16,8 +16,9 @@ dependencies = [
 
 [project.optional-dependencies]
 demo = ["eclipse-sumo", "traci", "sumolib", "pyproj"]  # the demo twin and the measurements, not the real system
-dev = ["pytest", "pysnmp>=7.1,<8", "urban[demo]"]  # pysnmp: an independent agent for the SNMPv3 tests only
+dev = ["pytest", "pysnmp>=7.1,<8", "urban[demo]", "urban[vision]"]  # pysnmp: an independent agent for the SNMPv3 tests only
 edge = ["pyserial"]  # a unit in a cabinet with a relay board on a serial port
+vision = ["numpy", "opencv-python-headless", "onnxruntime"]  # camera vision on the unit (python -m urban.vision)
 
 [project.scripts]
 urban-prepare = "urban.pipeline.__main__:main"

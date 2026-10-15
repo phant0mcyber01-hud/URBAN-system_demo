@@ -131,7 +131,7 @@ def test_the_kit_goes_in_place_only_on_its_own_unit(tmp_path, field_pki):
     key = crypto.load_private((unit_pki / "edge" / "edge-J-01.key").read_text())
     reg = Registry(field_pki / "devices.json")
     rec = reg.enroll("edge-J-01", JUNCTIONS[0], crypto.public_hex(key), "URB-0001")
-    kit = make_kit(rec, field_pki, "city.example", 8443)
+    kit = make_kit(rec, field_pki, "city.example", 8443, [{"id": "J-01-N", "name": "Alpha", "from": "с севера", "zone": 90}])
     assert kit["platform"] == "city.example:8443" and kit["root_pub"] and kit["gateway_pub"] is None
     assert not any("PRIVATE" in str(v) for v in kit.values())  # nothing secret in it
 
@@ -140,6 +140,8 @@ def test_the_kit_goes_in_place_only_on_its_own_unit(tmp_path, field_pki):
     assert (unit_pki / "ca.pem").read_text() == (field_pki / "ca.pem").read_text()
     assert (unit_pki / "root.pub").read_text().strip() == (field_pki / "root.pub").read_text().strip()
     assert "PLATFORM=city.example:8443" in env.read_text() and str(env) in written
+    junction = json.loads((tmp_path / "unit" / "edge-J-01.junction.json").read_text(encoding="utf-8"))
+    assert junction["junction"] == "J-01" and junction["approaches"][0]["id"] == "J-01-N"  # for the camera page
 
     # a second setup keeps what the installer wrote and only moves the platform
     env.write_text(env.read_text().replace("ADAPTER=none", "ADAPTER=ntcip"))
