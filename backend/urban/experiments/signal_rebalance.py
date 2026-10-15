@@ -38,12 +38,12 @@ HIGHER_IS_BETTER = {"finished"}
 
 
 def run_arm(task: tuple) -> dict:
-    seed, horizon, control, scale, coverage = task
+    seed, horizon, control, scale, coverage, spillback = task
     meta = json.loads((c.OUT / "meta.json").read_text())
     cameras = load_all_junctions() if coverage == "all" else load_cameras()
     equipment: queue.Queue = queue.Queue()
-    platform = Platform(meta["center"], meta["radius"], cameras, send=equipment.put)
-    trips = c.DATA / f"tripinfo-{coverage}-{scale}-{int(control)}-{seed}.xml"
+    platform = Platform(meta["center"], meta["radius"], cameras, send=equipment.put, spillback=spillback)
+    trips = c.DATA / f"tripinfo-{coverage}-{scale}-{int(control)}-{int(spillback)}-{seed}.xml"
     standing = []
     warmup = min(WARMUP, horizon // 2)
 
@@ -68,7 +68,7 @@ def run_arm(task: tuple) -> dict:
     done = [p for p in platform.gateway.proposals.values() if p["status"] == "done" and p["result"]]
     return {"loss": statistics.fmean(loss), "local": statistics.fmean(standing), "finished": finished,
             "applied": platform.gateway.applied,
-            "early": sum(p["result"]["reason"] in ("balance", "relieved") for p in done)}
+            "early": sum(p["result"]["reason"] in ("balance", "relieved", "spillback") for p in done)}
 
 
 def summarise(pairs: list[tuple[dict, dict]]) -> dict:
@@ -117,8 +117,8 @@ def report(results: dict, args) -> str:
                   "| Спрос | Показатель | Без вмешательства | Изменение | ± ст. ошибка | Лучше в прогонах | Вывод |",
                   "|---|---|---|---|---|---|---|"]
         for scale in args.scale_list:
-            pairs = [(results[(s, args.horizon, False, scale, coverage)], results[(s, args.horizon, True, scale, coverage)])
-                     for s in seeds]
+            pairs = [(results[(s, args.horizon, False, scale, coverage, False)],
+                      results[(s, args.horizon, True, scale, coverage, args.spillback)]) for s in seeds]
             summary = summarise(pairs)
             applied = statistics.fmean(k["applied"] for _, k in pairs)
             early = statistics.fmean(k["early"] for _, k in pairs)
@@ -154,17 +154,19 @@ def main():
     ap.add_argument("--scales", default="0.5,0.75,1.0", help="demand levels relative to the demo scenario")
     ap.add_argument("--coverage", choices=["cameras", "all", "both"], default="both")
     ap.add_argument("--jobs", type=int, default=6, help="simulations to run in parallel")
+    ap.add_argument("--spillback", action="store_true", help="control arm also checks the downstream queue")
+    ap.add_argument("--out", default="benchmark.md", help="report file in docs/")
     args = ap.parse_args()
     args.scale_list = [float(s) for s in args.scales.split(",")]
     args.coverages = ["cameras", "all"] if args.coverage == "both" else [args.coverage]
 
-    tasks = [(seed, args.horizon, control, scale, coverage)
+    tasks = [(seed, args.horizon, control, scale, coverage, args.spillback and control)
              for coverage in args.coverages for scale in args.scale_list
              for seed in range(1, args.seeds + 1) for control in (False, True)]
     with concurrent.futures.ProcessPoolExecutor(args.jobs) as pool:
         results = dict(zip(tasks, pool.map(run_arm, tasks)))
     text = report(results, args)
-    (c.ROOT / "docs" / "benchmark.md").write_text(text, encoding="utf-8", newline="\n")
+    (c.ROOT / "docs" / args.out).write_text(text, encoding="utf-8", newline="\n")
     print(text)
 
 

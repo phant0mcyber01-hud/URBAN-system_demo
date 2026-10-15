@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 from collections import defaultdict
 
 from .. import config as c
+from .links import downstream
 from .paths import NET, STOPS, dump
 
 MIN_GREEN_PHASE = 10  # seconds: shorter phases are transitions, not something to rebalance
@@ -152,10 +153,10 @@ def export_network():
             "properties": {**public(p, f"CAM-{i:02d}", True), "bearing": round(math.degrees(math.atan2(ux, uy)) % 360)},
             "geometry": {"type": "Point", "coordinates": ll(bx - ux * 35, by - uy * 35)},
         })
-    dump("cameras.geojson", features)
-
     # all signalised junctions: every one has a queue sensor, eight of them also a camera window
     with_cam = {p["tls"]: f"CAM-{i:02d}" for i, p in enumerate(cams, 1)}
     signals = [public(p, with_cam.get(p["tls"], f"J-{i:02d}"), p["tls"] in with_cam) for i, p in enumerate(plans, 1)]
+    links = downstream(net, signals)  # phases are shared with the camera features, so both files get them
+    dump("cameras.geojson", features)
     (c.OUT / "signals.json").write_text(json.dumps(signals, ensure_ascii=False), encoding="utf-8")
-    print(f"   signals.json: {len(signals)}")
+    print(f"   signals.json: {len(signals)}, {links} downstream links")

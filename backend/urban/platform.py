@@ -16,13 +16,14 @@ from .junctions import approved_plans
 SETTLE = 2 * WINDOW  # seconds after a plan change before judging it: a controller needs a cycle to switch
 STALE = 5            # seconds without a report before a junction counts as "no data"
 SAMPLE = 60          # seconds between history samples of queues and device health
+SPILL = 0.8          # a downstream approach queued over this share of its sensor zone counts as full
 
 M_LAT = 111320.0
 
 
 class Platform:
     def __init__(self, center, radius, cameras=(), send=lambda msg: None, reachable=lambda tls: True, store=None,
-                 corridor: bool = True):
+                 corridor: bool = True, spillback: bool = False):
         """center: [lon, lat], radius: metres,
         cameras: junctions with a queue sensor, as loaded by urban.junctions
                  (camera: True when the junction also has a camera window),
@@ -37,6 +38,10 @@ class Platform:
         self.gateway = CommandGateway(send, approved_plans(self.cameras), reachable, store=store)
         self.corridors = Corridors(self.cameras)
         self.corridor_on = corridor  # propose green corridors for emergency units (config GREEN_CORRIDOR)
+        self.spillback = spillback   # do not push cars into a block that is already full (config SPILLBACK)
+        self._zone = {a["id"]: a.get("zone", 100.0) for c in self.cameras for a in c["approaches"]}
+        self._downstream = {(c["tls"], ph["index"]): ph.get("downstream", [])
+                            for c in self.cameras for ph in c.get("phases", [])}
         self._by_tls = {c["tls"]: c for c in self.cameras}
         self.sensors: dict[str, tuple[int, dict]] = {}  # junction id -> (report time, queues) from its Edge unit
         self.dev: dict[str, dict] = {}        # junction id -> brief of its Edge unit, for the UI
@@ -124,6 +129,8 @@ class Platform:
         # one direction is overloaded while another has green to spare -> propose an approved plan
         self.gateway.keep_muted({pr["tls"] for pr in problems})
         for pr in problems:
+            if self.spillback and self.full_ahead(pr["tls"], pr["give"]):
+                continue  # more green here would only move the cars into the next queue
             self.gateway.propose(
                 t, "tls.select_plan", pr,
                 f"{'камера' if pr['camera'] else 'детектор'} {pr['cam']}: "
@@ -142,6 +149,8 @@ class Platform:
                 self.gateway.release(p["id"], "relieved", t)
             elif donor >= loaded:
                 self.gateway.release(p["id"], "balance", t)
+            elif self.spillback and self.full_ahead(p["tls"], p["give"]):
+                self.gateway.release(p["id"], "spillback", t)
 
         if (samples := raw.get("telemetry")) is not None:
             self.infra, alerts = self.detector.update(t, samples)
@@ -180,6 +189,14 @@ class Platform:
         if self._queue_sampled is None or not 0 <= t - self._queue_sampled < SAMPLE:
             self._queue_sampled = t
             self.store.add_queues(queues)
+
+    def full_ahead(self, tls: str, phase: int) -> str | None:
+        """The downstream approach of this phase that is already queued to the end of its sensor zone, if any."""
+        for d in self._downstream.get((tls, phase), []):
+            q = (self.queues.get(d["junction"]) or {}).get(d["approach"])
+            if q is not None and q >= SPILL * self._zone.get(d["approach"], 100.0):
+                return d["junction"]
+        return None
 
     def devices(self, rows: list[dict], t: int) -> list[dict]:
         """Take the hub's view of the fleet, judge each unit, lock junctions whose unit cannot be trusted.
