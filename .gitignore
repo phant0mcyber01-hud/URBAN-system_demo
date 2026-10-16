@@ -7,3 +7,7 @@ web/dist/
 .pytest_cache/
 .env
 .claude/
+
+# unlazy: local gate ledgers and hook state
+.unlazy/
+.unlazy-hook-state.json
