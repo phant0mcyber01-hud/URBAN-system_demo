@@ -40,9 +40,11 @@ def overlay(frame: np.ndarray, cam: dict, boxes: list | None = None, queue: floa
             cv2.circle(out, (int(p["px"][0]), int(p["px"][1])), 5, (255, 255, 255), 1, cv2.LINE_AA)
     for b in boxes or []:
         u, v, w, hh = (int(round(x)) for x in b[:4])
-        cv2.rectangle(out, (u, v), (u + w, v + hh), VEHICLE, 1, cv2.LINE_AA)
+        cv2.rectangle(out, (u, v), (u + w, v + hh), VEHICLE, 2, cv2.LINE_AA)
         if len(b) >= 6:
-            cv2.putText(out, VEHICLES.get(int(b[5]), "?"), (u, max(10, v - 3)), cv2.FONT_HERSHEY_SIMPLEX, 0.4, VEHICLE, 1, cv2.LINE_AA)
+            text = f"{VEHICLES.get(int(b[5]), '?')} {b[4]:.2f}"
+            cv2.rectangle(out, (u, max(0, v - 16)), (u + 8 * len(text), v), VEHICLE, -1)
+            cv2.putText(out, text, (u + 2, max(12, v - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (20, 20, 20), 1, cv2.LINE_AA)
     label = f"{cam.get('camera', '')} {cam.get('approach', '')}  queue {'-' if queue is None else f'{queue:.0f} m'}"
     cv2.rectangle(out, (0, 0), (12 + 9 * len(label), 26), (20, 20, 20), -1)
     cv2.putText(out, label, (6, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (235, 235, 235), 1, cv2.LINE_AA)
