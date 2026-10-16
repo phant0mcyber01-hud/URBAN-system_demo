@@ -1,0 +1,43 @@
+#!/bin/bash
+# The OS checks its own promises and says so in one line: URBAN-OS-CHECK OK ... or URBAN-OS-CHECK FAIL ...
+# Run at every boot (urban-os-check.service); urban-health decides from it whether this slot is good.
+fail=()
+version=$(sed -n 's/^VERSION=//p' /etc/urban-os-release)
+slot=$(sed -n 's/.*rauc\.slot=\([AB]\).*/\1/p' /proc/cmdline)
+[ -n "$slot" ] || fail+=("no slot on the kernel command line")
+
+read -r fstype opts < <(findmnt -n -o FSTYPE,OPTIONS /)
+if [ "$fstype" != squashfs ] || [[ ",$opts," != *,ro,* ]]; then fail+=("root is not a read-only squashfs ($fstype $opts)"); fi
+if touch /usr/.urban-write-test 2>/dev/null; then rm -f /usr/.urban-write-test; fail+=("root accepted a write"); fi
+
+dopts=$(findmnt -n -o OPTIONS /var/lib/urban 2>/dev/null)
+[[ ",$dopts," == *,rw,* ]] || fail+=("data partition not mounted read-write")
+
+if systemctl is-active --quiet nftables && nft list table inet urban >/dev/null 2>&1; then
+  nft list chain inet urban input | grep -q 'policy drop' || fail+=("firewall input policy is not drop")
+else
+  fail+=("firewall not loaded")
+fi
+
+wd=$(systemctl show -p RuntimeWatchdogUSec --value)
+if [ ! -e /dev/watchdog0 ] || [ -z "$wd" ] || [ "$wd" = 0 ] || [ "$wd" = infinity ]; then fail+=("watchdog not armed ($wd)"); fi
+
+sshd -T 2>/dev/null | grep -qx 'passwordauthentication no' || fail+=("SSH accepts passwords")
+passwd -S root | grep -q ' L ' || fail+=("root has a usable password")
+
+systemctl is-active --quiet urban-prepare || fail+=("urban-prepare failed")
+unit=$(sed -n 's/^UNIT=//p' /var/lib/urban/etc/unit.conf 2>/dev/null)
+if [ -n "$unit" ]; then
+  [ -f "/var/lib/urban/etc/pki/edge/$unit.key" ] || fail+=("unit $unit has no key")
+else
+  unit=none
+fi
+/opt/urban/.venv/bin/python -c "import urban.edge.__main__" 2>/dev/null || fail+=("URBAN software does not start")
+systemctl cat urban-edge@check.service >/dev/null 2>&1 || fail+=("urban-edge@ service missing")
+
+if [ ${#fail[@]} -eq 0 ]; then
+  echo "URBAN-OS-CHECK OK version=$version slot=$slot root=ro data=rw firewall=on watchdog=$wd unit=$unit"
+  exit 0
+fi
+echo "URBAN-OS-CHECK FAIL version=$version slot=$slot: $(IFS=';'; echo "${fail[*]}")"
+exit 1

@@ -1,0 +1,11 @@
+# Every wired port asks for an address. A static cabinet network: /var/lib/urban/etc/network/*.network
+# (linked into /etc/systemd/network by urban-firstboot).
+[Match]
+Type=ether
+
+[Network]
+DHCP=yes
+LinkLocalAddressing=ipv4
+
+[DHCPv4]
+UseDomains=yes

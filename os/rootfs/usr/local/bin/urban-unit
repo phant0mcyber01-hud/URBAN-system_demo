@@ -1,0 +1,39 @@
+#!/bin/bash
+# Maintenance of an URBAN Edge unit (over SSH, as root):
+#   urban-unit status          identity, key, slot, version, services
+#   urban-unit code            the enrolment code again
+#   urban-unit setup KIT.json  the kit from the platform (Устройства -> Комплект); then the unit starts working
+#   urban-unit update BUNDLE   install a signed update into the other slot and reboot into it
+#                              (copy bundles to /var/lib/urban/update: the root is read-only, /tmp is small)
+set -eu
+D=/var/lib/urban
+UNIT=$(sed -n 's/^UNIT=//p' "$D/etc/unit.conf" 2>/dev/null || true)
+case "${1:-status}" in
+  status)
+    echo "unit:     ${UNIT:-not set (urban-unit.txt on URBAN-ESP)}"
+    if [ -f "$D/etc/enrolment.txt" ]; then sed -n 's/^fingerprint: *\([0-9A-F-]*\).*/key:      \1/p' "$D/etc/enrolment.txt"; fi
+    echo "os:       $(sed -n 's/^VERSION=//p' /etc/urban-os-release), slot $(sed -n 's/.*rauc\.slot=\([AB]\).*/\1/p' /proc/cmdline)"
+    systemctl --no-pager --plain list-units 'urban-*'
+    ;;
+  code)
+    grep -o 'URBAN1:[^[:space:]]*' "$D/etc/enrolment.txt"
+    ;;
+  setup)
+    [ -n "$UNIT" ] || { echo "no unit identity yet" >&2; exit 1; }
+    /opt/urban/.venv/bin/python -m urban.edge --setup "$2" --unit "$UNIT" --pki /etc/urban/pki --env "/etc/urban/edge-$UNIT.env"
+    chown -R urban:urban "$D/etc/pki"
+    systemctl enable --now "urban-edge@$UNIT"
+    if [ -f /etc/urban/cameras.json ]; then systemctl enable --now "urban-vision@$UNIT"; fi
+    echo "unit $UNIT started; it appears online in the platform under Устройства"
+    ;;
+  update)
+    rauc install "$2"
+    case "$2" in "$D"/update/*) rm -f "$2" ;; esac  # the staged copy is no longer needed
+    echo "installed into the other slot; rebooting into it"
+    systemctl reboot
+    ;;
+  *)
+    sed -n '2,6p' "$0"
+    exit 2
+    ;;
+esac

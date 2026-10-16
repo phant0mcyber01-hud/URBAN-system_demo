@@ -1,0 +1,49 @@
+#!/bin/bash
+# Every boot, before the network and the unit start: the data partition's layout, this unit's SSH host key,
+# a static cabinet network if one is configured, and the unit's identity. On the first boot with an
+# identity the unit makes its own key here (it never leaves the data partition) and shows its enrolment
+# code on the screen, the serial console and the login prompt.
+set -eu
+D=/var/lib/urban
+install -d -m 755 "$D" "$D/etc" "$D/rauc"
+install -d -m 750 -o urban -g urban "$D/etc/pki" "$D/etc/pki/edge"
+install -d -m 700 "$D/ssh"
+install -d -m 700 "$D/update"  # update bundles are staged here: the root is read-only, /tmp is small
+[ -f "$D/ssh/ssh_host_ed25519_key" ] || ssh-keygen -q -t ed25519 -N '' -f "$D/ssh/ssh_host_ed25519_key" -C urban-edge
+
+if compgen -G "$D/etc/network/*.network" >/dev/null; then
+  install -d /run/systemd/network
+  cp "$D"/etc/network/*.network /run/systemd/network/
+fi
+
+# KEY=value from the installer's text file on the ESP: CR/LF tolerant, only safe characters, never executed
+value() {
+  tr -d '\r' < "$2" | sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\([A-Za-z0-9._-]*\)[[:space:]]*$/\1/p" | tail -n 1
+}
+if [ ! -f "$D/etc/unit.conf" ] && [ -f /boot/efi/urban-unit.txt ]; then
+  unit=$(value UNIT /boot/efi/urban-unit.txt)
+  serial=$(value SERIAL /boot/efi/urban-unit.txt)
+  if [[ "$unit" =~ ^edge-[A-Za-z0-9._-]+$ ]] && [ "$unit" != "edge-J-00" ]; then
+    printf "UNIT=%s\nSERIAL=%s\n" "$unit" "$serial" > "$D/etc/unit.conf"
+  fi
+fi
+
+install -d /run/issue.d
+if [ ! -f "$D/etc/unit.conf" ]; then
+  msg="URBAN-ENROLMENT none: this unit has no identity yet. Set UNIT and SERIAL in urban-unit.txt on the URBAN-ESP partition and reboot."
+  echo "$msg"
+  printf "\n%s\n\n" "$msg" > /run/issue.d/50-urban.issue
+  exit 0
+fi
+UNIT=$(sed -n 's/^UNIT=//p' "$D/etc/unit.conf")
+SERIAL=$(sed -n 's/^SERIAL=//p' "$D/etc/unit.conf")
+KEY="$D/etc/pki/edge/$UNIT.key"
+if [ ! -f "$KEY" ]; then
+  /opt/urban/.venv/bin/python -m urban.edge --keygen --unit "$UNIT" --serial "$SERIAL" --pki "$D/etc/pki" > "$D/etc/enrolment.txt"
+  chown urban:urban "$KEY"
+  chmod 600 "$KEY"
+fi
+fingerprint=$(sed -n 's/^fingerprint: *\([0-9A-F-]*\).*/\1/p' "$D/etc/enrolment.txt")
+code=$(grep -o 'URBAN1:[^[:space:]]*' "$D/etc/enrolment.txt")
+echo "URBAN-ENROLMENT unit=$UNIT serial=${SERIAL:--} fingerprint=$fingerprint code=$code"
+printf "\nURBAN Edge unit %s, key fingerprint %s\nenrolment code: %s\n\n" "$UNIT" "$fingerprint" "$code" > /run/issue.d/50-urban.issue

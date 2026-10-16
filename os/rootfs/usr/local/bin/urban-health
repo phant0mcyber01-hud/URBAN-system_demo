@@ -1,0 +1,27 @@
+#!/bin/bash
+# After every boot: a slot that passed its self-check is marked good. One that failed falls back to the other
+# slot - but only if the other slot is known good. A unit whose only good system fails its self-check must not
+# make itself unbootable: it stays up, keeps this slot bootable, and says loudly that it is degraded.
+ENV=/boot/efi/EFI/BOOT/grubenv
+slot=$(sed -n 's/.*rauc\.slot=\([AB]\).*/\1/p' /proc/cmdline)
+other=$([ "$slot" = A ] && echo B || echo A)
+if systemctl is-active --quiet urban-os-check; then
+  if rauc status mark-good booted >/dev/null 2>&1; then
+    echo "URBAN-HEALTH good slot=$slot"
+  else
+    grub-editenv "$ENV" set "${slot}_OK=1" "${slot}_TRY=0"  # RAUC unreachable: keep the boot state right by hand
+    echo "URBAN-HEALTH good slot=$slot (marked without RAUC)"
+  fi
+  exit 0
+fi
+if grub-editenv "$ENV" list | grep -qx "${other}_OK=1"; then
+  rauc status mark-bad booted >/dev/null 2>&1 || grub-editenv "$ENV" set "${slot}_OK=0" "${slot}_TRY=0"
+  echo "URBAN-HEALTH bad slot=$slot: rebooting into slot $other"
+  sleep 3
+  systemctl reboot
+else
+  grub-editenv "$ENV" set "${slot}_TRY=0"  # the only system there is: it must stay bootable
+  install -d /run/urban
+  echo "self-check failed and there is no other good slot" > /run/urban/degraded
+  echo "URBAN-HEALTH degraded slot=$slot: no other good slot, staying up"
+fi

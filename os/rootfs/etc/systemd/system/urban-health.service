@@ -1,0 +1,13 @@
+[Unit]
+Description=URBAN Edge OS: mark this slot good, or fall back to the other one
+After=urban-os-check.service
+Wants=urban-os-check.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/urban-health
+StandardOutput=journal+console
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,6 @@
+# URBAN Edge unit identity, read once at first boot.
+# After writing the image onto the unit's disk, open this partition (URBAN-ESP, it shows up on any laptop)
+# and set the unit id of the junction and the serial number printed on the box. Then boot the unit:
+# it makes its key and shows the enrolment code on its screen and serial console.
+UNIT=edge-J-00
+SERIAL=

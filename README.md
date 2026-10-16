@@ -191,6 +191,8 @@ cp .env.example .env
 | [docs/architecture.md](docs/architecture.md) · [docs/software.md](docs/software.md) | как устроен код |
 | [docs/benchmark.md](docs/benchmark.md) | замер пользы, со всеми оговорками |
 | [deploy/README.md](deploy/README.md) | установка на сервер и подключение блоков |
+| [docs/edge-os.md](docs/edge-os.md) | ОС блока на перекрёстке: сборка образа, первая загрузка, обновления и откат |
+| [docs/vision.md](docs/vision.md) | зрение блока: камера → нейросеть → очередь в метрах |
 
 <details>
 <summary>Структура кода</summary>
@@ -213,6 +215,7 @@ backend/urban/     платформа на Python
 backend/tests/     165 тестов
 web/src/           интерфейс: карта, панели, вход
 deploy/            установка на сервер
+os/                ОС блока URBAN Edge: сборка образа и проверки в виртуальной машине
 docs/              документы
 ```
 

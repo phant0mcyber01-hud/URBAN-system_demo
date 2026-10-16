@@ -1,0 +1,12 @@
+[Unit]
+Description=URBAN Edge OS self-check
+After=urban-prepare.service nftables.service ssh.service systemd-networkd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/urban-os-check
+StandardOutput=journal+console
+
+[Install]
+WantedBy=multi-user.target

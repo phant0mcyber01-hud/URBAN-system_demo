@@ -1,0 +1,10 @@
+# URBAN Edge OS. The root is a read-only squashfs slot (A or B, from the kernel command line).
+# Everything that changes lives on the data partition or in memory.
+PARTLABEL=urban-data  /var/lib/urban  ext4   defaults,noatime,nodev,nosuid  0 2
+PARTLABEL=esp         /boot/efi       vfat   umask=0077,noatime             0 2
+tmpfs                 /tmp            tmpfs  mode=1777,nosuid,nodev,size=128M  0 0
+tmpfs                 /var/tmp        tmpfs  mode=1777,nosuid,nodev,size=32M   0 0
+tmpfs                 /var/log        tmpfs  mode=0755,nosuid,nodev,size=64M   0 0
+tmpfs                 /var/cache      tmpfs  mode=0755,nosuid,nodev,size=32M   0 0
+tmpfs                 /var/lib/systemd tmpfs mode=0755,nosuid,nodev,size=16M   0 0
+tmpfs                 /var/lib/private tmpfs mode=0700,nosuid,nodev,size=4M    0 0

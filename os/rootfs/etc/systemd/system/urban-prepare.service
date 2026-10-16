@@ -1,0 +1,16 @@
+[Unit]
+Description=URBAN Edge: data partition, SSH host key, network, unit identity and key
+DefaultDependencies=no
+RequiresMountsFor=/var/lib/urban /boot/efi
+After=local-fs.target
+Before=network-pre.target systemd-networkd.service ssh.service sysinit.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/urban-prepare
+StandardOutput=journal+console
+
+[Install]
+WantedBy=sysinit.target

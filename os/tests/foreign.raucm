@@ -1,0 +1,9 @@
+[update]
+compatible=urban-edge-x86_64
+version=2
+
+[bundle]
+format=verity
+
+[image.rootfs]
+filename=rootfs.img
