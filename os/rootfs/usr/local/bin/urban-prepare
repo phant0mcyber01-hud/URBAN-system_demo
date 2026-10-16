@@ -28,11 +28,9 @@ if [ ! -f "$D/etc/unit.conf" ] && [ -f /boot/efi/urban-unit.txt ]; then
   fi
 fi
 
-install -d /run/issue.d
 if [ ! -f "$D/etc/unit.conf" ]; then
-  msg="URBAN-ENROLMENT none: this unit has no identity yet. Set UNIT and SERIAL in urban-unit.txt on the URBAN-ESP partition and reboot."
-  echo "$msg"
-  printf "\n%s\n\n" "$msg" > /run/issue.d/50-urban.issue
+  echo "URBAN-ENROLMENT none: this unit has no identity yet. Set UNIT and SERIAL in urban-unit.txt on the URBAN-ESP partition and reboot."
+  /usr/local/bin/urban-console
   exit 0
 fi
 UNIT=$(sed -n 's/^UNIT=//p' "$D/etc/unit.conf")
@@ -46,4 +44,4 @@ fi
 fingerprint=$(sed -n 's/^fingerprint: *\([0-9A-F-]*\).*/\1/p' "$D/etc/enrolment.txt")
 code=$(grep -o 'URBAN1:[^[:space:]]*' "$D/etc/enrolment.txt")
 echo "URBAN-ENROLMENT unit=$UNIT serial=${SERIAL:--} fingerprint=$fingerprint code=$code"
-printf "\nURBAN Edge unit %s, key fingerprint %s\nenrolment code: %s\n\n" "$UNIT" "$fingerprint" "$code" > /run/issue.d/50-urban.issue
+/usr/local/bin/urban-console  # the same, on the unit's own screen

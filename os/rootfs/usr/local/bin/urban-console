@@ -1,0 +1,36 @@
+#!/bin/bash
+# What the unit's own screen shows above the login prompt: who this unit is, its key, its enrolment code,
+# the result of the last self-check and its address. An installer plugs in a monitor and reads it; nothing
+# has to be typed. Written to /run (the root is read-only) and linked from /etc/issue.d; getty is asked to
+# redraw. Called by urban-prepare, urban-os-check and urban-health.
+D=/var/lib/urban
+OUT=/run/urban/console.issue
+install -d /run/urban
+unit=$(sed -n 's/^UNIT=//p' "$D/etc/unit.conf" 2>/dev/null)
+serial=$(sed -n 's/^SERIAL=//p' "$D/etc/unit.conf" 2>/dev/null)
+fingerprint=$(sed -n 's/^fingerprint: *\([0-9A-F-]*\).*/\1/p' "$D/etc/enrolment.txt" 2>/dev/null)
+code=$(grep -o 'URBAN1:[^[:space:]]*' "$D/etc/enrolment.txt" 2>/dev/null)
+check=$(cat /run/urban/os-check 2>/dev/null || echo "running")
+health=$(cat /run/urban/health 2>/dev/null || echo "waiting for the self-check")
+version=$(sed -n 's/^VERSION=//p' /etc/urban-os-release)
+slot=$(sed -n 's/.*rauc\.slot=\([AB]\).*/\1/p' /proc/cmdline)
+{
+  echo "  ------------------------------------------------------------------------------"
+  if [ -n "$unit" ]; then
+    printf "  unit          %s    serial %s\n" "$unit" "${serial:--}"
+    printf "  key           %s\n" "${fingerprint:-making it now...}"
+    printf "  enrolment     %s\n" "${code:-}"
+    printf "                (paste it in the platform: Devices -> Enrol a unit; compare the key above)\n"
+  else
+    echo "  unit          NOT SET: write UNIT=edge-J-.. and SERIAL=.. into urban-unit.txt"
+    echo "                on the URBAN-ESP partition of this disk, then restart the unit"
+  fi
+  printf "  system        URBAN Edge OS %s, slot %s\n" "$version" "$slot"
+  printf "  self-check    %s\n" "$check"
+  printf "  health        %s\n" "$health"
+  printf "  address       \\\\4\n"
+  echo "  maintenance   SSH with a key only - there are no passwords on this unit"
+  echo "  ------------------------------------------------------------------------------"
+  echo
+} > "$OUT.tmp" && mv "$OUT.tmp" "$OUT"
+agetty --reload 2>/dev/null || true

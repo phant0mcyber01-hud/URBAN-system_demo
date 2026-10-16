@@ -82,7 +82,8 @@ class VM:
              "-drive", f"file={self.disk},format=raw,if=virtio",
              "-netdev", "user,id=n0,hostfwd=tcp:127.0.0.1:2222-:22", "-device", "virtio-net-pci,netdev=n0",
              "-device", "i6300esb", "-watchdog-action", "reset",
-             "-display", "none", "-serial", "stdio", "-monitor", "none", "-name", self.name],
+             "-display", "none", "-serial", "stdio", "-monitor", f"unix:/tmp/{self.name}.mon,server,nowait",
+             "-name", self.name],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
         threading.Thread(target=self._read, daemon=True).start()
 
@@ -143,6 +144,14 @@ class VM:
             log = self.ssh("journalctl -u rauc --no-pager -n 25 -o cat", check=False).stdout
             raise Fail("rauc install failed: " + r.stderr.strip() + "\n" + log)
         return r
+
+    def screendump(self, path):
+        """What the unit's own monitor shows (the VGA console), as a PPM picture."""
+        import socket as _socket
+        with _socket.socket(_socket.AF_UNIX) as mon:
+            mon.connect(f"/tmp/{self.name}.mon")
+            mon.sendall(("screendump " + path + chr(10)).encode())
+            time.sleep(2)
 
     def reboot(self):
         self.ssh("systemctl reboot", check=False)
@@ -344,6 +353,19 @@ if __name__ == "__main__":
             boot()
         elif what == "firstboot":
             firstboot()
+        elif what == "screen":  # the unit as a person sees it: its console screen and its maintenance command
+            vm = VM("screen")
+            try:
+                vm.start()
+                vm.wait(r"URBAN-OS-CHECK (OK|FAIL)")
+                vm.wait(r"URBAN-HEALTH", 300)
+                vm.wait_ssh()
+                time.sleep(5)
+                vm.screendump(f"{LOGS}/screen.ppm")
+                print("--- urban-unit status ---")
+                print(vm.ssh("urban-unit status", check=False).stdout)
+            finally:
+                vm.stop()
         elif what == "shell":  # debugging: boot version 1, run one command as root, print what it says
             vm = VM("shell")
             try:

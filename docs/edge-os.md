@@ -71,12 +71,50 @@ node os/build.mjs --version 2 --bundle-only   # следующая версия:
 
 ## Первая загрузка
 
-При первой загрузке с указанным `UNIT` блок сам создаёт свой ключ. Ключ никогда не покидает раздел данных. На
-экран, в последовательную консоль и в приглашение входа выводится:
+При первой загрузке с указанным `UNIT` блок сам создаёт свой ключ. Ключ никогда не покидает раздел данных. В
+последовательную консоль выводится строка:
 
 ```
 URBAN-ENROLMENT unit=edge-J-07 serial=URB-0042 fingerprint=A8F1-1E80-B585-C32C code=URBAN1:edge-J-07:…
 ```
+
+### Экран блока
+
+У блока нет рабочего стола — это прибор. Его «лицо» — экран, который виден, если подключить монитор: монтажнику
+ничего не нужно набирать. Так он выглядит (снимок из проверки в QEMU, `vm.py screen`):
+
+![Экран блока URBAN Edge OS](img/edge-os-screen.png)
+
+То же текстом:
+
+```
+      ______
+     /  ||  \       U R B A N   E D G E   O S
+    / --++-- \      traffic signal unit  urban-edge
+    \   ||   /      Fri Oct 16  2026  09:01:51
+     \______/
+
+  ------------------------------------------------------------------------------
+  unit          edge-J-07    serial URB-TEST
+  key           1E10-0CBB-53CF-64BB
+  enrolment     URBAN1:edge-J-07:URB-TEST:06fc…:AB9CBE
+                (paste it in the platform: Devices -> Enrol a unit; compare the key above)
+  system        URBAN Edge OS 1, slot A
+  self-check    OK - read-only system, data writable, firewall on, watchdog 30s
+  health        good - this system is marked working
+  address       10.0.2.15
+  maintenance   SSH with a key only - there are no passwords on this unit
+  ------------------------------------------------------------------------------
+
+urban-edge login:
+```
+
+Экран собирает `urban-console`. Его вызывают службы загрузки (`urban-prepare`, `urban-os-check`, `urban-health`),
+и он обновляется по мере загрузки: сначала «running», потом итог самопроверки, потом решение о слоте. Если
+самопроверка не прошла, на экране причина («FAILED - …»), а в строке health — «BAD» (откат на прошлую систему)
+или «DEGRADED» (вызвать обслуживание). Если блоку не задано имя, экран говорит, что вписать в `urban-unit.txt`.
+Корень системы только для чтения, поэтому живая часть лежит в `/run/urban/console.issue`, а
+`/etc/issue.d/50-urban.issue` — ссылка на неё. Адрес подставляет сам getty, он всегда текущий.
 
 Дальше как в «Устройства → Подключить блок»: администратор вставляет код, сверяет отпечаток, скачивает комплект.
 На блоке, по SSH:

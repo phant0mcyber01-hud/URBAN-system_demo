@@ -35,9 +35,14 @@ fi
 /opt/urban/.venv/bin/python -c "import urban.edge.__main__" 2>/dev/null || fail+=("URBAN software does not start")
 systemctl cat urban-edge@check.service >/dev/null 2>&1 || fail+=("urban-edge@ service missing")
 
+install -d /run/urban
 if [ ${#fail[@]} -eq 0 ]; then
   echo "URBAN-OS-CHECK OK version=$version slot=$slot root=ro data=rw firewall=on watchdog=$wd unit=$unit"
+  echo "OK - read-only system, data writable, firewall on, watchdog $wd" > /run/urban/os-check
+  /usr/local/bin/urban-console
   exit 0
 fi
 echo "URBAN-OS-CHECK FAIL version=$version slot=$slot: $(IFS=';'; echo "${fail[*]}")"
+echo "FAILED - $(IFS=';'; echo "${fail[*]}")" > /run/urban/os-check
+/usr/local/bin/urban-console
 exit 1

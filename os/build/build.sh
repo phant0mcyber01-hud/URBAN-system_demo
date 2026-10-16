@@ -89,6 +89,9 @@ rm -rf "$ROOT/etc/urban"; ln -s /var/lib/urban/etc "$ROOT/etc/urban"
 mkdir -p "$ROOT/var/lib/urban" "$ROOT/boot/efi"
 rm -f "$ROOT"/etc/ssh/ssh_host_*                       # every unit makes its own at first boot
 ln -sf /run/systemd/resolve/stub-resolv.conf "$ROOT/etc/resolv.conf"
+# the unit's screen: getty reads /etc/issue.d (not /run) when /etc/issue exists, and the root is read-only,
+# so the live part is a link into /run that urban-console rewrites
+mkdir -p "$ROOT/etc/issue.d"; ln -sf /run/urban/console.issue "$ROOT/etc/issue.d/50-urban.issue"
 : > "$ROOT/etc/machine-id"                               # empty: systemd keeps a transient one on a read-only root
 echo urban-edge > "$ROOT/etc/hostname"
 printf "127.0.0.1 localhost\n127.0.1.1 urban-edge\n" > "$ROOT/etc/hosts"
