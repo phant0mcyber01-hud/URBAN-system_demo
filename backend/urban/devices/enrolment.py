@@ -75,10 +75,13 @@ ENV_TEMPLATE = """# URBAN Edge unit {unit} at {junction} {name}
 # systemd reads this file: comments only on their own lines, never after a value.
 PLATFORM={platform}
 SERVER_NAME={server_name}
-# none | relay (Modbus relay board) | ntcip (SNMP to the controller)
+# none | contacts (plan-selection inputs, any controller that has them) | ntcip | profile
+# which one: python -m urban.equipment probe <controller>, docs/controllers.md
 ADAPTER=none
-# relay: serial port, e.g. /dev/ttyUSB0; ntcip: controller address, e.g. 192.168.10.2:161
+# contacts: serial port, host:port of an Ethernet relay module or /dev/gpiochipN; ntcip, profile: controller address
 CONTROLLER=
+# contacts and profile options go here, e.g. --bus gpio --gpio-lines 17,27,22,23 --enable-contact 3 --feedback-input 0
+EXTRA=
 # queue lengths written by the camera pipeline
 SENSORS=/run/urban/queues.json
 # cabinet temperature (DS18B20: /sys/bus/w1/devices/28-.../w1_slave); empty: the computer's own board

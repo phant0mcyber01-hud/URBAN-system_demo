@@ -31,10 +31,12 @@ export function describe(kind, d, S) {
       };
     case 'detectors': {
       const [n, speed, queue] = S.cams[d.id] ?? [0, 0, 0];
+      const passport = S.junctions?.find((j) => j.id === d.id)?.passport.status;
       return {
-        title: d.name, sub: `регулируемый перекрёсток · детектор очереди ${d.id}`,
-        action: { tab: 'transport', label: 'Открыть «Пробки и светофоры»' },
-        rows: [['Устройство URBAN Edge', (() => { const u = S.dev[d.id]; if (!u) return 'нет сведений';
+        title: d.name, sub: `регулируемый перекрёсток ${d.id}`,
+        action: { tab: 'junctions', junction: d.id, label: 'Открыть паспорт перекрёстка' },
+        rows: [['Паспорт', passport === 'approved' ? 'утверждён' : passport === 'draft' ? 'черновик: только наблюдение' : '—'],
+          ['Устройство URBAN Edge', (() => { const u = S.dev[d.id]; if (!u) return 'не установлено';
           return u.lock ? 'заблокировано' : u.s === 'revoked' ? 'отозвано' : u.o ? (u.al.length ? u.al[0][1] : 'на связи, норма') : 'нет связи'; })()],
           ...((S.dev[d.id]?.t != null) ? [['Температура в шкафу', `${S.dev[d.id].t} °C`]] : []),
           ['Очередь, самый длинный подъезд', queue == null ? 'нет данных' : `${queue} м`],

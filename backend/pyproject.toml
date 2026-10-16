@@ -28,5 +28,8 @@ urban-city = "urban.city.__main__:main"
 [tool.setuptools.packages.find]
 include = ["urban*"]
 
+[tool.setuptools.package-data]
+"urban.equipment" = ["profiles/*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

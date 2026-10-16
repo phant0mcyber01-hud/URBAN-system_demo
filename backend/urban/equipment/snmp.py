@@ -83,6 +83,39 @@ def _number(tag: int, body: bytes) -> int:
     return int.from_bytes(body, "big", signed=tag == INTEGER)
 
 
+MISSING = {0x80: "noSuchObject", 0x81: "noSuchInstance", 0x82: "endOfMibView"}  # SNMPv2 varbind exceptions
+
+
+def _any(tag: int, body: bytes):
+    """A varbind value of any common type: int, str (OCTET STRING, decoded leniently) or a dotted OID.
+    ValueError for an exception value (the object does not exist) or a type we do not read."""
+    if tag in NUMBERS:
+        return _number(tag, body)
+    if tag == OCTET_STRING:
+        return body.decode("utf-8", "replace").strip("\x00").strip()
+    if tag == OID:
+        return _decode_oid(body)
+    if tag in MISSING:
+        raise ValueError(MISSING[tag])
+    raise ValueError(f"unsupported type 0x{tag:02x}")
+
+
+def first_varbind(data: bytes) -> tuple[int, bytes]:
+    """(tag, body) of the first varbind of a v1/v2c response."""
+    _, msg, _ = _read(data, 0)
+    _, _, at = _read(msg, 0)
+    _, _, at = _read(msg, at)
+    _, pdu, _ = _read(msg, at)
+    _, _, at = _read(pdu, 0)
+    _, _, at = _read(pdu, at)
+    _, _, at = _read(pdu, at)
+    _, binds, _ = _read(pdu, at)
+    _, bind, _ = _read(binds, 0)
+    _, _, at = _read(bind, 0)
+    tag, body, _ = _read(bind, at)
+    return tag, body
+
+
 # ---- decoding, only as far as the response status
 def _read(data: bytes, at: int) -> tuple[int, bytes, int]:
     """(tag, body, index after) of the TLV at `at`; ValueError if the data ends before the TLV does."""
@@ -152,6 +185,15 @@ class SnmpClient:
             return decode_value(data)
         except (ValueError, IndexError) as err:
             raise OSError(f"controller answered {oid} with {err}") from err
+
+    def read(self, oid: str):
+        """Read one object of any common type (int, str, OID) - for identifying a controller, never for control."""
+        request_id = secrets.randbelow(0x7FFFFFFF)
+        data = self._request(encode_get(self.community, oid, request_id, self.version), request_id, "read")
+        try:
+            return _any(*first_varbind(data))
+        except (ValueError, IndexError) as err:
+            raise OSError(f"{oid}: {err}") from err
 
     def _request(self, packet: bytes, request_id: int, what: str) -> bytes:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
@@ -374,6 +416,14 @@ class SnmpV3Client:
             return _number(*values[0])
         except (ValueError, IndexError) as err:
             raise OSError(f"controller answered {oid} with {err}") from err
+
+    def read(self, oid: str):
+        """Read one object of any common type over authPriv (int, str, OID)."""
+        values = self._request(GET_REQUEST, oid, None)
+        try:
+            return _any(*values[0])
+        except (ValueError, IndexError) as err:
+            raise OSError(f"{oid}: {err}") from err
 
     def _request(self, pdu_tag: int, oid: str, value: int | None) -> list:
         what = "write" if pdu_tag == SET_REQUEST else "read"

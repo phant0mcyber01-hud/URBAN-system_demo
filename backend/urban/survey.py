@@ -21,7 +21,8 @@ FIELDS = [
     ("controller_vendor", "Контроллер: производитель"),
     ("controller_model", "Контроллер: модель"),
     ("controller_year", "Контроллер: год выпуска"),
-    ("protocol", "Протокол связи (ntcip / gbt20999 / relay / другой / нет)"),
+    ("protocol", "Протокол связи (ntcip / contacts / modbus / snmp / gbt20999 / ocit / utmc / другой / нет)"),
+    ("plan_inputs", "Входы внешнего выбора плана или «ДУ» есть (да/нет), сколько и как кодируется план"),
     ("plan_count", "Сколько планов можно загрузить"),
     ("ports", "Порты и входы (Ethernet, RS-485, входы выбора плана)"),
     ("conflict_monitor", "Монитор конфликтов есть (да/нет)"),
@@ -41,9 +42,14 @@ FIELDS = [
     ("notes", "Заметки"),
 ]
 YES = {"да", "yes", "y", "1", "+"}
+CONTACTS = "входы выбора плана: адаптер есть (`--adapter contacts`), любая кодировка, плата реле или GPIO"
 SUPPORTED = {"ntcip": "NTCIP по SNMPv3: адаптер есть (`--adapter ntcip`)",
-             "relay": "входы выбора плана: адаптер есть (`--adapter relay`, плата реле)",
-             "gbt20999": "GB/T 20999: адаптера нет, нужен текст стандарта и контроллер на стенд"}
+             "contacts": CONTACTS, "relay": CONTACTS, "дк": CONTACTS, "ду": CONTACTS,
+             "modbus": "Modbus: адаптер есть (`--adapter profile`), нужна карта регистров от производителя",
+             "snmp": "SNMP своего MIB: адаптер есть (`--adapter profile`), нужен MIB от производителя",
+             "gbt20999": "GB/T 20999: своего адаптера нет (нужен текст стандарта); пока — через входы выбора плана",
+             "ocit": "OCIT-O: своего адаптера нет (спецификация по лицензии); пока — через входы выбора плана",
+             "utmc": "UTMC: своего адаптера нет (нужен MIB UG405 и контроллер); пока — через входы выбора плана"}
 
 
 def osm_link(lat: float, lon: float) -> str:
@@ -100,7 +106,9 @@ def summary(rows: list[dict]) -> str:
                      for r in visited)
     stage1 = [r for r in visited if yes(r.get("cabinet_ok")) and yes(r.get("power")) and yes(r.get("space"))
               and (r.get("poles") or "0").strip()[:1].isdigit() and int((r.get("poles") or "0").strip().split()[0]) > 0]
-    stage2 = [r for r in stage1 if (r.get("protocol") or "").strip().lower() in ("ntcip", "relay")]
+    ready = {"ntcip", "contacts", "relay", "дк", "ду"}
+    stage2 = [r for r in stage1 if (r.get("protocol") or "").strip().lower() in ready
+              or (r.get("plan_inputs") or "").strip().lower().startswith(tuple(YES))]
     gaps = {r["junction"]: [q for k, q in FIELDS[:12] if not (r.get(k) or "").strip()] for r in visited}
     lines = [f"# Итог обследования: {len(visited)} из {len(rows)} перекрёстков", ""]
     lines += ["## Контроллеры", "", "| Модель | Сколько |", "|---|---|"]

@@ -1,18 +1,20 @@
 // Platform state drawn on the map: congestion, incidents, utility assets, cameras, the search pin.
 // Pulsing is done with uniform props (radiusScale / opacity), so no attribute is rebuilt per frame.
 import { ColumnLayer, PathLayer, ScatterplotLayer, SolidPolygonLayer } from '@deck.gl/layers';
-import { STATUS } from '../config.js';
+import { ACCENT, STATUS } from '../config.js';
 import { fadeColors, roadWidth } from './staticLayers.js';
 
 // waiting for a decision = amber (warning), under a command = blue (information), trouble = red (alarm)
-const CAM_FILL = { problem: [227, 163, 58, 255], control: [76, 154, 255, 255] };
-const OFFLINE = [229, 83, 75, 255]; // the Edge unit of this junction is not connected or not trusted
-const WARN = [227, 163, 58, 255];   // the unit reports a warning (heat, silence, version)
+const CAM_FILL = { problem: [255, 181, 71, 255], control: [...ACCENT, 255] };
+const OFFLINE = [255, 84, 104, 255]; // the Edge unit of this junction is not connected or not trusted
+const WARN = [255, 181, 71, 255];   // the unit reports a warning (heat, silence, version)
 const ring = (S, d, normal) => {
   const level = S.devLevel(d.id);
   return level === 'alert' ? OFFLINE : level === 'warn' ? WARN : normal;
 };
-const CAM_LINE = { problem: [245, 214, 160, 255], control: [170, 205, 255, 255] };
+const CAM_LINE = { problem: [255, 222, 168, 255], control: [190, 240, 255, 255] };
+const APPROVED = [...ACCENT, 255];         // a junction whose passport is approved: URBAN may command it
+const DRAFT = [96, 118, 128, 255];         // a draft passport: watched only
 
 function cone(scene, cam) {
   const a = (cam.bearing * Math.PI) / 180;
@@ -42,21 +44,21 @@ export function overlayLayers(scene, S, show, { main, pulse }) {
     new ScatterplotLayer({
       id: 'incidents', data: S.activeIncidents, getPosition: (d) => [d.lon, d.lat], radiusUnits: 'meters',
       getRadius: 22, radiusScale: 1 + 0.6 * pulse, radiusMinPixels: 9, stroked: true, lineWidthMinPixels: 2,
-      getFillColor: [255, 60, 60, 90], getLineColor: [255, 90, 90, 255], pickable: main,
+      getFillColor: [255, 84, 104, 80], getLineColor: [255, 84, 104, 255], pickable: main,
     }),
   ];
   if (main) {
     layers.push(
       new SolidPolygonLayer({
         id: 'cam-cone', data: scene.cams.filter((c) => c.id === S.cam), visible: on('cameras'),
-        getPolygon: (c) => cone(scene, c), getFillColor: [76, 154, 255, 34], material: false,
+        getPolygon: (c) => cone(scene, c), getFillColor: [...ACCENT, 34], material: false,
       }),
       new ScatterplotLayer({
-        id: 'detectors', data: scene.detectors, visible: on('cameras'), getPosition: (d) => d.p, radiusUnits: 'meters',
-        getRadius: 5, radiusMinPixels: 3.5, stroked: true, lineWidthMinPixels: 1.5, pickable: true,
-        getFillColor: (d) => CAM_FILL[S.camStatus[d.id]] ?? [20, 22, 25, 255 * d.v],
-        getLineColor: (d) => ring(S, d, CAM_LINE[S.camStatus[d.id]] ?? [128, 136, 146, 255 * d.v]),
-        updateTriggers: { getFillColor: S.camVersion, getLineColor: [S.camVersion, S.devVersion] },
+        id: 'detectors', data: scene.detectors, visible: on('junctions'), getPosition: (d) => d.p, radiusUnits: 'meters',
+        getRadius: 6, radiusMinPixels: 4, stroked: true, lineWidthMinPixels: 1.6, pickable: true,
+        getFillColor: (d) => CAM_FILL[S.camStatus[d.id]] ?? [4, 7, 10, 230 * d.v],
+        getLineColor: (d) => ring(S, d, CAM_LINE[S.camStatus[d.id]] ?? (S.approved(d.id) ? APPROVED : DRAFT)),
+        updateTriggers: { getFillColor: S.camVersion, getLineColor: [S.camVersion, S.devVersion, S.junctionsVersion] },
       }),
       new ScatterplotLayer({
         id: 'cams', data: scene.cams, visible: on('cameras'), getPosition: (d) => d.p, radiusUnits: 'meters', getRadius: 7,
@@ -68,8 +70,8 @@ export function overlayLayers(scene, S, show, { main, pulse }) {
       }),
       new ScatterplotLayer({
         id: 'pin', data: S.pin ? [S.pin] : [], getPosition: (d) => d, radiusUnits: 'pixels', getRadius: 9,
-        radiusScale: 1 + 0.35 * pulse, filled: true, getFillColor: [255, 255, 255, 40], stroked: true,
-        getLineColor: [255, 255, 255, 255], lineWidthMinPixels: 2,
+        radiusScale: 1 + 0.35 * pulse, filled: true, getFillColor: [...ACCENT, 50], stroked: true,
+        getLineColor: [...ACCENT, 255], lineWidthMinPixels: 2,
       }),
     );
   }

@@ -123,9 +123,10 @@ sudo systemctl start urban && sudo journalctl -u urban -f
 ```
 PLATFORM=urban.example.uz:8443
 SERVER_NAME=urban.example.uz
-# none | relay (плата реле по Modbus RTU) | ntcip (SNMP к контроллеру)
+# none | contacts (входы выбора плана: любой контроллер, у которого они есть) | ntcip | profile
+# какой нужен: python -m urban.equipment probe <адрес контроллера>, docs/controllers.md
 ADAPTER=ntcip
-# relay: порт платы, например /dev/ttyUSB0; ntcip: адрес контроллера, например 192.168.10.2:161
+# contacts: порт платы /dev/ttyUSB0, адрес модуля реле 192.168.10.5:502 или /dev/gpiochip0; ntcip, profile: адрес контроллера
 CONTROLLER=192.168.10.2:161
 # ntcip: SNMPv3 authPriv (по умолчанию); пароли от 8 символов, файл с правами 600
 SNMP_USER=urban

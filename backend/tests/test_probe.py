@@ -1,52 +1,92 @@
-"""A real unit reports only what its sensors measure; an absent sensor is unknown, never a made-up value."""
-from urban.devices import crypto
-from urban.devices.health import assess
-from urban.edge.device import EdgeDevice
-from urban.edge.probe import Probe, read_door, read_temperature
-from urban.equipment.adapter import NoController
+"""The probe: who is the controller, what does it speak, which adapter - without writing anything."""
+import socket
+import threading
+
+from test_contact_buses import FakeModbusTcp
+from urban.equipment import snmp
+from urban.equipment.ntcip import SYSTEM_PATTERN_CONTROL, UNIT_BACKUP_TIME
+from urban.equipment.probe import enterprise, probe
 
 
-def test_temperature_files(tmp_path):
-    zone = tmp_path / "temp"
-    zone.write_text("47312\n")  # a Linux thermal zone: millidegrees
-    assert read_temperature(zone) == 47.3
-    w1 = tmp_path / "w1_slave"
-    w1.write_text("72 01 4b 46 7f ff 0e 10 57 : crc=57 YES\n72 01 4b 46 7f ff 0e 10 57 t=23125\n")
-    assert read_temperature(w1) == 23.1
-    w1.write_text("72 01 4b 46 7f ff 0e 10 57 : crc=00 NO\n")  # a failed read is no reading
-    assert read_temperature(w1) is None
-    zone.write_text("not a number")
-    assert read_temperature(zone) is None
-    assert read_temperature(tmp_path / "missing") is None
+def snmp_agent(objects: dict):
+    """A v1/v2c agent answering GetRequests from `objects` (oid -> int, str, or ("oid", dotted)); records requests."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", 0))
+    seen = []
+
+    def value(v):
+        if v is None:
+            return snmp._tlv(0x80, b"")  # noSuchObject
+        if isinstance(v, tuple):
+            return snmp._oid(v[1])
+        if isinstance(v, str):
+            return snmp._tlv(snmp.OCTET_STRING, v.encode())
+        return snmp._int(v)
+
+    def serve():
+        while True:
+            try:
+                data, peer = sock.recvfrom(1500)
+            except OSError:
+                return
+            _, msg, _ = snmp._read(data, 0)
+            _, version, at = snmp._read(msg, 0)
+            _, community, at = snmp._read(msg, at)
+            tag, pdu, _ = snmp._read(msg, at)
+            _, rid, at = snmp._read(pdu, 0)
+            _, _, at = snmp._read(pdu, at)
+            _, _, at = snmp._read(pdu, at)
+            _, binds, _ = snmp._read(pdu, at)
+            _, bind, _ = snmp._read(binds, 0)
+            _, oid_body, _ = snmp._read(bind, 0)
+            oid = snmp._decode_oid(oid_body)
+            seen.append((tag, oid))
+            vb = snmp._tlv(snmp.SEQUENCE, snmp._oid(oid) + value(objects.get(oid)))
+            reply = snmp._tlv(snmp.GET_RESPONSE, snmp._tlv(snmp.INTEGER, rid) + snmp._int(0) + snmp._int(0)
+                              + snmp._tlv(snmp.SEQUENCE, vb))
+            sock.sendto(snmp._tlv(snmp.SEQUENCE, snmp._tlv(snmp.INTEGER, version) + snmp._tlv(snmp.OCTET_STRING, community)
+                                  + reply), peer)
+    threading.Thread(target=serve, daemon=True).start()
+    return sock, seen
 
 
-def test_door_switch(tmp_path):
-    gpio = tmp_path / "value"
-    gpio.write_text("1\n")
-    assert read_door(gpio) == "open"
-    gpio.write_text("0\n")
-    assert read_door(gpio) == "closed"
-    assert read_door(gpio, open_value="0") == "open"  # a switch wired the other way round
-    assert read_door(tmp_path / "missing") is None
+def test_an_ntcip_controller_is_recognised_and_nothing_is_written():
+    agent, seen = snmp_agent({"1.3.6.1.2.1.1.1.0": "ASC/3 traffic controller fw 4.2",
+                              "1.3.6.1.2.1.1.2.0": ("oid", "1.3.6.1.4.1.1206.3.21.2.2"),
+                              UNIT_BACKUP_TIME: 0, SYSTEM_PATTERN_CONTROL: 0})
+    try:
+        client = snmp.SnmpClient("127.0.0.1", agent.getsockname()[1], community="public", timeout=1, retries=0)
+        report = probe("127.0.0.1", client, modbus_port=None)
+    finally:
+        agent.close()
+    s = report["snmp"]
+    assert s["descr"].startswith("ASC/3") and s["enterprise"] == 1206 and s["ntcip_1202"] is True
+    assert report["recommend"]["adapter"] == "ntcip"
+    assert all(tag == 0xA0 for tag, _ in seen)  # GetRequest only: a probe never sets anything
 
 
-def test_a_real_unit_never_invents_its_cabinet(tmp_path):
-    key = crypto.new_key()
-    dev = EdgeDevice("edge-J-01", "J-01", key, crypto.load_public(crypto.public_hex(crypto.new_key())), NoController(),
-                     probe=Probe(temp=str(tmp_path / "no-sensor"), door=None))
-    health = dev.report({})["health"]
-    assert health["temp"] is None and health["door"] is None  # no sensor, no number
-    (tmp_path / "t").write_text("31000")
-    (tmp_path / "d").write_text("1")
-    dev.probe = Probe(temp=str(tmp_path / "t"), door=str(tmp_path / "d"))
-    health = dev.report({})["health"]
-    assert health["temp"] == 31.0 and health["door"] == "open"
-    alerts = assess({"status": "active", "online": True, "age": 0, "health": health})
-    assert any(a["kind"] == "door" for a in alerts)  # a real open door locks the junction
+def test_snmp_without_ntcip_and_a_modbus_device():
+    agent, _ = snmp_agent({"1.3.6.1.2.1.1.1.0": "Vendor controller", "1.3.6.1.2.1.1.2.0": ("oid", "1.3.6.1.4.1.99999.1")})
+    dev = FakeModbusTcp(identity=["Some Vendor", "TSC-8", "2.1"])
+    try:
+        client = snmp.SnmpClient("127.0.0.1", agent.getsockname()[1], community="public", timeout=1, retries=0)
+        report = probe("127.0.0.1", client, modbus_port=dev.port, timeout=1)
+    finally:
+        agent.close()
+        dev.close()
+    assert report["snmp"]["ntcip_1202"] is False and report["snmp"]["enterprise"] == 99999
+    assert "look up 99999" in report["snmp"]["enterprise_name"]  # no guessing about vendors we do not know
+    assert report["modbus"]["identity"] == {"vendor": "Some Vendor", "product": "TSC-8", "revision": "2.1"}
+    assert report["recommend"]["adapter"] == "profile"
 
 
-def test_an_enrolled_unit_that_never_connected_is_not_an_alarm():
-    waiting = {"status": "active", "online": False, "age": None, "first_seen": None, "health": {}}
-    assert assess(waiting) == []
-    lost = {**waiting, "first_seen": "2026-10-15T10:00:00", "age": 300}
-    assert [a["kind"] for a in assess(lost)] == ["offline"]
+def test_a_silent_controller_gets_contacts():
+    free = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    free.bind(("127.0.0.1", 0))
+    port = free.getsockname()[1]
+    free.close()
+    client = snmp.SnmpClient("127.0.0.1", port, timeout=0.3, retries=0)
+    report = probe("127.0.0.1", client, modbus_port=1, timeout=0.3)
+    assert report["snmp"]["answers"] is False and report["modbus"]["answers"] is False
+    assert report["recommend"]["adapter"] == "contacts"
+    assert enterprise("1.3.6.1.4.1.1206.4") == 1206 and enterprise("1.3.6.1.2.1") is None

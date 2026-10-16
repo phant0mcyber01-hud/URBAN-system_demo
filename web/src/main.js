@@ -1,5 +1,7 @@
 // Entry point: loads the scene, wires map, camera window, search, place card and the panel,
 // then runs one animation loop that only updates what moves.
+import '@fontsource/exo-2/500.css';
+import '@fontsource/exo-2/600.css';
 import '@fontsource/ibm-plex-sans/400.css';
 import '@fontsource/ibm-plex-sans/500.css';
 import '@fontsource/ibm-plex-sans/600.css';
@@ -27,7 +29,7 @@ const live = new Live(scene);
 
 // ---- layer menu ----
 const LAYERS = [
-  ['buildings', 'Здания в 3D'], ['traffic', 'Транспортный поток'], ['transit', 'Остановки'],
+  ['junctions', 'Перекрёстки'], ['buildings', 'Здания в 3D'], ['traffic', 'Транспортный поток'], ['transit', 'Остановки'],
   ['cameras', 'Камеры'], ['infra', 'Инфраструктура'], ['pois', 'Службы и больницы'], ['labels', 'Названия улиц'],
 ];
 const DEMO_LAYERS = new Set(['traffic', 'cameras', 'infra']);  // drawn from the twin's simulation only
@@ -49,7 +51,7 @@ $('layers-btn').onclick = () => { $('layers-menu').hidden = !$('layers-menu').hi
 // ---- map, camera window, place card, search, panel ----
 const card = createPlaceCard({
   onClose: () => { S.pin = null; },
-  onAction: (action) => panel.setTab(action.tab),
+  onAction: (action) => { if (action.junction) S.junction = action.junction; panel.setTab(action.tab); },
 });
 
 function select(kind, object, lonlat) {
@@ -190,6 +192,7 @@ async function loadJunctions() {
   if (!S.user) return;
   try {
     S.junctions = await api.get('/api/junctions');
+    S.junctionsVersion++;
     panel.refresh();
   } catch (e) { if (e.message === 'нужно войти заново') signedOut(); }
 }
@@ -262,12 +265,24 @@ function renderMode(city) {
     ? 'Карта и перекрёстки из OpenStreetMap. Очереди и состояние шкафов — от блоков URBAN Edge. Перекрёсток с черновым паспортом только наблюдается.'
     : 'Демо-двойник для показа: трафик, автобусные линии, телеметрия, камеры и сами светофоры смоделированы; сеть и здания из OSM.';
 }
+// the console wakes up: what the sign-in screen says comes from the server, not from an animation
+async function bootLines() {
+  const el = $('boot');
+  let h = null;
+  try { h = await fetch('/api/health').then((r) => (r.ok ? r.json() : null)); } catch { /* shown below */ }
+  const mode = h?.mode === 'field' ? 'оборудование' : h?.mode ? 'демо-двойник' : null;
+  el.innerHTML = h
+    ? [`<li><b>URBAN://</b> сервер на связи</li>`, `<li><b>РЕЖИМ</b> ${esc(mode)}</li>`,
+      `<li><b>БЛОКИ</b> на связи: ${esc(h.devices_online)}</li>`, `<li><b>ВХОД</b> только по учётной записи</li>`].join('')
+    : '<li><b>URBAN://</b> сервер не отвечает — проверьте, что платформа запущена</li>';
+}
 function signedOut() {
   S.user = null;
   if (ws) { const w = ws; ws = null; w.close(); }
   $('users').hidden = true;
   $('enrol').hidden = true;
   $('login').hidden = false;
+  bootLines();
   $('login-pass').value = '';
   $('login-code').value = '';
   $('login-code-row').hidden = true;

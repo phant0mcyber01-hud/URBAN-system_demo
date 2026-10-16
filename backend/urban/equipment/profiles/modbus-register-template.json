@@ -1,0 +1,15 @@
+{
+ "name": "Modbus register controller (template)",
+ "transport": "modbus-tcp",
+ "status": "template: fill in the register map from the controller's manual before use",
+ "notes": "A controller that selects its plan from a holding register. Register 100: plan number (0 = local program); register 101: seconds until the controller drops an external plan by itself, if it has such a timer; register 200: the plan running now. These numbers are placeholders.",
+ "unit": 1,
+ "select": [
+  {"register": 101, "value": "{backup}"},
+  {"register": 100, "value": "{pattern}"}
+ ],
+ "keepalive": "select",
+ "base": [{"register": 100, "value": 0}],
+ "confirm": {"register": 200, "equals": "{pattern}"},
+ "pattern_max": 32
+}

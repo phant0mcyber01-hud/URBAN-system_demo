@@ -12,6 +12,7 @@ export function createState(scene) {
     user: null, // {name, role} of the signed-in account
     history: null, // from /api/history*, loaded when the tab opens
     junctions: null, // passports from /api/junctions
+    junctionsVersion: 0, // bumped when the passports are reloaded, so the map recolours the junctions
     junction: null, // the passport open in the junctions tab
     mode: 'field', // 'field' (the real system: URBAN Edge units) or 'simulation' (the demo twin)
     corridor: false, // green corridor proposals switched on (GREEN_CORRIDOR)
@@ -44,6 +45,8 @@ export function createState(scene) {
     if (sig(dev) !== sig(S.dev)) S.devVersion++;
     S.dev = dev;
   }
+  // a junction with an approved passport, or any junction of the demo twin (its passports count as approved)
+  S.approved = (id) => (S.junctions ? S.junctions.some((j) => j.id === id && j.passport.status === 'approved') : S.mode !== 'field');
   S.online = (junction) => (S.dev[junction]?.o ?? 1) === 1;
   S.devLevel = (junction) => {
     const d = S.dev[junction];

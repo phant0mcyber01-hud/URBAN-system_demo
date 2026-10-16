@@ -6,7 +6,7 @@
 
 ![статус](https://img.shields.io/badge/статус-готовим%20пилот-8a63d2)
 ![python](https://img.shields.io/badge/python-3.11+-3776ab)
-![tests](https://img.shields.io/badge/тесты-183%20проходят-2ea44f)
+![tests](https://img.shields.io/badge/тесты-201%20проходят-2ea44f)
 ![пилот](https://img.shields.io/badge/пилот-Фергана-5cc8ff)
 
 ![Центр управления: камера заметила пробку, оператор переключил светофор на утверждённый план](docs/img/control.png)
@@ -191,6 +191,7 @@ cp .env.example .env
 | [docs/architecture.md](docs/architecture.md) · [docs/software.md](docs/software.md) | как устроен код |
 | [docs/benchmark.md](docs/benchmark.md) | замер пользы, со всеми оговорками |
 | [deploy/README.md](deploy/README.md) | установка на сервер и подключение блоков |
+| [docs/controllers.md](docs/controllers.md) | с какими контроллерами работает блок и как их подключить |
 | [docs/edge-os.md](docs/edge-os.md) | ОС блока на перекрёстке: сборка образа, первая загрузка, обновления и откат |
 | [docs/vision.md](docs/vision.md) | зрение блока: камера → нейросеть → очередь в метрах |
 

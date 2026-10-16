@@ -69,3 +69,25 @@ class ModbusRelayBoard:
         except Exception as err:  # pyserial raises its own errors; the adapter understands OSError
             self.transport = None if self.port else self.transport
             raise OSError(f"relay board: {err}") from err
+
+
+# ---- reading inputs: the controller's feedback contacts, wired to the board's discrete inputs
+READ_INPUTS = 0x02
+
+
+def read_inputs(unit: int, start: int, count: int) -> bytes:
+    """Request frame: read `count` discrete inputs from `start` on."""
+    if not 1 <= unit <= 247 or not 1 <= count <= 2000:
+        raise ValueError("bad unit or input count")
+    return with_crc(bytes([unit, READ_INPUTS]) + start.to_bytes(2, "big") + count.to_bytes(2, "big"))
+
+
+def parse_inputs(response: bytes, unit: int, count: int) -> list[bool]:
+    if len(response) < 5 or crc16(response[:-2]) != int.from_bytes(response[-2:], "little"):
+        raise OSError("relay board: bad or missing answer")
+    if response[1] == (READ_INPUTS | 0x80):
+        raise OSError(f"relay board: exception {response[2]}")
+    if response[0] != unit or response[1] != READ_INPUTS or response[2] != (count + 7) // 8:
+        raise OSError("relay board: answer does not match the request")
+    data = response[3:3 + response[2]]
+    return [bool(data[i // 8] >> (i % 8) & 1) for i in range(count)]

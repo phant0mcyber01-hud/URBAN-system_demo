@@ -7,8 +7,11 @@ All demo units share one local field link to the simulation, which stands for th
 and the controller in each cabinet.
 
 One real unit, on its own computer in a cabinet (the platform in field mode):
-    python -m urban.edge --unit edge-J-21 --platform city.example:8443 --adapter relay --controller /dev/ttyUSB0
+    python -m urban.edge --unit edge-J-21 --platform city.example:8443 --adapter contacts --controller /dev/ttyUSB0
     python -m urban.edge --unit edge-J-21 --platform city.example:8443 --adapter ntcip --controller 192.168.10.2:161
+    python -m urban.edge --unit edge-J-21 --platform city.example:8443 --adapter profile --profile my-controller.json \
+        --controller 192.168.10.2
+Which adapter a controller needs: python -m urban.equipment probe <controller>, and docs/controllers.md.
 Trust: the unit carries the platform's ca.pem (whose TLS it accepts) and root.pub (whose gateway key it
 obeys; the key itself comes in a certificate at session start, and rotations follow, never back).
 Before the first start the unit makes its own key; only the public half leaves it, inside an enrolment code:
@@ -45,9 +48,9 @@ from ..devices import crypto
 from ..devices.enrolment import install_kit, load_kit, make_code
 from ..devices.registry import device_id
 from ..equipment.adapter import NoController
+from ..equipment.endpoint import parse_endpoint  # noqa: F401  (kept importable from here)
 from ..equipment.modbus import ModbusRelayBoard
 from ..equipment.ntcip import NtcipAdapter
-from ..equipment.relay import RelayAdapter
 from ..equipment.snmp import SnmpClient, SnmpV3Client
 from ..junctions import approved_plans, load_all_junctions
 from .device import EdgeDevice
@@ -187,27 +190,87 @@ def read_sensors(path: Path | None) -> dict:
     return out
 
 
-def parse_endpoint(text: str, default_port: int) -> tuple[str, int]:
-    """host, [host]:port, host:port or an IPv6 literal -> (host, port)."""
-    if text.startswith("["):
-        host, _, rest = text[1:].partition("]")
-        return host, int(rest[1:] or default_port) if rest.startswith(":") else default_port
-    if text.count(":") == 1:
-        host, _, port = text.partition(":")
-        return host, int(port or default_port)
-    return text, default_port  # a bare name or a bare IPv6 address
+def _int_list(text: str | None, what: str) -> list[int]:
+    try:
+        return [int(x) for x in (text or "").split(",") if x.strip()]
+    except ValueError:
+        raise SystemExit(f"{what}: comma-separated line numbers, for example 17,27,22")
+
+
+def _codes(text: str | None) -> dict[int, int]:
+    try:
+        return {int(a): int(b) for a, b in (pair.split("=") for pair in (text or "").split(",") if pair.strip())}
+    except ValueError:
+        raise SystemExit("--plan-codes: our=controller pairs, for example 1=3,2=5")
+
+
+def make_contacts(args):
+    """Plan-selection contacts on a relay board (Modbus RTU or TCP) or on the unit's own GPIO lines."""
+    from ..equipment.buses import GpioBus, ModbusRtuBus, ModbusTcpBus
+    from ..equipment.contacts import ContactAdapter, ContactMap, Feedback
+    from ..equipment.modbus_tcp import ModbusTcp
+    try:
+        cmap = ContactMap(args.encoding, args.relays, 0, args.enable_contact, _codes(args.plan_codes))
+    except ValueError as err:
+        raise SystemExit(f"contacts: {err}")
+    feedback = Feedback(args.feedback_input) if args.feedback_input is not None else None
+    if args.bus == "modbus-rtu":
+        bus = ModbusRtuBus(ModbusRelayBoard(args.controller, unit=args.relay_unit, baud=args.baud))
+    elif args.bus == "modbus-tcp":
+        host, port = parse_endpoint(args.controller, 502)
+        bus = ModbusTcpBus(ModbusTcp(host, port, unit=args.relay_unit))
+    else:
+        lines = _int_list(args.gpio_lines, "--gpio-lines")
+        if len(lines) < cmap.width:
+            raise SystemExit(f"--gpio-lines: {cmap.width} lines needed for this contact map, {len(lines)} given")
+        inputs = [args.feedback_input] if feedback is not None else []
+        try:
+            bus = GpioBus(args.controller, lines, inputs, active_low=args.active_low)
+        except OSError as err:
+            raise SystemExit(f"GPIO {args.controller}: {err}")
+        if feedback is not None:
+            feedback = Feedback(0, feedback.timeout)  # the one requested input line
+    return ContactAdapter(bus, {}, cmap, feedback)
+
+
+def snmp_client(args, host: str, port: int):
+    if args.snmp_version == 3:
+        user, auth_pass, priv_pass = (os.getenv(k, "") for k in ("SNMP_USER", "SNMP_AUTH_PASS", "SNMP_PRIV_PASS"))
+        if not (user and auth_pass and priv_pass):
+            raise SystemExit("SNMPv3 needs SNMP_USER, SNMP_AUTH_PASS and SNMP_PRIV_PASS in the environment "
+                             "(the unit's env file); --snmp-version 1 uses a community string instead")
+        try:
+            return SnmpV3Client(host, port, user=user, auth_password=auth_pass, priv_password=priv_pass,
+                                auth=os.getenv("SNMP_AUTH", "sha"))
+        except ValueError as err:
+            raise SystemExit(f"SNMPv3: {err}")
+    return SnmpClient(host, port, community=args.community, version=args.snmp_version)
 
 
 def make_adapter(args):
-    """The controller link of this unit, from the command line. Plan tables come later, from the platform's welcome."""
+    """The controller link of this unit, from the command line. Plan tables come later, from the platform's welcome.
+    Which one fits a controller: python -m urban.equipment probe <controller>, and docs/controllers.md."""
     kind, controller = args.adapter, args.controller
     if kind == "none":
         return NoController()
     if not controller:
-        raise SystemExit(f"--adapter {kind} needs --controller (relay: serial port of the board; ntcip: host[:port])")
-    if kind == "relay":
-        board = ModbusRelayBoard(controller, unit=args.relay_unit, baud=args.baud)
-        return RelayAdapter(board.write, {}, relays=args.relays)
+        raise SystemExit(f"--adapter {kind} needs --controller (contacts: serial port, host:port or /dev/gpiochipN; "
+                         "ntcip and profile: host[:port] of the controller)")
+    if kind in ("contacts", "relay"):  # relay: the original name, binary code on a Modbus RTU board
+        return make_contacts(args)
+    if kind == "profile":
+        from ..equipment.modbus_tcp import ModbusTcp
+        from ..equipment.profiles import ProfileAdapter, ProfileError, load
+        try:
+            profile = load(args.profile or "")
+        except ProfileError as err:
+            raise SystemExit(f"--profile: {err}")
+        if profile["transport"] == "modbus-tcp":
+            host, port = parse_endpoint(controller, 502)
+            client = ModbusTcp(host, port, unit=profile["unit"])
+        else:
+            client = snmp_client(args, *parse_endpoint(controller, 161))
+        return ProfileAdapter(profile, client, {}, backup_time=args.backup_time)
     host, port = parse_endpoint(controller, 161)
     if args.snmp_version == 3:
         user, auth_pass, priv_pass = (os.getenv(k, "") for k in ("SNMP_USER", "SNMP_AUTH_PASS", "SNMP_PRIV_PASS"))
@@ -351,10 +414,22 @@ def main():
     ap.add_argument("--platform", default=f"127.0.0.1:{c.DEVICE_PORT}", help="host:port of the platform's device listener")
     ap.add_argument("--server-name", default="localhost", help="name on the platform's certificate")
     ap.add_argument("--junction", help="tls id this unit is installed at; checked against the platform")
-    ap.add_argument("--adapter", choices=("none", "relay", "ntcip"), default="none")
-    ap.add_argument("--controller", help="relay: serial port of the relay board; ntcip: host[:port] of the controller")
-    ap.add_argument("--relay-unit", type=int, default=1, help="relay: Modbus unit id of the board")
-    ap.add_argument("--relays", type=int, default=3, help="relay: coils used for the plan code")
+    ap.add_argument("--adapter", choices=("none", "contacts", "relay", "ntcip", "profile"), default="none",
+                    help="contacts: plan-selection inputs (any controller that has them); ntcip: NTCIP 1202 over SNMP; "
+                         "profile: a controller described by a profile file; relay: contacts, binary, Modbus RTU")
+    ap.add_argument("--controller", help="contacts: serial port of the board, host:port of an Ethernet board or "
+                                         "/dev/gpiochipN; ntcip, profile: host[:port] of the controller")
+    ap.add_argument("--bus", choices=("modbus-rtu", "modbus-tcp", "gpio"), default="modbus-rtu",
+                    help="contacts: what closes them")
+    ap.add_argument("--encoding", choices=("binary", "onehot", "bcd"), default="binary", help="contacts: plan code")
+    ap.add_argument("--enable-contact", type=int, help="contacts: output of the 'remote control enabled' contact")
+    ap.add_argument("--feedback-input", type=int, help="contacts: input wired to the controller's 'external plan active'")
+    ap.add_argument("--plan-codes", help="contacts: our plan id = controller plan number pairs, e.g. 1=3,2=5")
+    ap.add_argument("--gpio-lines", help="contacts on gpio: output line offsets, plan contacts first, e.g. 17,27,22,23")
+    ap.add_argument("--active-low", action="store_true", help="contacts on gpio: the relay board switches on a low level")
+    ap.add_argument("--profile", help="profile: a built-in name (python -m urban.equipment profiles) or a JSON file")
+    ap.add_argument("--relay-unit", type=int, default=1, help="contacts on modbus: unit id of the board")
+    ap.add_argument("--relays", type=int, default=3, help="contacts: plan-code contacts (inputs of the controller)")
     ap.add_argument("--baud", type=int, default=9600, help="relay: serial speed")
     ap.add_argument("--community", default="private", help="ntcip with --snmp-version 0/1: community with write access")
     ap.add_argument("--snmp-version", type=int, choices=(0, 1, 3), default=3,

@@ -1,7 +1,7 @@
 // Layers that never change after load. Built once per Deck instance and again only when
 // the layer menu toggles something, so per-frame work never touches them.
 import { ColumnLayer, PathLayer, PolygonLayer, ScatterplotLayer, SolidPolygonLayer, TextLayer } from '@deck.gl/layers';
-import { AREA, GROUND, MAJOR, MINOR, POI, ROAD, ROAD_DEFAULT } from '../config.js';
+import { ACCENT, AREA, BG, BUILDING_EDGE, GROUND, MAJOR, MINOR, POI, ROAD, ROAD_DEFAULT } from '../config.js';
 import { toward } from './scene.js';
 
 export const fadeColors = (d, rgb, alpha = 255) => d.v.map((v) => [...rgb, alpha * v]);
@@ -9,14 +9,14 @@ export const roadWidth = (d) => 2.4 + 3.1 * d.lanes;
 
 const TEXT = {
   characterSet: 'auto', fontFamily: 'system-ui, sans-serif', fontWeight: 600,
-  fontSettings: { sdf: true, fontSize: 48, buffer: 6 }, outlineWidth: 3, outlineColor: [14, 16, 19, 255],
+  fontSettings: { sdf: true, fontSize: 48, buffer: 6 }, outlineWidth: 3, outlineColor: [...BG, 255],
 };
 
 export function staticLayers(scene, show = {}, { pickable = true } = {}) {
   const on = (key) => show[key] !== false;
   return [
     new SolidPolygonLayer({ id: 'plate', data: scene.plate, getPolygon: (d) => d.polygon, getFillColor: (d) => d.color, material: false }),
-    new PathLayer({ id: 'rim', data: scene.rim, getPath: (d) => d.path, getColor: [150, 158, 168, 40], widthUnits: 'pixels', getWidth: 1 }),
+    new PathLayer({ id: 'rim', data: scene.rim, getPath: (d) => d.path, getColor: [...ACCENT, 70], widthUnits: 'pixels', getWidth: 1 }),
     new SolidPolygonLayer({
       id: 'areas', data: scene.areas, getPolygon: (d) => d.polygon, material: false,
       getFillColor: (d) => toward(AREA[d.kind], GROUND, d.v),
@@ -28,7 +28,7 @@ export function staticLayers(scene, show = {}, { pickable = true } = {}) {
     }),
     new PathLayer({
       id: 'road-casing', data: scene.roads, getPath: (d) => d.path, widthUnits: 'meters',
-      getWidth: (d) => roadWidth(d) + 2.4, getColor: (d) => fadeColors(d, [18, 20, 23]),
+      getWidth: (d) => roadWidth(d) + 2.4, getColor: (d) => fadeColors(d, [6, 10, 14]),
       capRounded: true, jointRounded: true,
     }),
     new PathLayer({
@@ -38,7 +38,7 @@ export function staticLayers(scene, show = {}, { pickable = true } = {}) {
     }),
     new PathLayer({
       id: 'road-axis', data: scene.roads.filter((r) => MAJOR.has(r.cls) && r.lanes >= 2), getPath: (d) => d.path,
-      widthUnits: 'meters', getWidth: 0.3, getColor: (d) => fadeColors(d, [150, 156, 164], 70),
+      widthUnits: 'meters', getWidth: 0.35, getColor: (d) => fadeColors(d, ACCENT, 60),
     }),
     new ScatterplotLayer({
       id: 'stops', data: scene.stops, visible: on('transit'), getPosition: (d) => d.p, radiusUnits: 'meters',
@@ -47,17 +47,17 @@ export function staticLayers(scene, show = {}, { pickable = true } = {}) {
     }),
     new ScatterplotLayer({
       id: 'signals', data: scene.signals, getPosition: (d) => d.p, radiusUnits: 'meters', getRadius: 2.2,
-      radiusMinPixels: 1.5, getFillColor: (d) => [150, 156, 164, 200 * d.v],
+      radiusMinPixels: 1.5, getFillColor: (d) => [...ACCENT, 150 * d.v],
     }),
     new ColumnLayer({
       id: 'trees', data: scene.trees, getPosition: (d) => d.p, diskResolution: 6, radius: 2.6, extruded: true,
-      getElevation: (d) => 7 * d.s * d.v, getFillColor: (d) => toward([42, 58, 46], GROUND, d.v),
+      getElevation: (d) => 7 * d.s * d.v, getFillColor: (d) => toward([18, 40, 36], GROUND, d.v),
       material: { ambient: 0.5, diffuse: 0.6, shininess: 4 },
     }),
     new PolygonLayer({
       id: 'buildings', data: scene.buildings, getPolygon: (d) => d.polygon, extruded: on('buildings'), wireframe: on('buildings'),
-      getElevation: (d) => d.h, getFillColor: (d) => d.color, getLineColor: (d) => toward([92, 98, 106], GROUND, d.v * 0.45),
-      material: { ambient: 0.42, diffuse: 0.62, shininess: 6, specularColor: [24, 26, 30] }, pickable,
+      getElevation: (d) => d.h, getFillColor: (d) => d.color, getLineColor: (d) => toward(BUILDING_EDGE, GROUND, d.v * 0.42),
+      material: { ambient: 0.5, diffuse: 0.55, shininess: 12, specularColor: [30, 60, 72] }, pickable,
     }),
     new ScatterplotLayer({
       id: 'pois', data: scene.pois, visible: on('pois'), getPosition: (d) => d.p, radiusUnits: 'meters', getRadius: 5, radiusMaxPixels: 8,
@@ -67,12 +67,12 @@ export function staticLayers(scene, show = {}, { pickable = true } = {}) {
     new TextLayer({
       ...TEXT, id: 'poi-labels', data: scene.pois.filter((d) => d.name), visible: on('pois') && show.poiLabels === true,
       getPosition: (d) => d.p, getText: (d) => d.name, getSize: 11, getPixelOffset: [0, -16],
-      getColor: (d) => [214, 219, 226, 255 * d.v],
+      getColor: (d) => [206, 232, 240, 255 * d.v],
     }),
     new TextLayer({
       ...TEXT, id: 'labels', data: scene.labels, visible: on('labels'), getPosition: (d) => d.p, getText: (d) => d.text,
       getAngle: (d) => d.ang, billboard: false, sizeUnits: 'meters', getSize: 15, sizeMinPixels: 0, sizeMaxPixels: 20,
-      getColor: (d) => [176, 183, 192, 220 * d.v],
+      getColor: (d) => [140, 196, 214, 200 * d.v],
     }),
   ];
 }

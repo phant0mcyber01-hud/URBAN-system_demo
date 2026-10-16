@@ -37,7 +37,7 @@ def test_summary_tells_what_to_build_and_who_is_ready():
     ]
     text = survey.summary(rows)
     assert "3 из 4" in text and "Ещё не обследованы: J-04" in text
-    assert "| ntcip | 1 | NTCIP по SNMPv3: адаптер есть" in text and "| gbt20999 | 1 | GB/T 20999: адаптера нет" in text
+    assert "| ntcip | 1 | NTCIP по SNMPv3: адаптер есть" in text and "| gbt20999 | 1 | GB/T 20999: своего адаптера нет" in text
     assert "Готовы к этапу 1 (камеры и блок, контроллер не трогаем): 2" in text and "J-01, J-02" in text
     assert "Готовы к этапу 2 (управление): 1" in text
     assert "- J-03:" in text  # gaps listed
