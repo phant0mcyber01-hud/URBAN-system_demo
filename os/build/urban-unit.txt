@@ -1,6 +1,14 @@
-# URBAN Edge unit identity, read once at first boot.
-# After writing the image onto the unit's disk, open this partition (URBAN-ESP, it shows up on any laptop)
-# and set the unit id of the junction and the serial number printed on the box. Then boot the unit:
-# it makes its key and shows the enrolment code on its screen and serial console.
+# URBAN OS: who this machine is. Read once, at its first boot.
+# After writing the image onto the disk, open this partition (URBAN-ESP) and fill in the lines below, or let
+# `node os/unit-image.mjs` do it. Then boot: the machine sets itself up and shows the result on its screen.
+#
+# ROLE   unit             a junction's box (the default)          UNIT=edge-<junction>, e.g. edge-J-07
+#        district         a district's server                     UNIT=district-<name>, e.g. district-1
+#        center           the control centre                      UNIT=center or center-<name>
+#        district,center  both on one machine (the pilot)         UNIT=center or center-<name>
+# SERIAL the number printed on the box
+# HOST   control centre only: the name or address units and operators use for it (goes on its certificate)
 UNIT=edge-J-00
 SERIAL=
+ROLE=unit
+HOST=

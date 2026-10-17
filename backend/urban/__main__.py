@@ -20,7 +20,8 @@ from . import config as c  # noqa: E402
 
 
 async def serve():
-    ui = uvicorn.Server(uvicorn.Config("urban.api.app:app", host=c.HOST, port=c.PORT))
+    tls = {"ssl_certfile": str(c.PKI / "server.pem"), "ssl_keyfile": str(c.PKI / "server.key")} if c.UI_TLS else {}
+    ui = uvicorn.Server(uvicorn.Config("urban.api.app:app", host=c.HOST, port=c.PORT, **tls))
     devices = uvicorn.Server(uvicorn.Config(
         "urban.api.app:device_app", host=c.DEVICE_HOST, port=c.DEVICE_PORT, log_level="warning",
         ssl_certfile=str(c.PKI / "server.pem"), ssl_keyfile=str(c.PKI / "server.key")))

@@ -6,6 +6,7 @@
     python3 vm.py update good|foreign|broken
                                         signed A/B update; a foreign signature; a broken system rolled back
     python3 vm.py hardware              the same image from NVMe, SATA and a USB stick, with an Intel network card
+    python3 vm.py roles                 the pilot's district server and control centre on a bigger disk
     python3 vm.py unitimage IMG.xz SUMS KEY UNIT SERIAL
                                         a unit image as shipped: identity and maintenance key from its ESP only
 
@@ -64,9 +65,10 @@ DISK_BUS = {
 
 class VM:
     def __init__(self, name, version="1", unit="edge-J-07", serial="URB-TEST", image=None, key=KEY,
-                 add_key=True, bus="virtio", nic="virtio-net-pci"):
+                 add_key=True, bus="virtio", nic="virtio-net-pci", role=None, host=None, grow_mb=0, forward=()):
         os.makedirs(LOGS, exist_ok=True)
         self.name, self.disk, self.key, self.bus, self.nic = name, f"/tmp/{name}.img", key, bus, nic
+        self.forward = forward  # more (host port, guest port) pairs than SSH
         if image:  # a finished unit image: used as it is, nothing added
             sh(["mv", image, self.disk])
             unit, add_key = None, False
@@ -76,7 +78,7 @@ class VM:
         esp, data = parts["esp"]["start"], parts["urban-data"]["start"]
         if unit:  # the installer's step: the unit id and serial on the ESP
             with open("/tmp/urban-unit.txt", "w", newline="\r\n") as f:  # written on a Windows laptop: CRLF
-                f.write(f"UNIT={unit}\nSERIAL={serial}\n")
+                f.write(f"UNIT={unit}\nSERIAL={serial}\n" + (f"ROLE={role}\n" if role else "") + (f"HOST={host}\n" if host else ""))
             sh(f"mcopy -o -i {self.disk}@@{esp * 512} /tmp/urban-unit.txt ::/urban-unit.txt")
         if not os.path.exists(KEY):  # a maintenance key on the data partition, for the scenarios only
             sh(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", KEY])
@@ -86,6 +88,8 @@ class VM:
             sh(["debugfs", "-w", "-R", "mkdir ssh", "/tmp/data.part"])
             sh(["debugfs", "-w", "-R", f"write {KEY}.pub ssh/authorized_keys", "/tmp/data.part"])
             sh(f"dd if=/tmp/data.part of={self.disk} bs=512 seek={data} conv=notrunc status=none")
+        if grow_mb:  # a disk bigger than the image, as every real one is
+            sh(["truncate", "-s", f"+{grow_mb}M", self.disk])
         self.lines, self.mark, self.proc = [], 0, None
         self.log = open(f"{LOGS}/{name}.log", "w", encoding="utf-8", errors="replace")
 
@@ -99,7 +103,8 @@ class VM:
              "-drive", "if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd",
              "-drive", f"if=pflash,format=raw,unit=1,file={vars_}",
              *DISK_BUS[self.bus](self.disk),
-             "-netdev", "user,id=n0,hostfwd=tcp:127.0.0.1:2222-:22", "-device", f"{self.nic},netdev=n0",
+             "-netdev", "user,id=n0,hostfwd=tcp:127.0.0.1:2222-:22"
+             + "".join(f",hostfwd=tcp:127.0.0.1:{h}-:{g}" for h, g in self.forward), "-device", f"{self.nic},netdev=n0",
              "-device", "i6300esb", "-watchdog-action", "reset",
              "-display", "none", "-serial", "stdio", "-monitor", f"unix:/tmp/{self.name}.mon,server,nowait",
              "-name", self.name],
@@ -250,6 +255,38 @@ def contents():
         if b"kernel/x86/microcode/" + cpu not in initrd:
             raise Fail(f"no early microcode for {cpu.decode()} in the initramfs")
     print("   firmware: Realtek network, Intel and AMD microcode (early), watchdogs iTCO/sp5100/i6300esb", flush=True)
+    roles_in(slot, listing)
+
+
+def roles_in(slot, listing):
+    """One image for the three roles: the power manager everywhere, the unit's and vision's services, the
+    control centre with its built interface and its data on the data partition, the role's firewall openings."""
+    need = {
+        "the power manager": "opt/urban/backend/urban/node/power.py",
+        "the power service, started at every boot": "etc/systemd/system/multi-user.target.wants/urban-power.service",
+        "the unit's service": "etc/systemd/system/urban-edge@.service",
+        "the vision service": "etc/systemd/system/urban-vision@.service",
+        "the control centre's service": "etc/systemd/system/urban-platform.service",
+        "the control centre's interface": "opt/urban/web/dist/index.html",
+    }
+    for what, path in need.items():
+        if not re.search(r"(^|/)" + re.escape(path) + r"$", listing, re.M):
+            raise Fail(f"the image lacks {what} ({path})")
+    links = sh(["unsquashfs", "-lls", slot, "opt/urban/data"]).stdout
+    if "-> /var/lib/urban/platform" not in links:
+        raise Fail("the control centre's data does not live on the data partition")
+    shutil.rmtree("/tmp/sq2", ignore_errors=True)
+    sh(["unsquashfs", "-q", "-n", "-d", "/tmp/sq2", slot, "etc/nftables.conf", "usr/local/bin/urban-prepare",
+        "opt/urban/web/dist/index.html"])
+    if 'include "/run/urban/nft/*.nft"' not in open("/tmp/sq2/etc/nftables.conf").read():
+        raise Fail("the firewall does not take the role's openings")
+    prepare = open("/tmp/sq2/usr/local/bin/urban-prepare").read()
+    for role in ("unit)", "district)", "center|district,center"):
+        if role not in prepare:
+            raise Fail(f"urban-prepare does not know the role {role}")
+    if "<html" not in open("/tmp/sq2/opt/urban/web/dist/index.html").read().lower():
+        raise Fail("the interface in the image is not a page")
+    print("   roles: unit, district, center in one image; power manager, control centre and its interface", flush=True)
 
 
 def boot():
@@ -430,7 +467,71 @@ def unitimage(xz, sums, key, unit, serial):
         if not running(vm, unit):
             raise Fail(f"urban-edge@{unit} did not come back after a reboot")
         print(f"   kit set up; urban-edge@{unit} runs, also after a reboot", flush=True)
+        plan = json.loads(vm.ssh("cat /run/urban/power.json").stdout)
+        if plan["roles"] != ["unit"] or plan["vision"]["threads"] > 2:
+            raise Fail(f"a unit's power plan: {plan}")
+        print(f"   power: {plan['level']}, clock {plan['clock_pct']}%, vision {plan['vision']['fps']} fps", flush=True)
         print("UNIT IMAGE CHECK PASSED", flush=True)
+    finally:
+        vm.stop()
+        os.remove(vm.disk)
+
+
+def roles():
+    """The pilot's district server and control centre: one machine, ROLE=district,center, on a disk 6 GB bigger
+    than the image. From outside: the interface over HTTPS, trusted through the centre's own CA."""
+    import ssl
+    import urllib.request
+    vm = VM("roles", unit="center", serial="PILOT-1", role="district,center", host="urban-center", grow_mb=6144,
+            forward=[(2443, 443)])
+    try:
+        vm.start()
+        m = vm.wait(r"URBAN-DATA (\d+) MiB")
+        if int(m.group(1)) < 7000:
+            raise Fail(f"the data partition did not take the disk: {m.group(0)}")
+        vm.wait(r"URBAN-ROLE role=district,center name=center")
+        line = vm.booted("1", "A")
+        power = vm.wait(r"URBAN-POWER roles=district,center level=\S+.*", 300).group(0)
+        plan = json.loads(vm.ssh("cat /run/urban/power.json").stdout)
+        if plan["roles"] != ["district", "center"] or plan["vision"]["threads"] != max(1, plan["cores"] - 2):
+            raise Fail(f"power plan for the role: {plan}")
+        rules = vm.ssh("nft list chain inet urban input").stdout
+        if not re.search(r"tcp dport \{ 443, 8443 \} accept", rules) or "policy drop" not in rules:
+            raise Fail(f"the firewall does not open exactly the centre's ports:\n{rules}")
+        end, body, last = time.time() + 900, None, ""
+        while time.time() < end and body is None:
+            ca = vm.ssh("cat /var/lib/urban/platform/pki/ca.pem", check=False).stdout  # once the platform ran
+            if "BEGIN CERTIFICATE" in ca:
+                with open("/tmp/center-ca.pem", "w") as f:
+                    f.write(ca)
+                ctx = ssl.create_default_context(cafile="/tmp/center-ca.pem")
+                ctx.check_hostname = False  # the forwarded port is 127.0.0.1; the name is checked below
+                try:
+                    with urllib.request.urlopen("https://127.0.0.1:2443/api/health", context=ctx, timeout=20) as r:
+                        body = json.loads(r.read())
+                except Exception as err:  # still starting
+                    last = str(err)
+            if body is None:
+                time.sleep(10)
+        if body is None or not body.get("ok"):
+            log = vm.ssh("journalctl -u urban-platform --no-pager -n 30 -o cat", check=False).stdout
+            raise Fail(f"the control centre did not answer over HTTPS: {last}\n{log}")
+        names = sh(["openssl", "x509", "-noout", "-ext", "subjectAltName"],
+                   input=vm.ssh("cat /var/lib/urban/platform/pki/server.pem").stdout).stdout
+        if "urban-center" not in names:
+            raise Fail(f"the certificate does not name the centre: {names}")
+        page = None
+        with urllib.request.urlopen("https://127.0.0.1:2443/", context=ctx, timeout=20) as r:
+            page = r.read().decode("utf-8", "replace")
+        if "<html" not in page.lower():
+            raise Fail("the interface itself is not served")
+        print(f"   {line[line.index('URBAN-OS-CHECK'):][:90]}")
+        print(f"   {power[:160]}")
+        print(f"   https://urban-center/ answers (mode {body.get('mode')}), interface served; data partition {m.group(1)} MiB",
+              flush=True)
+        time.sleep(3)
+        vm.screendump(f"{LOGS}/center-screen.ppm")
+        print("ROLES CHECK PASSED", flush=True)
     finally:
         vm.stop()
         os.remove(vm.disk)
@@ -538,6 +639,8 @@ if __name__ == "__main__":
                 print(r.stdout + r.stderr)
             finally:
                 vm.stop()
+        elif what == "roles":
+            roles()
         elif what == "hardware":
             hardware()
         elif what == "unitimage":

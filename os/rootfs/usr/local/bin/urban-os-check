@@ -27,17 +27,23 @@ passwd -S root | grep -q ' L ' || fail+=("root has a usable password")
 
 systemctl is-active --quiet urban-prepare || fail+=("urban-prepare failed")
 unit=$(sed -n 's/^UNIT=//p' /var/lib/urban/etc/unit.conf 2>/dev/null)
-if [ -n "$unit" ]; then
-  [ -f "/var/lib/urban/etc/pki/edge/$unit.key" ] || fail+=("unit $unit has no key")
-else
+role=$(sed -n 's/^ROLE=//p' /var/lib/urban/etc/unit.conf 2>/dev/null); role=${role:-unit}
+if [ -z "$unit" ]; then
   unit=none
+elif [ "$role" = unit ]; then
+  [ -f "/var/lib/urban/etc/pki/edge/$unit.key" ] || fail+=("unit $unit has no key")
 fi
-/opt/urban/.venv/bin/python -c "import urban.edge.__main__" 2>/dev/null || fail+=("URBAN software does not start")
+/opt/urban/.venv/bin/python -c "import urban.edge.__main__, urban.node.power" 2>/dev/null || fail+=("URBAN software does not start")
 systemctl cat urban-edge@check.service >/dev/null 2>&1 || fail+=("urban-edge@ service missing")
+case ",$role," in *,center,*)
+  # its libraries only: importing the app itself would make the centre's keys here, as root
+  /opt/urban/.venv/bin/python -c "import fastapi, uvicorn, urban.platform" 2>/dev/null || fail+=("the control centre's software is broken")
+  [ -f /opt/urban/web/dist/index.html ] || fail+=("the control centre's interface is missing") ;;
+esac
 
 install -d /run/urban
 if [ ${#fail[@]} -eq 0 ]; then
-  echo "URBAN-OS-CHECK OK version=$version slot=$slot root=ro data=rw firewall=on watchdog=$wd unit=$unit"
+  echo "URBAN-OS-CHECK OK version=$version slot=$slot root=ro data=rw firewall=on watchdog=$wd unit=$unit role=$role"
   echo "OK - read-only system, data writable, firewall on, watchdog $wd" > /run/urban/os-check
   /usr/local/bin/urban-console
   exit 0

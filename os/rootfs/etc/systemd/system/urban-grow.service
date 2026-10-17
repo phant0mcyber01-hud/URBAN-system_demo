@@ -1,0 +1,16 @@
+[Unit]
+Description=URBAN OS: the data partition takes the whole disk (before it is mounted)
+DefaultDependencies=no
+Requires=dev-disk-by\x2dpartlabel-urban\x2ddata.device
+After=dev-disk-by\x2dpartlabel-urban\x2ddata.device
+Before=systemd-fsck@dev-disk-by\x2dpartlabel-urban\x2ddata.service var-lib-urban.mount local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/urban-grow
+StandardOutput=journal+console
+TimeoutStartSec=300
+
+[Install]
+WantedBy=local-fs-pre.target

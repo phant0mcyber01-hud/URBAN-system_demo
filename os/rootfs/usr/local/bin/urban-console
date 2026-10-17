@@ -1,37 +1,62 @@
 #!/bin/bash
-# What the unit's own screen shows above the login prompt: who this unit is, its key, its enrolment code,
-# the result of the last self-check and its address. An installer plugs in a monitor and reads it; nothing
-# has to be typed. Written to /run (the root is read-only) and linked from /etc/issue.d; getty is asked to
-# redraw. Called by urban-prepare, urban-os-check and urban-health.
+# What the machine's own screen shows above the login prompt: who it is and in which role, its key and
+# enrolment code (a junction unit), its address, the last self-check, its health and its power. An installer
+# plugs in a monitor and reads it; nothing has to be typed. Written to /run (the root is read-only) and
+# linked from /etc/issue.d; getty is asked to redraw. Called by urban-prepare, urban-os-check, urban-health
+# and the power manager when its plan changes.
 D=/var/lib/urban
 OUT=/run/urban/console.issue
 install -d /run/urban
-unit=$(sed -n 's/^UNIT=//p' "$D/etc/unit.conf" 2>/dev/null)
-serial=$(sed -n 's/^SERIAL=//p' "$D/etc/unit.conf" 2>/dev/null)
+conf() { sed -n "s/^$1=//p" "$D/etc/unit.conf" 2>/dev/null; }
+unit=$(conf UNIT); serial=$(conf SERIAL); role=$(conf ROLE); role=${role:-unit}; host=$(conf HOST)
 fingerprint=$(sed -n 's/^fingerprint: *\([0-9A-F-]*\).*/\1/p' "$D/etc/enrolment.txt" 2>/dev/null)
 code=$(grep -o 'URBAN1:[^[:space:]]*' "$D/etc/enrolment.txt" 2>/dev/null)
 check=$(cat /run/urban/os-check 2>/dev/null || echo "running")
 health=$(cat /run/urban/health 2>/dev/null || echo "waiting for the self-check")
 version=$(sed -n 's/^VERSION=//p' /etc/urban-os-release)
 slot=$(sed -n 's/.*rauc\.slot=\([AB]\).*/\1/p' /proc/cmdline)
+power=$(python3 - 2>/dev/null <<'PY'
+import json
+p = json.load(open("/run/urban/power.json"))
+v = p["vision"]
+temp = f"{p['temp_c']} C" if p["sensor"] else "no temperature sensor"
+work = "vision paused (too hot)" if v["paused"] else f"vision {v['fps']} frames/s per camera, {v['threads']} thread(s)"
+print(f"{p['level']} - {temp}, clock up to {p['clock_pct']}%, {work}")
+PY
+)
+case "$role" in
+  unit) what="junction unit" ;;
+  district) what="district server" ;;
+  center) what="control centre" ;;
+  district,center) what="district server and control centre" ;;
+  *) what="$role" ;;
+esac
 {
   echo "  ------------------------------------------------------------------------------"
   if [ -n "$unit" ]; then
-    printf "  unit          %s    serial %s\n" "$unit" "${serial:--}"
+    printf "  name          %s    serial %s\n" "$unit" "${serial:--}"
+    printf "  role          %s\n" "$what"
+  fi
+  if [ -n "$unit" ] && [ "$role" = unit ]; then
     printf "  key           %s\n" "${fingerprint:-making it now...}"
     printf "  enrolment     %s\n" "${code:-}"
     printf "                (paste it in the platform: Devices -> Enrol a unit; compare the key above)\n"
+  elif [ -n "$unit" ]; then
+    case ",$role," in *,center,*)
+      printf "  interface     https://%s/   (the first admin password: journalctl -u urban-platform)\n" "${host:-$unit}" ;;
+    esac
   else
-    echo "  unit          NOT SET: write UNIT=edge-J-.. and SERIAL=.. into urban-unit.txt"
-    echo "                on the URBAN-ESP partition of this disk, then restart the unit"
+    echo "  name          NOT SET: write UNIT=, SERIAL= and ROLE= into urban-unit.txt"
+    echo "                on the URBAN-ESP partition of this disk, then restart"
   fi
-  printf "  system        URBAN Edge OS %s, slot %s\n" "$version" "$slot"
+  printf "  system        URBAN OS %s, slot %s\n" "$version" "$slot"
   printf "  self-check    %s\n" "$check"
   printf "  health        %s\n" "$health"
+  printf "  power         %s\n" "${power:-starting}"
   printf "  address       \\\\4\n"
   keys=$(grep -c . "$D/ssh/authorized_keys" 2>/dev/null); keys=${keys:-0}
   if [ "$keys" -gt 0 ]; then
-    echo "  maintenance   SSH as root with a key only ($keys key(s) allowed) - no passwords on this unit"
+    echo "  maintenance   SSH as root with a key only ($keys key(s) allowed) - no passwords on this machine"
   else
     echo "  maintenance   NO SSH KEY YET: put maintenance.pub on the URBAN-ESP partition and restart"
   fi

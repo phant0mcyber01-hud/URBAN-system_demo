@@ -11,10 +11,12 @@ const headings = [...text.matchAll(/^##+ (.+)$/gm)].map((m) => m[1].toLowerCase(
 const need = {
   "building the image": /сборк/, "writing it onto the unit": /запис/, "first boot": /первая загрузка/,
   "updates": /обновлени/, "rollback": /откат/, "not tried on hardware": /не проверено/,
+  "levels and roles": /уровн.*рол|рол.*уровн/, "power": /мощност/,
 };
 const missing = Object.entries(need).filter(([, rx]) => !headings.some((h) => rx.test(h))).map(([k]) => k);
 if (missing.length) fail("sections missing: " + missing.join(", "));
-for (const cmd of ["node os/build.mjs", "urban-unit setup", "urban-unit update", "urban-unit.txt"]) {
+for (const cmd of ["node os/build.mjs", "urban-unit setup", "urban-unit update", "urban-unit.txt", "ROLE=",
+  "district,center", "urban-power", "/run/urban/power.json", "check-roles.mjs", "Подписывает команды только центр"]) {
   if (!text.includes(cmd)) fail(`the guide never shows ${cmd}`);
 }
 if (text.length < 4000) fail("the guide is too short to be followed");
@@ -37,4 +39,8 @@ for (const must of ["node os/unit-image.mjs", "Rufus", "Secure Boot", "maintenan
 }
 const context = readFileSync(join(ROOT, "CONTEXT.md"), "utf8");
 if (!context.includes("docs/mini-pc.md") || !context.includes("unit-image.mjs")) fail("CONTEXT.md does not record the mini-PC step");
+for (const must of ["## Три уровня", "Решения владельца", "Подписывает только центр", "Кадры не выходят за пределы района",
+  "ROLE=district,center", "node/power.py", "Не сделано (следующие шаги)"]) {
+  if (!context.includes(must)) fail(`CONTEXT.md does not record ${JSON.stringify(must)}`);
+}
 console.log("DOCS CHECK PASSED");

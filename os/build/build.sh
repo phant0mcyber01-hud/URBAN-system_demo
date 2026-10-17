@@ -1,5 +1,6 @@
 #!/bin/bash
-# Builds URBAN Edge OS inside the builder container (os/build/Dockerfile).
+# Builds URBAN OS inside the builder container (os/build/Dockerfile): one image for the junction unit, the
+# district server and the control centre; the role is chosen on the ESP (urban-unit.txt).
 #
 #   build.sh --version 1 [--image] [--break firewall]
 #
@@ -26,7 +27,7 @@ OUT=/out
 COMPATIBLE=urban-edge-x86_64
 PACKAGES="systemd,systemd-sysv,systemd-timesyncd,systemd-resolved,udev,dbus,linux-image-amd64,initramfs-tools,\
 rauc,rauc-service,netbase,grub-common,openssh-server,nftables,python3,python3-venv,ca-certificates,iproute2,iputils-ping,kmod,\
-e2fsprogs,dosfstools,util-linux,procps,libglib2.0-0,libgomp1,firmware-realtek,intel-microcode,amd64-microcode"
+e2fsprogs,dosfstools,util-linux,fdisk,procps,libglib2.0-0,libgomp1,firmware-realtek,intel-microcode,amd64-microcode"
 # real mini-PCs: Realtek network chips want their firmware, and the CPU its microcode fixes (Debian's
 # non-free-firmware section, redistributable); Intel network chips need nothing
 ESP_MB=128; SLOT_MB=1536; DATA_MB=2048  # data: keys, kit, cameras and room for one update bundle
@@ -71,6 +72,10 @@ chroot "$ROOT" /opt/urban/.venv/bin/pip install --quiet --upgrade pip
 chroot "$ROOT" /opt/urban/.venv/bin/pip install --quiet -e "/opt/urban/backend[edge,vision]"
 chroot "$ROOT" /opt/urban/.venv/bin/python -m compileall -q /opt/urban/backend/urban >/dev/null
 chroot "$ROOT" /opt/urban/.venv/bin/python -c "import urban.edge.__main__, urban.vision.__main__, cv2, onnxruntime"
+# the control centre's interface (role center): built on the host with `npm run build` in web/
+[ -f /work/web/dist/index.html ] || { echo "web/dist is missing: run npm run build in web/ first" >&2; exit 1; }
+mkdir -p "$ROOT/opt/urban/web"; cp -r /work/web/dist "$ROOT/opt/urban/web/dist"; chmod -R a+rX,go-w "$ROOT/opt/urban/web"
+ln -s /var/lib/urban/platform "$ROOT/opt/urban/data"  # the platform's data/ (city, keys, accounts, history)
 if [ -f /work/data/models/yolox_nano.onnx ]; then
   cp /work/data/models/yolox_nano.onnx "$ROOT/opt/urban/models/"
 else
@@ -103,7 +108,7 @@ printf "VERSION=%s\nBUILT=%s\nCOMPATIBLE=%s\n" "$VERSION" "$(date -u +%Y-%m-%dT%
 # the root file system, and the watchdog drivers, so the timer is armed before systemd starts
 for m in squashfs i6300esb iTCO_wdt sp5100_tco; do echo "$m" >> "$ROOT/etc/initramfs-tools/modules"; done
 chroot "$ROOT" systemctl enable systemd-networkd systemd-resolved systemd-timesyncd ssh nftables \
-  urban-prepare.service urban-os-check.service urban-health.service >/dev/null 2>&1
+  urban-grow.service urban-prepare.service urban-os-check.service urban-health.service urban-power.service >/dev/null 2>&1
 chroot "$ROOT" systemctl mask apt-daily.timer apt-daily-upgrade.timer e2scrub_all.timer >/dev/null 2>&1 || true
 if [ "$BREAK" = "firewall" ]; then
   log "BREAK: firewall rules that do not load (rollback test only)"

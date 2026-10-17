@@ -74,6 +74,7 @@ export function inputsDigest() {
     ...walk(join(ROOT, "backend", "urban"), []), join(ROOT, "backend", "pyproject.toml"),
     join(ROOT, "deploy", "urban-edge@.service"), join(ROOT, "deploy", "urban-vision@.service"),
     join(ROOT, "data", "models", "yolox_nano.onnx"), join(OUT, "keys", "ca.pem"),
+    ...walk(join(ROOT, "web", "dist"), []),
   ];
   const h = createHash("sha256");
   for (const f of files) {
@@ -88,6 +89,7 @@ export function inputsDigest() {
 // the files it vouches for)
 export function build(version, { image = false, broken = "" } = {}) {
   ensureBuilder();
+  if (!existsSync(join(ROOT, "web", "dist", "index.html"))) fail("web/dist is missing: npm run build in web/ (the control centre's interface goes into the image)");
   const digest = inputsDigest() + (image ? "-image" : "") + (broken ? `-${broken}` : "");
   const want = [`/out/urban-edge-${version}.raucb`, ...(image ? [`/out/urban-edge-${version}.img`] : [])];
   const fresh = inBuilder(`[ "$(cat /out/stamp-${version} 2>/dev/null)" = "${digest}" ] && ${want.map((f) => `[ -f ${f} ]`).join(" && ")}`,

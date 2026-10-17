@@ -32,6 +32,8 @@ DEMO = SOURCE == "simulation"
 MAP = OUT if DEMO else CITY  # served to the UI as /data
 HOST = os.getenv("HOST", "127.0.0.1")  # UI and API; behind a reverse proxy on a server
 PORT = int(os.getenv("PORT", "8080"))
+# the interface over HTTPS with the platform's own server certificate (URBAN OS, role center: no reverse proxy)
+UI_TLS = os.getenv("UI_TLS", "off").lower() in ("on", "1", "true", "yes")
 DEVICE_HOST = os.getenv("DEVICE_HOST", "127.0.0.1")  # TLS listener for URBAN Edge devices; 0.0.0.0 on a server
 DEVICE_PORT = int(os.getenv("DEVICE_PORT", "8443"))
 DEVICE_NAME = os.getenv("DEVICE_NAME", "localhost")  # host name the devices connect to; goes on the certificate

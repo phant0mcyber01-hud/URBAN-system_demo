@@ -38,7 +38,7 @@
 
 | Файл | Что это |
 |---|---|
-| `urban-edge-1-edge-J-07.img.xz` | образ для стендового блока **edge-J-07**, серийный номер URB-STAND-01, сжатый (381 МБ, после распаковки 5,2 ГБ) |
+| `urban-edge-1-edge-J-07.img.xz` | образ для стендового блока **edge-J-07**, серийный номер URB-STAND-01, сжатый (382 МБ, после распаковки 5,2 ГБ) |
 | `urban-edge-1-edge-J-07.sha256` | контрольные суммы сжатого и распакованного образа |
 | `mini-pc.md` | эта инструкция |
 
@@ -46,7 +46,9 @@
 остаётся на этом компьютере. Этим ключом входят на блок по SSH. Никому его не пересылайте и не кладите в git
 (папка `data/` в git не попадает). Потеряете ключ — на блок войти будет нельзя, только записать образ заново.
 
-**Образ для другого перекрёстка** делается одной командой (нужен запущенный Docker):
+**Образ для другого перекрёстка** делается одной командой (нужен запущенный Docker). Та же ОС ставится и на
+районный сервер, и на центр управления — меняется только роль (`--role district`, `--role center` или
+`--role district,center` для пилота), см. [edge-os.md](edge-os.md#три-уровня-и-роли):
 
 ```bash
 node os/unit-image.mjs --unit edge-J-12 --serial URB-0002
@@ -128,21 +130,23 @@ Linux, а форматирование уничтожит запись.
 
 ```
       ______
-     /  ||  \       U R B A N   E D G E   O S
-    / --++-- \      traffic signal unit  urban-edge
+     /  ||  \       U R B A N   O S
+    / --++-- \      city traffic system   edge-J-07
     \   ||   /      ...
      \______/
 
   ------------------------------------------------------------------------------
-  unit          edge-J-07    serial URB-STAND-01
+  name          edge-J-07    serial URB-STAND-01
+  role          junction unit
   key           XXXX-XXXX-XXXX-XXXX
   enrolment     URBAN1:edge-J-07:URB-STAND-01:...
                 (paste it in the platform: Devices -> Enrol a unit; compare the key above)
-  system        URBAN Edge OS 1, slot A
+  system        URBAN OS 1, slot A
   self-check    OK - read-only system, data writable, firewall on, watchdog 30s
   health        good - this system is marked working
+  power         cool - 48.0 C, clock up to 100%, vision 4.0 frames/s per camera, 2 thread(s)
   address       192.168.1.57
-  maintenance   SSH as root with a key only (1 key(s) allowed) - no passwords on this unit
+  maintenance   SSH as root with a key only (1 key(s) allowed) - no passwords on this machine
   ------------------------------------------------------------------------------
 ```
 
@@ -150,6 +154,8 @@ Linux, а форматирование уничтожит запись.
 - **self-check** — `OK`. Если `FAILED`, после тире написана причина (см. «Неполадки»);
 - **health** — `good`;
 - **address** — адрес в вашей сети. Запишите его;
+- **power** — уровень `cool`, `warm`, `hot` или `critical` и температура процессора. При перегреве блок сам
+  разбирает меньше кадров и снижает частоту (см. [edge-os.md](edge-os.md#мощность));
 - **maintenance** — `1 key(s) allowed`: ключ обслуживания принят.
 
 Входа с клавиатуры у блока нет: паролей не существует, это сделано намеренно. Всё остальное — по сети.
@@ -264,5 +270,4 @@ ssh -i data/os/keys/maintenance_ed25519 root@<адрес> 'urban-unit status; gr
 - **Secure Boot** не поддерживается: его нужно выключать.
 - **Видео AMD.** Драйвер видео AMD намеренно не загружается (без своей прошивки он оставляет экран чёрным), экран
   работает через встроенный видеорежим UEFI. На настоящем AMD не проверено.
-- **Раздел данных — 2 ГБ при любом размере диска.** Остальное место на диске не используется. Для ключей,
-  комплекта, журналов и одного пакета обновления этого хватает.
+- **Рост раздела данных на весь диск** проверен в QEMU на диске на 6 ГБ больше образа; на настоящем SSD — нет.

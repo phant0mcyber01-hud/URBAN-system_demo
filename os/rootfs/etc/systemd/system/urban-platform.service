@@ -1,0 +1,24 @@
+# The control centre on URBAN OS (roles center and district,center): started by urban-prepare, settings in
+# /var/lib/urban/etc/platform.env, data (city, keys, accounts, history) in /var/lib/urban/platform.
+[Unit]
+Description=URBAN control centre (platform and interface)
+After=network-online.target urban-prepare.service
+Wants=network-online.target
+
+[Service]
+User=urban
+Group=urban
+WorkingDirectory=/opt/urban
+EnvironmentFile=/var/lib/urban/etc/platform.env
+ExecStart=/opt/urban/.venv/bin/python -m urban
+Restart=always
+RestartSec=3
+# HTTPS on 443 as an unprivileged user
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/urban/platform
+ProtectHome=true
+PrivateTmp=true
+StandardOutput=journal

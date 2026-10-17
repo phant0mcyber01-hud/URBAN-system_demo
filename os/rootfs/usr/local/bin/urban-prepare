@@ -1,8 +1,13 @@
 #!/bin/bash
-# Every boot, before the network and the unit start: the data partition's layout, this unit's SSH host key,
-# a static cabinet network if one is configured, and the unit's identity. On the first boot with an
-# identity the unit makes its own key here (it never leaves the data partition) and shows its enrolment
-# code on the screen, the serial console and the login prompt.
+# Every boot, before the network and the services start: the data partition's layout,
+# this machine's SSH host key and maintenance keys, a static network if one is configured, its identity and
+# role, the firewall openings of that role, and the role's services.
+#
+# One OS, three roles (urban-unit.txt on the ESP, read once at first boot):
+#   unit      a junction's box: makes its key, shows its enrolment code, runs the unit once it has its kit
+#   district  a district's server: camera work for the district's junctions (its relay comes next)
+#   center    the control centre: the platform and its interface over HTTPS
+#   district,center   both on one machine (the pilot)
 set -eu
 D=/var/lib/urban
 install -d -m 755 "$D" "$D/etc" "$D/rauc"
@@ -10,6 +15,12 @@ install -d -m 750 -o urban -g urban "$D/etc/pki" "$D/etc/pki/edge"
 install -d -m 700 "$D/ssh"
 install -d -m 700 "$D/update"  # update bundles are staged here: the root is read-only, /tmp is small
 [ -f "$D/ssh/ssh_host_ed25519_key" ] || ssh-keygen -q -t ed25519 -N '' -f "$D/ssh/ssh_host_ed25519_key" -C urban-edge
+
+# The data partition took the whole disk before it was mounted (urban-grow); its size is said once
+if [ ! -f "$D/etc/.grown" ]; then
+  touch "$D/etc/.grown"
+  echo "URBAN-DATA $(df -m --output=size "$D" | tail -n 1 | tr -d ' ') MiB"
+fi
 
 # Maintenance keys the installer put on the ESP (FAT: a Windows laptop can write it). Public keys only, each
 # one checked; they are added to the data partition and the file is renamed, so a key removed later over SSH
@@ -33,13 +44,24 @@ fi
 
 # KEY=value from the installer's text file on the ESP: CR/LF tolerant, only safe characters, never executed
 value() {
-  tr -d '\r' < "$2" | sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\([A-Za-z0-9._-]*\)[[:space:]]*$/\1/p" | tail -n 1
+  tr -d '\r' < "$2" | sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\([A-Za-z0-9.,_-]*\)[[:space:]]*$/\1/p" | tail -n 1
 }
 if [ ! -f "$D/etc/unit.conf" ] && [ -f /boot/efi/urban-unit.txt ]; then
   unit=$(value UNIT /boot/efi/urban-unit.txt)
   serial=$(value SERIAL /boot/efi/urban-unit.txt)
-  if [[ "$unit" =~ ^edge-[A-Za-z0-9._-]+$ ]] && [ "$unit" != "edge-J-00" ]; then
-    printf "UNIT=%s\nSERIAL=%s\n" "$unit" "$serial" > "$D/etc/unit.conf"
+  role=$(value ROLE /boot/efi/urban-unit.txt); role=${role:-unit}
+  host=$(value HOST /boot/efi/urban-unit.txt)
+  # each role has its own kind of name; the template's placeholder is no name at all
+  case "$role" in
+    unit) ok='^edge-[A-Za-z0-9._-]+$' ;;
+    district) ok='^district-[A-Za-z0-9._-]+$' ;;
+    center|district,center|center,district) ok='^center(-[A-Za-z0-9._-]+)?$'; role=${role/center,district/district,center} ;;
+    *) ok='^$'; echo "URBAN-ROLE refused: ROLE=$role (unit, district, center or district,center)" ;;
+  esac
+  if [[ "$unit" =~ $ok ]] && [ "$unit" != "edge-J-00" ]; then
+    printf "UNIT=%s\nSERIAL=%s\nROLE=%s\nHOST=%s\n" "$unit" "$serial" "$role" "$host" > "$D/etc/unit.conf"
+  elif [ -n "$unit" ] && [ "$unit" != "edge-J-00" ]; then
+    echo "URBAN-ROLE refused: the name $unit does not fit the role $role (edge-..., district-..., center...)"
   fi
 fi
 
@@ -50,20 +72,59 @@ if [ ! -f "$D/etc/unit.conf" ]; then
 fi
 UNIT=$(sed -n 's/^UNIT=//p' "$D/etc/unit.conf")
 SERIAL=$(sed -n 's/^SERIAL=//p' "$D/etc/unit.conf")
-KEY="$D/etc/pki/edge/$UNIT.key"
-if [ ! -f "$KEY" ]; then
-  /opt/urban/.venv/bin/python -m urban.edge --keygen --unit "$UNIT" --serial "$SERIAL" --pki "$D/etc/pki" > "$D/etc/enrolment.txt"
-  chown urban:urban "$KEY"
-  chmod 600 "$KEY"
-fi
-fingerprint=$(sed -n 's/^fingerprint: *\([0-9A-F-]*\).*/\1/p' "$D/etc/enrolment.txt")
-code=$(grep -o 'URBAN1:[^[:space:]]*' "$D/etc/enrolment.txt")
-echo "URBAN-ENROLMENT unit=$UNIT serial=${SERIAL:--} fingerprint=$fingerprint code=$code"
-/usr/local/bin/urban-console  # the same, on the unit's own screen
+ROLE=$(sed -n 's/^ROLE=//p' "$D/etc/unit.conf"); ROLE=${ROLE:-unit}  # units set up before roles existed
+HOST=$(sed -n 's/^HOST=//p' "$D/etc/unit.conf")
+hostname "$UNIT"  # /etc/hostname is read-only; the name is this machine's own
+echo "URBAN-ROLE role=$ROLE name=$UNIT"
 
-# A unit that has its kit works from every boot on. Its services cannot be "enabled" (that writes into the
-# read-only /etc), so they are started from here; --no-block: they wait for the network on their own.
-if [ -f "$D/etc/edge-$UNIT.env" ]; then
+# The firewall's role-dependent openings, read by nftables.conf (include /run/urban/nft/*.nft)
+install -d /run/urban/nft
+: > /run/urban/nft/role.nft
+case ",$ROLE," in *,center,*)
+  {
+    echo 'add rule inet urban input ip saddr $private tcp dport { 443, 8443 } accept comment "control centre: interface (HTTPS), units"'
+    echo 'add rule inet urban output tcp dport 443 accept comment "control centre: map data (OpenStreetMap)"'
+  } >> /run/urban/nft/role.nft ;;
+esac
+
+if [ "$ROLE" = unit ]; then
+  KEY="$D/etc/pki/edge/$UNIT.key"
+  if [ ! -f "$KEY" ]; then
+    /opt/urban/.venv/bin/python -m urban.edge --keygen --unit "$UNIT" --serial "$SERIAL" --pki "$D/etc/pki" > "$D/etc/enrolment.txt"
+    chown urban:urban "$KEY"
+    chmod 600 "$KEY"
+  fi
+  fingerprint=$(sed -n 's/^fingerprint: *\([0-9A-F-]*\).*/\1/p' "$D/etc/enrolment.txt")
+  code=$(grep -o 'URBAN1:[^[:space:]]*' "$D/etc/enrolment.txt")
+  echo "URBAN-ENROLMENT unit=$UNIT serial=${SERIAL:--} fingerprint=$fingerprint code=$code"
+fi
+/usr/local/bin/urban-console  # the same, on the machine's own screen
+
+# The role's services. They cannot be "enabled" (that writes into the read-only /etc), so they are started
+# from here; --no-block: they wait for the network on their own.
+case ",$ROLE," in *,center,*)
+  install -d -m 750 -o urban -g urban "$D/platform" "$D/platform/city"
+  if [ ! -f "$D/etc/platform.env" ]; then
+    {
+      echo "# The control centre on URBAN OS (urban-platform.service). Edit over SSH, then: systemctl restart urban-platform"
+      echo "URBAN_SOURCE=field"
+      echo "HOST=0.0.0.0"
+      echo "PORT=443"
+      echo "UI_TLS=on"
+      echo "DEVICE_HOST=0.0.0.0"
+      echo "DEVICE_PORT=8443"
+      echo "# the name (or address) units and operators use for this machine; it goes on the server certificate"
+      echo "DEVICE_NAME=${HOST:-$UNIT}"
+    } > "$D/etc/platform.env"
+    chmod 640 "$D/etc/platform.env"; chgrp urban "$D/etc/platform.env"
+  fi
+  systemctl start --no-block urban-platform.service
+  echo "URBAN-SERVICE starting the control centre (https://${HOST:-$UNIT}/)" ;;
+esac
+case ",$ROLE," in *,district,*)
+  if [ -f "$D/etc/cameras.json" ]; then systemctl start --no-block "urban-vision@$UNIT.service"; fi ;;
+esac
+if [ "$ROLE" = unit ] && [ -f "$D/etc/edge-$UNIT.env" ]; then
   systemctl start --no-block "urban-edge@$UNIT.service"
   if [ -f "$D/etc/cameras.json" ]; then systemctl start --no-block "urban-vision@$UNIT.service"; fi
   echo "URBAN-UNIT starting urban-edge@$UNIT"

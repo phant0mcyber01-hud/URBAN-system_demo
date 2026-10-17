@@ -1,0 +1,19 @@
+[Unit]
+Description=URBAN OS power: clock and camera work sized to the role, the load and the temperature
+After=urban-prepare.service
+Wants=urban-prepare.service
+
+[Service]
+ExecStart=/opt/urban/.venv/bin/python -m urban.node.power
+Restart=always
+RestartSec=5
+StandardOutput=journal+console
+# it writes cpufreq settings, /run/urban/power.json and the screen (urban-console), nothing else
+ProtectSystem=strict
+ReadWritePaths=/sys/devices/system/cpu -/run/urban -/run/agetty.reload
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

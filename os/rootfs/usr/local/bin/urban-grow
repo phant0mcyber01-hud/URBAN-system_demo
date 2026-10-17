@@ -1,0 +1,28 @@
+#!/bin/bash
+# Before the data partition is mounted: if the disk is bigger than the image, the data partition (the last one)
+# takes the rest. The image is ~5 GB whatever the disk.
+#
+# Done unmounted on purpose. Rewriting the partition table of a disk whose partition is mounted makes udev
+# re-read it; systemd then sees the partition vanish for a moment and unmounts it under the running system.
+# So: nothing is written when there is nothing to grow (every boot but the first on a bigger disk), the table
+# is written under the disk's lock (udev waits), and udev is let settle before the partition is checked,
+# grown and mounted.
+set -u
+part=$(readlink -f /dev/disk/by-partlabel/urban-data) || exit 0
+name=${part##*/}
+disk=/dev/$(lsblk -ndo PKNAME "$part")
+num=$(cat "/sys/class/block/$name/partition")
+end=$(( $(cat "/sys/class/block/$name/start") + $(cat "/sys/class/block/$name/size") ))
+total=$(blockdev --getsz "$disk")
+spare_mb=$(( (total - end) / 2048 ))
+if [ "$spare_mb" -lt 64 ]; then  # the backup GPT and rounding take a little; nothing worth growing
+  exit 0
+fi
+fail() { echo "URBAN-DATA could not grow: $*"; udevadm settle; exit 0; }  # the old size still works
+out=$(sfdisk --lock --no-reread --force --relocate gpt-bak-std "$disk" 2>&1) || fail "relocate: $out"
+out=$(echo ", +" | sfdisk --lock --no-reread --force -N "$num" "$disk" 2>&1) || fail "sfdisk: $out"
+out=$(partx -u -n "$num" "$disk" 2>&1) || fail "partx: $out"
+udevadm settle
+e2fsck -f -p "$part" >/dev/null 2>&1; [ $? -le 1 ] || fail "e2fsck found errors"
+out=$(resize2fs "$part" 2>&1) || fail "resize2fs: $out"
+echo "URBAN-DATA grown by ${spare_mb} MiB to the end of $disk"

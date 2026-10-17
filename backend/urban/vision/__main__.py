@@ -12,6 +12,7 @@
         the calibration page on the unit (see setup.py)
 
 Frames stay in memory on the unit and are never stored or sent; only metres go to the platform.
+`run` follows the machine's power plan (/run/urban/power.json, see power.py): fewer frames when it is hot.
 """
 import argparse
 import csv
@@ -22,13 +23,14 @@ from pathlib import Path
 
 from ..sensors.pipeline import QueuePipeline
 from . import cameras as cams
+from .power import PowerPlan, Stats, Throttle
 from .source import VideoSource, redact
 
 
-def make_detector(args):
+def make_detector(args, threads: int | None = None):
     from .detector import YoloxDetector
     try:
-        return YoloxDetector(Path(args.model), score=args.score, threads=args.threads)
+        return YoloxDetector(Path(args.model), score=args.score, threads=threads or args.threads or 2)
     except FileNotFoundError as err:
         raise SystemExit(str(err))
 
@@ -63,29 +65,45 @@ def run(args):
             print(f"vision: {c.get('camera')} is not calibrated yet, skipped (python -m urban.vision setup)", flush=True)
     if not ready:
         raise SystemExit("vision: no calibrated camera; nothing to measure")
-    detector = make_detector(args)
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    plan = PowerPlan(Path(args.power) if args.power else None, args.fps)
+    plan.refresh()
+    threads = plan.threads(args.threads)
+    detector = make_detector(args, threads)
     pipeline = QueuePipeline([cams.view(c) for c in ready])
     stop = threading.Event()
     feeds = [Latest(c, args.fps, stop) for c in ready]
-    out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    print(f"vision: {len(ready)} camera(s): " + ", ".join(f"{c['camera']}->{c['approach']} ({redact(c['source'])})" for c in ready),
-          flush=True)
-    written, errors = 0.0, {}
+    throttle, stats = Throttle(), Stats(out.parent / "vision.json")
+    print(f"vision: {len(ready)} camera(s), {threads} thread(s): "
+          + ", ".join(f"{c['camera']}->{c['approach']} ({redact(c['source'])})" for c in ready), flush=True)
+    written, errors, rate = 0.0, {}, plan.fps
     try:
         while True:
             busy = False
             for feed in feeds:
+                if not throttle.due(feed.cam["camera"], time.time(), rate):
+                    continue
                 got = feed.take()
                 if got is None:
                     continue
+                throttle.mark(feed.cam["camera"], time.time())
                 busy = True
                 t, frame = got
-                pipeline.feed(feed.cam["approach"], t, [b[:4] for b in detector.detect(frame)])
+                started = time.perf_counter()
+                boxes = detector.detect(frame)
+                stats.add((time.perf_counter() - started) * 1000)
+                pipeline.feed(feed.cam["approach"], t, [b[:4] for b in boxes])
             now = time.time()
             if now - written >= 1.0:
                 pipeline.write(out, now)
                 written = now
+                plan.refresh()
+                if plan.fps != rate:
+                    print(f"vision: power plan {rate} -> {plan.fps} frames/s per camera"
+                          + (" (paused)" if plan.fps == 0 else ""), flush=True)
+                    rate = plan.fps
+                stats.write(len(feeds), rate, now)
                 for feed in feeds:  # say it once when a camera breaks or comes back
                     if errors.get(feed.cam["camera"]) != feed.source.error:
                         errors[feed.cam["camera"]] = feed.source.error
@@ -146,12 +164,13 @@ def main():
     def detector_args(p):
         p.add_argument("--model", required=True, help="YOLOX ONNX model, e.g. /opt/urban/models/yolox_nano.onnx")
         p.add_argument("--score", type=float, default=0.35, help="minimum detection confidence")
-        p.add_argument("--threads", type=int, default=2, help="CPU threads for the network")
-        p.add_argument("--fps", type=float, default=4.0, help="frames per second per camera")
+        p.add_argument("--threads", type=int, help="CPU threads for the network (default: the power plan's, else 2)")
+        p.add_argument("--fps", type=float, default=4.0, help="frames per second per camera (the most; the power plan may lower it)")
 
     r = sub.add_parser("run", help="measure queues from the unit's cameras")
     r.add_argument("--cameras", required=True)
     r.add_argument("--out", required=True, help="queues.json the unit reads (--sensors)")
+    r.add_argument("--power", default="/run/urban/power.json", help="the machine's power plan ('' to ignore it)")
     detector_args(r)
     ch = sub.add_parser("check", help="run a recorded video through the pipeline")
     ch.add_argument("--video", required=True)
