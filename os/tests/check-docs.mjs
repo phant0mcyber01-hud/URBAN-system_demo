@@ -1,4 +1,4 @@
-// G8: docs/edge-os.md covers what a person needs to build, flash, start, update and trust the unit's OS,
+// docs/edge-os.md covers what a person needs to build, flash, start, update and trust the unit's OS,
 // and says plainly what has not been tried on real hardware.
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -18,4 +18,23 @@ for (const cmd of ["node os/build.mjs", "urban-unit setup", "urban-unit update",
   if (!text.includes(cmd)) fail(`the guide never shows ${cmd}`);
 }
 if (text.length < 4000) fail("the guide is too short to be followed");
+
+// docs/mini-pc.md: from a box to an enrolled unit, for a person with a Windows laptop
+const guide = join(ROOT, "docs", "mini-pc.md");
+if (!existsSync(guide)) fail("docs/mini-pc.md is missing");
+const g = readFileSync(guide, "utf8");
+const gh = [...g.matchAll(/^##+ (.+)$/gm)].map((m) => m[1].toLowerCase());
+const gneed = {
+  "requirements": /что нужно/, "files": /файлы/, "writing the image": /запись/, "firmware settings": /bios|uefi/,
+  "first boot": /первая загрузка/, "enrolment": /подключение к центру/, "maintenance": /обслуживание/,
+  "faults": /неполадки/, "stand checklist": /чек-лист/, "not tried": /не проверено/,
+};
+const gmissing = Object.entries(gneed).filter(([, rx]) => !gh.some((h) => rx.test(h))).map(([k]) => k);
+if (gmissing.length) fail("mini-pc.md sections missing: " + gmissing.join(", "));
+for (const must of ["node os/unit-image.mjs", "Rufus", "Secure Boot", "maintenance_ed25519", "Get-FileHash",
+  "urban-unit setup", "urban-unit code", "Power On", "ADAPTER=none", "не запускался ни разу"]) {
+  if (!g.includes(must)) fail(`mini-pc.md never says ${JSON.stringify(must)}`);
+}
+const context = readFileSync(join(ROOT, "CONTEXT.md"), "utf8");
+if (!context.includes("docs/mini-pc.md") || !context.includes("unit-image.mjs")) fail("CONTEXT.md does not record the mini-PC step");
 console.log("DOCS CHECK PASSED");

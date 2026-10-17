@@ -193,6 +193,7 @@ cp .env.example .env
 | [deploy/README.md](deploy/README.md) | установка на сервер и подключение блоков |
 | [docs/controllers.md](docs/controllers.md) | с какими контроллерами работает блок и как их подключить |
 | [docs/edge-os.md](docs/edge-os.md) | ОС блока на перекрёстке: сборка образа, первая загрузка, обновления и откат |
+| [docs/mini-pc.md](docs/mini-pc.md) | URBAN Edge на мини-ПК: запись образа, BIOS, подключение блока, чек-лист стенда |
 | [docs/vision.md](docs/vision.md) | зрение блока: камера → нейросеть → очередь в метрах |
 
 <details>

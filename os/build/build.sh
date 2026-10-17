@@ -26,7 +26,9 @@ OUT=/out
 COMPATIBLE=urban-edge-x86_64
 PACKAGES="systemd,systemd-sysv,systemd-timesyncd,systemd-resolved,udev,dbus,linux-image-amd64,initramfs-tools,\
 rauc,rauc-service,netbase,grub-common,openssh-server,nftables,python3,python3-venv,ca-certificates,iproute2,iputils-ping,kmod,\
-e2fsprogs,dosfstools,util-linux,procps,libglib2.0-0,libgomp1"
+e2fsprogs,dosfstools,util-linux,procps,libglib2.0-0,libgomp1,firmware-realtek,intel-microcode,amd64-microcode"
+# real mini-PCs: Realtek network chips want their firmware, and the CPU its microcode fixes (Debian's
+# non-free-firmware section, redistributable); Intel network chips need nothing
 ESP_MB=128; SLOT_MB=1536; DATA_MB=2048  # data: keys, kit, cameras and room for one update bundle
 mkdir -p "$OUT/cache/pip" "$OUT/keys" "$OUT/build"
 log() { echo ">> $*"; }
@@ -35,13 +37,14 @@ log() { echo ">> $*"; }
 bash /work/os/build/keys.sh "$OUT/keys"  # made once; valid from 2020 so a unit's wrong clock cannot block updates
 
 # ---- base system, cached by its package list
-BASE_ID=$(echo "bookworm $PACKAGES" | sha256sum | cut -c1-12)
+COMPONENTS=main,non-free-firmware
+BASE_ID=$(echo "bookworm $COMPONENTS $PACKAGES" | sha256sum | cut -c1-12)
 BASE="$OUT/cache/base-$BASE_ID.tar"
 ROOT=/tmp/root
 rm -rf "$ROOT"; mkdir -p "$ROOT"
 if [ ! -f "$BASE" ]; then
   log "debootstrap bookworm (first build takes a while)"
-  debootstrap --variant=minbase --include="$PACKAGES" bookworm "$ROOT" http://deb.debian.org/debian
+  debootstrap --variant=minbase --components="$COMPONENTS" --include="$PACKAGES" bookworm "$ROOT" http://deb.debian.org/debian
   tar -C "$ROOT" -cf "$BASE.tmp" . && mv "$BASE.tmp" "$BASE"
 else
   log "base system from cache ($BASE_ID)"

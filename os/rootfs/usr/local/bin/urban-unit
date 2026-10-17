@@ -22,8 +22,9 @@ case "${1:-status}" in
     [ -n "$UNIT" ] || { echo "no unit identity yet" >&2; exit 1; }
     /opt/urban/.venv/bin/python -m urban.edge --setup "$2" --unit "$UNIT" --pki /etc/urban/pki --env "/etc/urban/edge-$UNIT.env"
     chown -R urban:urban "$D/etc/pki"
-    systemctl enable --now "urban-edge@$UNIT"
-    if [ -f /etc/urban/cameras.json ]; then systemctl enable --now "urban-vision@$UNIT"; fi
+    # not "enable": /etc is read-only; urban-prepare starts a set-up unit at every boot
+    systemctl restart "urban-edge@$UNIT"
+    if [ -f /etc/urban/cameras.json ]; then systemctl restart "urban-vision@$UNIT"; fi
     echo "unit $UNIT started; it appears online in the platform under Устройства"
     ;;
   update)

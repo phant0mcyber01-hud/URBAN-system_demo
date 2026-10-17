@@ -29,7 +29,12 @@ slot=$(sed -n 's/.*rauc\.slot=\([AB]\).*/\1/p' /proc/cmdline)
   printf "  self-check    %s\n" "$check"
   printf "  health        %s\n" "$health"
   printf "  address       \\\\4\n"
-  echo "  maintenance   SSH with a key only - there are no passwords on this unit"
+  keys=$(grep -c . "$D/ssh/authorized_keys" 2>/dev/null); keys=${keys:-0}
+  if [ "$keys" -gt 0 ]; then
+    echo "  maintenance   SSH as root with a key only ($keys key(s) allowed) - no passwords on this unit"
+  else
+    echo "  maintenance   NO SSH KEY YET: put maintenance.pub on the URBAN-ESP partition and restart"
+  fi
   echo "  ------------------------------------------------------------------------------"
   echo
 } > "$OUT.tmp" && mv "$OUT.tmp" "$OUT"

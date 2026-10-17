@@ -113,8 +113,10 @@ export function exportRelease(version, { image = true } = {}) {
 }
 
 // a scenario of os/tests/vm.py in the builder (QEMU inside the container)
+// (a last argument { extra: [docker args] } adds mounts, e.g. the release folder)
 export function scenario(name, ...args) {
   ensureBuilder();
-  const r = inBuilder(`python3 /work/os/tests/vm.py ${name} ${args.join(" ")}`, { privileged: true });
+  const { extra = [] } = typeof args.at(-1) === "object" ? args.pop() : {};
+  const r = inBuilder(`python3 /work/os/tests/vm.py ${name} ${args.join(" ")}`, { privileged: true, extra });
   return r.status;
 }

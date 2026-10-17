@@ -11,6 +11,21 @@ install -d -m 700 "$D/ssh"
 install -d -m 700 "$D/update"  # update bundles are staged here: the root is read-only, /tmp is small
 [ -f "$D/ssh/ssh_host_ed25519_key" ] || ssh-keygen -q -t ed25519 -N '' -f "$D/ssh/ssh_host_ed25519_key" -C urban-edge
 
+# Maintenance keys the installer put on the ESP (FAT: a Windows laptop can write it). Public keys only, each
+# one checked; they are added to the data partition and the file is renamed, so a key removed later over SSH
+# does not come back at the next boot. Whoever holds the disk could do the same - the disk is the trust boundary.
+if [ -f /boot/efi/maintenance.pub ]; then
+  touch "$D/ssh/authorized_keys"; chmod 600 "$D/ssh/authorized_keys"
+  added=0
+  while read -r line; do
+    case "$line" in ssh-ed25519\ *|ecdsa-sha2-nistp*\ *|ssh-rsa\ *) ;; *) continue ;; esac
+    printf '%s\n' "$line" | ssh-keygen -l -f - >/dev/null 2>&1 || continue
+    grep -qxF "$line" "$D/ssh/authorized_keys" || { printf '%s\n' "$line" >> "$D/ssh/authorized_keys"; added=$((added + 1)); }
+  done < <(tr -d '\r' < /boot/efi/maintenance.pub)
+  mv -f /boot/efi/maintenance.pub /boot/efi/maintenance.pub.imported
+  echo "URBAN-MAINTENANCE-KEYS added=$added total=$(grep -c . "$D/ssh/authorized_keys")"
+fi
+
 if compgen -G "$D/etc/network/*.network" >/dev/null; then
   install -d /run/systemd/network
   cp "$D"/etc/network/*.network /run/systemd/network/
@@ -45,3 +60,11 @@ fingerprint=$(sed -n 's/^fingerprint: *\([0-9A-F-]*\).*/\1/p' "$D/etc/enrolment.
 code=$(grep -o 'URBAN1:[^[:space:]]*' "$D/etc/enrolment.txt")
 echo "URBAN-ENROLMENT unit=$UNIT serial=${SERIAL:--} fingerprint=$fingerprint code=$code"
 /usr/local/bin/urban-console  # the same, on the unit's own screen
+
+# A unit that has its kit works from every boot on. Its services cannot be "enabled" (that writes into the
+# read-only /etc), so they are started from here; --no-block: they wait for the network on their own.
+if [ -f "$D/etc/edge-$UNIT.env" ]; then
+  systemctl start --no-block "urban-edge@$UNIT.service"
+  if [ -f "$D/etc/cameras.json" ]; then systemctl start --no-block "urban-vision@$UNIT.service"; fi
+  echo "URBAN-UNIT starting urban-edge@$UNIT"
+fi
