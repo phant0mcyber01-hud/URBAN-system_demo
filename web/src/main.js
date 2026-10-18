@@ -128,24 +128,36 @@ const panel = createPanel(scene, S, {
   }),
 });
 
-// enrolment of a unit: the code it printed -> the registry; then its kit for the installer
+// enrolment of a device: the code it printed -> the registry; then its kit for the installer. A junction unit
+// names its junction and, if it connects through a district server, that district; a district server (its code
+// starts with district-) names the address its units connect to.
 const UNIT_CODE = /URBAN1:edge-([A-Za-z0-9._-]+):/i;
+const DISTRICT_CODE = /URBAN1:district-/i;
+const districts = () => Object.values(S.dev).filter((d) => d.k === 'district' && d.s !== 'revoked');
 async function openEnrol(junction = '') {
   if (!S.junctions) await loadJunctions();
   const options = (S.junctions ?? []).map((j) => {
     const unit = S.dev[j.id];
     return `<option value="${esc(j.id)}" ${j.id === junction ? 'selected' : ''}>${esc(j.id)} · ${esc(j.name)}${unit ? ' — замена блока' : ''}</option>`;
   }).join('');
+  const via = districts().map((d) => `<option value="${esc(d.id)}">${esc(d.id)} · ${esc(d.addr ?? '')}</option>`).join('');
   $('enrol-body').innerHTML = `<form data-form="enrol">
-      <p class="muted">На блоке: <code>python -m urban.edge --keygen --unit edge-J-07 --serial URB-0042</code> — ключ
-        рождается на блоке и не покидает его, наружу идёт только код с открытой половиной.</p>
+      <p class="muted">Код печатает сама машина на своём экране (URBAN OS) или команда
+        <code>python -m urban.edge --keygen --unit edge-J-07 --serial URB-0042</code> — ключ рождается на машине
+        и не покидает её, наружу идёт только код с открытой половиной. Районный сервер подключается так же: его код
+        начинается с <code>URBAN1:district-</code>.</p>
       <label>Код подключения <textarea name="code" rows="3" required spellcheck="false" placeholder="URBAN1:edge-J-07:…"></textarea></label>
-      <label>Перекрёсток <select name="junction" required>${options}</select></label>
+      <label data-for="unit">Перекрёсток <select name="junction">${options}</select></label>
+      <label data-for="unit">Подключается через <select name="district"><option value="">напрямую к центру</option>${via}</select></label>
+      <label data-for="district" hidden>Адрес районного сервера для его блоков <input name="address" placeholder="10.1.0.2 или district-1.city" spellcheck="false"></label>
       <button type="submit">Подключить</button>
       <small class="err" data-err></small>
     </form>`;
   const form = $('enrol-body').querySelector('form');
-  form.code.oninput = () => {  // the code names its unit, and the unit its junction
+  const kind = () => (DISTRICT_CODE.test(form.code.value) ? 'district' : 'unit');
+  form.code.oninput = () => {  // the code names its device: a unit names its junction, a district asks for its address
+    const k = kind();
+    for (const l of form.querySelectorAll('label[data-for]')) l.hidden = l.dataset.for !== k;
     const m = UNIT_CODE.exec(form.code.value);
     if (m && [...form.junction.options].some((o) => o.value === m[1])) form.junction.value = m[1];
   };
@@ -153,7 +165,10 @@ async function openEnrol(junction = '') {
     e.preventDefault();
     form.querySelector('[data-err]').textContent = '';
     try {
-      const r = await api.post('/api/devices/enroll-code', { code: form.code.value, junction: form.junction.value });
+      const body = kind() === 'district'
+        ? { code: form.code.value, address: form.address.value.trim() }
+        : { code: form.code.value, junction: form.junction.value, district: form.district.value || null };
+      const r = await api.post('/api/devices/enroll-code', body);
       enrolDone(r);
     } catch (err) { form.querySelector('[data-err]').textContent = err.message; }
   };
@@ -161,8 +176,21 @@ async function openEnrol(junction = '') {
   form.code.focus();
 }
 function enrolDone(r) {
+  if (r.kind === 'district') {
+    $('enrol-body').innerHTML = `<div class="item">${chipHtmlRaw('ok', r.replaced ? 'ключ заменён' : 'районный сервер учтён')}
+        <b>${esc(r.id)}</b> · адрес для блоков ${esc(r.address)} · серийный номер ${esc(r.serial)}</div>
+      <p class="muted">Отпечаток ключа — сверьте с тем, что показывает экран сервера.</p>
+      <p class="fp">${esc(r.fingerprint)}</p>
+      <h4>Дальше на районном сервере</h4>
+      <div class="item"><b>1.</b> Скачать комплект и перенести на сервер: адрес центра, его сертификат и корневой ключ. Секретов в нём нет.</div>
+      <div class="item"><b>2.</b> <code>urban-unit setup urban-${esc(r.id)}.json</code> — сервер начнёт отчитываться центру;
+        его ретранслятор уже несёт соединения блоков в центр. Блоки этого района подключайте «через ${esc(r.id)}».</div>
+      <div class="btns"><button class="go" data-kit="${esc(r.id)}">Скачать комплект</button></div>`;
+    $('enrol-body').querySelector('[data-kit]').onclick = () => run(() => downloadKit(r.id));
+    return;
+  }
   $('enrol-body').innerHTML = `<div class="item">${chipHtmlRaw('ok', r.replaced ? 'ключ заменён' : 'блок учтён')}
-      <b>${esc(r.id)}</b> на перекрёстке ${esc(r.junction)} · серийный номер ${esc(r.serial)}</div>
+      <b>${esc(r.id)}</b> на перекрёстке ${esc(r.junction)}${r.district ? ` · через ${esc(r.district)}` : ''} · серийный номер ${esc(r.serial)}</div>
     <p class="muted">Отпечаток ключа — сверьте с тем, что напечатал блок (по телефону, глазами). Не совпадает —
       отзовите блок в разделе «Устройства»: код подменили.</p>
     <p class="fp">${esc(r.fingerprint)}</p>

@@ -9,23 +9,18 @@ OUT=/run/urban/console.issue
 install -d /run/urban
 conf() { sed -n "s/^$1=//p" "$D/etc/unit.conf" 2>/dev/null; }
 unit=$(conf UNIT); serial=$(conf SERIAL); role=$(conf ROLE); role=${role:-unit}; host=$(conf HOST)
+center=$(conf CENTER); vision=$(conf VISION)
+crypt=$(cat /run/urban/data-crypt 2>/dev/null)
+relay=$(cat /run/urban/relay.txt 2>/dev/null)  # written by urban-relay as the screen shows it
 fingerprint=$(sed -n 's/^fingerprint: *\([0-9A-F-]*\).*/\1/p' "$D/etc/enrolment.txt" 2>/dev/null)
 code=$(grep -o 'URBAN1:[^[:space:]]*' "$D/etc/enrolment.txt" 2>/dev/null)
 check=$(cat /run/urban/os-check 2>/dev/null || echo "running")
 health=$(cat /run/urban/health 2>/dev/null || echo "waiting for the self-check")
 version=$(sed -n 's/^VERSION=//p' /etc/urban-os-release)
 slot=$(sed -n 's/.*rauc\.slot=\([AB]\).*/\1/p' /proc/cmdline)
-power=$(python3 - 2>/dev/null <<'PY'
-import json
-p = json.load(open("/run/urban/power.json"))
-v = p["vision"]
-temp = f"{p['temp_c']} C" if p["sensor"] else "no temperature sensor"
-work = "vision paused (too hot)" if v["paused"] else f"vision {v['fps']} frames/s per camera, {v['threads']} thread(s)"
-print(f"{p['level']} - {temp}, clock up to {p['clock_pct']}%, {work}")
-PY
-)
+power=$(cat /run/urban/power.txt 2>/dev/null)  # written by the power manager as the screen shows it
 case "$role" in
-  unit) what="junction unit" ;;
+  unit) what="junction unit"; [ "$vision" = off ] && what="junction unit, light (no cameras)" ;;
   district) what="district server" ;;
   center) what="control centre" ;;
   district,center) what="district server and control centre" ;;
@@ -41,6 +36,11 @@ esac
     printf "  key           %s\n" "${fingerprint:-making it now...}"
     printf "  enrolment     %s\n" "${code:-}"
     printf "                (paste it in the platform: Devices -> Enrol a unit; compare the key above)\n"
+  elif [ -n "$unit" ] && [ "$role" = district ]; then
+    printf "  key           %s\n" "${fingerprint:-making it now...}"
+    printf "  enrolment     %s\n" "${code:-}"
+    printf "                (paste it in the platform: Devices -> Enrol, with this server's address)\n"
+    printf "  relay         units -> %s; %s\n" "${center:-NO CENTER SET (CENTER= in urban-unit.txt)}" "${relay:-no unit yet}"
   elif [ -n "$unit" ]; then
     case ",$role," in *,center,*)
       printf "  interface     https://%s/   (the first admin password: journalctl -u urban-platform)\n" "${host:-$unit}" ;;
@@ -53,8 +53,18 @@ esac
   printf "  self-check    %s\n" "$check"
   printf "  health        %s\n" "$health"
   printf "  power         %s\n" "${power:-starting}"
+  case "$crypt" in
+    luks2-tpm2) echo "  data          encrypted - key sealed in this machine's TPM (a disk alone cannot be read)" ;;
+    plain) echo "  data          NOT encrypted - this machine has no TPM" ;;
+    *) echo "  data          checking..." ;;
+  esac
   printf "  address       \\\\4\n"
-  keys=$(grep -c . "$D/ssh/authorized_keys" 2>/dev/null); keys=${keys:-0}
+  # the power manager redraws this screen from a sandbox that cannot see the SSH keys: the count is kept in /run
+  if [ -r "$D/ssh/authorized_keys" ]; then
+    keys=$(grep -c . "$D/ssh/authorized_keys" 2>/dev/null); keys=${keys:-0}; echo "$keys" > /run/urban/ssh-keys
+  else
+    keys=$(cat /run/urban/ssh-keys 2>/dev/null); keys=${keys:-0}
+  fi
   if [ "$keys" -gt 0 ]; then
     echo "  maintenance   SSH as root with a key only ($keys key(s) allowed) - no passwords on this machine"
   else

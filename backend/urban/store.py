@@ -176,9 +176,10 @@ class Store:
                                    "WHERE device = ? AND at >= ? ORDER BY at", (device, since)).fetchall()
         return [dict(zip(("at", "online", "status", "temp", "door", "controller", "leases"), r)) for r in rows]
 
-    def add_queues(self, queues: dict[str, dict | None]):
-        """queues: junction id -> {approach id: mean metres} (None for a junction without data)."""
-        at = self.clock()
+    def add_queues(self, queues: dict[str, dict | None], at: float | None = None):
+        """queues: junction id -> {approach id: mean metres} (None for a junction without data).
+        at: the reading's own time, for reports that arrive late (a district's outage buffer)."""
+        at = self.clock() if at is None else at
         with self.lock:
             self.db.executemany("INSERT INTO queues(at, run, junction, approach, metres) VALUES (?, ?, ?, ?, ?)",
                                 [(at, self.run, j, a, round(float(m), 1)) for j, per in queues.items() if per

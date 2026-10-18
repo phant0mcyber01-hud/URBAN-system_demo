@@ -15,7 +15,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from . import crypto
 from .health import clean
-from .registry import REVOKED, Registry
+from .registry import REVOKED, Registry, kind_of
 
 HELLO_TIMEOUT = 10  # seconds a connection may stay unauthenticated
 
@@ -100,6 +100,9 @@ class DeviceHub:
                     self.seen[device] = {"at": time.time(), "health": clean(report.get("health"))}
                     if isinstance(report.get("epoch"), int) and not isinstance(report["epoch"], bool):
                         self.epochs[device] = report["epoch"]  # the gateway key epoch the unit obeys now
+                    if kind_of(rec) == "district":  # which junctions it is trusted for, from the registry as it is now
+                        rec = {**rec, "junctions": [d["junction"] for d in self.registry.devices.values()
+                                                    if d.get("district") == rec["id"] and d.get("junction")]}
                     self.on_report(rec, report)
         except (WebSocketDisconnect, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError):
             pass  # the usual ends of a session: gone, silent, or talking nonsense
@@ -131,12 +134,22 @@ class DeviceHub:
             if ws is not None:
                 asyncio.ensure_future(_close(ws))
 
-    async def enroll(self, device: str, junction: dict, public: str, serial: str = "") -> dict:
-        rec = self.registry.enroll(device, junction, public, serial)
+    async def enroll(self, device: str, junction: dict, public: str, serial: str = "", district: str | None = None) -> dict:
+        rec = self.registry.enroll(device, junction, public, serial, district)
         ws = self.sessions.pop(device, None)
         if ws is not None:  # a session on the previous key ends; the unit reconnects with its new one
             await _close(ws)
         return rec
+
+    async def enroll_district(self, device: str, address: str, public: str, serial: str = "") -> dict:
+        rec = self.registry.enroll_district(device, address, public, serial)
+        ws = self.sessions.pop(device, None)
+        if ws is not None:
+            await _close(ws)
+        return rec
+
+    def assign(self, device: str, district: str | None) -> dict | None:
+        return self.registry.assign(device, district)
 
     async def set_plans(self, tls: str, plans: set[int] | None):
         """A junction's approved plans changed: its unit is reconnected so it learns them at session start."""
@@ -145,7 +158,7 @@ class DeviceHub:
         else:
             self.plans.pop(tls, None)
         for rec in self.registry.devices.values():
-            if rec["tls"] == tls and (ws := self.sessions.pop(rec["id"], None)) is not None:
+            if rec.get("tls") == tls and (ws := self.sessions.pop(rec["id"], None)) is not None:
                 await _close(ws, CLOSED_PLANS)
 
     async def remove(self, device: str) -> dict | None:
@@ -170,7 +183,8 @@ class DeviceHub:
         out = []
         for rec in self.registry.devices.values():
             seen = self.seen.get(rec["id"], {})
-            out.append({"id": rec["id"], "junction": rec["junction"], "tls": rec["tls"], "name": rec.get("name", ""),
+            out.append({"id": rec["id"], "kind": kind_of(rec), "junction": rec.get("junction"), "tls": rec.get("tls"),
+                        "name": rec.get("name", ""), "address": rec.get("address"), "district": rec.get("district"),
                         "serial": rec.get("serial", ""), "enrolled": rec.get("enrolled", ""),
                         "first_seen": rec.get("first_seen"),
                         "fingerprint": crypto.fingerprint(rec["public_key"]),

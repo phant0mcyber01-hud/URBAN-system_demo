@@ -32,12 +32,21 @@ export function docker(args, opts) {
 }
 
 let ready = false;
+// the builder image is rebuilt only when its Dockerfile changed: the image carries the Dockerfile's digest as a label
+export function dockerfileDigest() {
+  return createHash("sha256").update(readFileSync(join(ROOT, "os", "build", "Dockerfile"))).digest("hex").slice(0, 16);
+}
 export function ensureBuilder() {
   if (ready) return;
   const info = docker(["info", "--format", "{{.ServerVersion}}"], { capture: true });
   if (info.status !== 0) fail("the Docker engine is not running (it is only the build and test environment)");
-  const r = docker(["build", "-q", "-t", IMAGE, join(ROOT, "os", "build")], { capture: true });
-  if (r.status !== 0) fail("builder image: " + r.stderr);
+  const want = dockerfileDigest();
+  const have = docker(["image", "inspect", "-f", '{{index .Config.Labels "urban.dockerfile"}}', IMAGE], { capture: true });
+  if (have.status !== 0 || have.stdout.trim() !== want) {
+    console.log(">> builder image: building from os/build/Dockerfile");
+    const r = docker(["build", "-q", "--label", `urban.dockerfile=${want}`, "-t", IMAGE, join(ROOT, "os", "build")], { capture: true });
+    if (r.status !== 0) fail("builder image: " + r.stderr);
+  }
   ready = true;
 }
 

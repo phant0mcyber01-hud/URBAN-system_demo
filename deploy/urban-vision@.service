@@ -4,8 +4,7 @@
 # Writes /run/urban/queues.json, which urban-edge@ reads (SENSORS). Frames stay in memory, nothing is recorded.
 [Unit]
 Description=URBAN Edge camera vision %i
-After=network-online.target
-Wants=network-online.target
+After=network.target
 
 [Service]
 User=urban
@@ -16,12 +15,40 @@ ExecStart=/opt/urban/.venv/bin/python -m urban.vision run --cameras /etc/urban/c
     --model /opt/urban/models/yolox_nano.onnx --out /run/urban/queues.json
 Restart=always
 RestartSec=3
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-PrivateTmp=true
 RuntimeDirectory=urban
 RuntimeDirectoryPreserve=yes
+# The sandbox: frames come over the network (RTSP) and stay in this process; it writes one file of numbers.
+# A hacked vision process sees no key of any kind and cannot write anywhere but /run/urban.
+NoNewPrivileges=yes
+ProtectSystem=strict
+InaccessiblePaths=-/var/lib/urban/ssh -/var/lib/urban/etc/pki -/var/lib/urban/update -/var/lib/urban/rauc -/var/lib/urban/platform -/boot
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+KeyringMode=private
+SystemCallArchitectures=native
+# the detector pins its threads to cores (sched_setaffinity): @resources stays allowed here
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

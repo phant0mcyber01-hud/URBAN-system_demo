@@ -55,7 +55,8 @@ node os/unit-image.mjs --unit edge-J-12 --serial URB-0002
 ```
 
 `--unit` — `edge-` и номер перекрёстка, как в центре управления; `--serial` — номер с наклейки на коробке.
-`--key путь/к/ключу.pub` — если на блок должен входить другой ключ.
+`--key путь/к/ключу.pub` — если на блок должен входить другой ключ. `--vision off` — лёгкий блок без камер
+(хватит 1 ГБ памяти). Для районного сервера: `--role district --unit district-1 --serial SRV-1 --center <адрес центра>`.
 
 ### Проверить, что файл не испорчен
 
@@ -111,6 +112,7 @@ Linux, а форматирование уничтожит запись.
 |---|---|---|
 | Boot mode / CSM | **UEFI**, CSM (Legacy) выключен | загрузчик блока — UEFI |
 | Secure Boot | **Disabled** | загрузчик URBAN пока не подписан ключом Microsoft; с включённым Secure Boot мини-ПК откажется его запускать |
+| TPM / fTPM / PTT | **Enabled** | с TPM раздел данных блока шифруется, и вынутый диск прочитать нельзя; без TPM блок работает, но раздел остаётся открытым, и экран об этом скажет |
 | Boot order / Boot priority | флешка или диск с URBAN — первым | или разово: меню загрузки (обычно F7, F11 или F12) |
 | Restore on AC power loss / After power failure | **Power On** | в шкафу пропадает питание: блок должен включиться сам, без человека |
 
@@ -145,6 +147,7 @@ Linux, а форматирование уничтожит запись.
   self-check    OK - read-only system, data writable, firewall on, watchdog 30s
   health        good - this system is marked working
   power         cool - 48.0 C, clock up to 100%, vision 4.0 frames/s per camera, 2 thread(s)
+  data          encrypted - key sealed in this machine's TPM (a disk alone cannot be read)
   address       192.168.1.57
   maintenance   SSH as root with a key only (1 key(s) allowed) - no passwords on this machine
   ------------------------------------------------------------------------------
@@ -156,6 +159,8 @@ Linux, а форматирование уничтожит запись.
 - **address** — адрес в вашей сети. Запишите его;
 - **power** — уровень `cool`, `warm`, `hot` или `critical` и температура процессора. При перегреве блок сам
   разбирает меньше кадров и снижает частоту (см. [edge-os.md](edge-os.md#мощность));
+- **data** — `encrypted`: раздел данных зашифрован, ключ в TPM этого мини-ПК; `NOT encrypted - this machine has
+  no TPM`: включите fTPM в BIOS и запишите образ заново, если шифрование нужно;
 - **maintenance** — `1 key(s) allowed`: ключ обслуживания принят.
 
 Входа с клавиатуры у блока нет: паролей не существует, это сделано намеренно. Всё остальное — по сети.
@@ -271,3 +276,4 @@ ssh -i data/os/keys/maintenance_ed25519 root@<адрес> 'urban-unit status; gr
 - **Видео AMD.** Драйвер видео AMD намеренно не загружается (без своей прошивки он оставляет экран чёрным), экран
   работает через встроенный видеорежим UEFI. На настоящем AMD не проверено.
 - **Рост раздела данных на весь диск** проверен в QEMU на диске на 6 ГБ больше образа; на настоящем SSD — нет.
+- **Шифрование с настоящим TPM.** Проверено с программным TPM в QEMU; fTPM реального мини-ПК — нет.

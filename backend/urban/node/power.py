@@ -114,18 +114,23 @@ def vision_plan(profile: Profile, roles: list[str], level: str, cores: int, came
         if fps > fits:
             fps, overloaded = max(fits, 0.2), True
     return {"fps": round(fps, 2), "threads": threads, "cameras": cameras, "overloaded": overloaded,
-            "paused": fps == 0}
+            "paused": fps == 0, "off": False}
+
+
+NO_VISION = {"fps": 0.0, "threads": 0, "cameras": 0, "overloaded": False, "paused": False, "off": True}
 
 
 def decide(roles: list[str], temp: float | None, busy: float, cores: int, cameras: int = 0,
-           ms_per_frame: float | None = None, base_fps: float = 4.0, previous: str | None = None) -> dict:
+           ms_per_frame: float | None = None, base_fps: float = 4.0, previous: str | None = None,
+           vision_off: bool = False) -> dict:
+    """vision_off: a light unit (VISION=off): no camera work is planned, whatever is configured."""
     profile = profile_for(roles)
     level = level_for(temp, profile, previous)
     return {
         "roles": roles, "level": level, "temp_c": None if temp is None else round(temp, 1), "sensor": temp is not None,
         "busy_pct": round(busy, 1), "cores": cores, "clock_pct": round(profile.clock[level] * 100),
         "epp": epp_for(busy, profile, level),
-        "vision": vision_plan(profile, roles, level, cores, cameras, base_fps, ms_per_frame),
+        "vision": dict(NO_VISION) if vision_off else vision_plan(profile, roles, level, cores, cameras, base_fps, ms_per_frame),
     }
 
 
@@ -238,21 +243,37 @@ def roles_from(conf: Path) -> list[str]:
     return parse_roles(role)
 
 
+def vision_off(conf: Path) -> bool:
+    """VISION=off in unit.conf: a light unit, no camera work ever."""
+    text = _read(conf) or ""
+    return any(line.strip().lower() == "vision=off" for line in text.splitlines())
+
+
+def screen_line(plan: dict) -> str:
+    """The plan as the machine's screen shows it (urban-console reads it as text: no interpreter per redraw)."""
+    v = plan["vision"]
+    temp = f"{plan['temp_c']} C" if plan["sensor"] else "no temperature sensor"
+    work = ("no vision (light unit)" if v.get("off") else "vision paused (too hot)" if v["paused"]
+            else f"vision {v['fps']} frames/s per camera, {v['threads']} thread(s)")
+    return f"{plan['level']} - {temp}, clock up to {plan['clock_pct']}%, {work}"
+
+
 def write_plan(plan: dict, path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(plan, indent=1))
-    tmp.replace(path)
-    try:
-        path.chmod(0o644)  # vision runs as the urban user and only reads it
-    except OSError:
-        pass
+    for target, text in ((path, json.dumps(plan, indent=1)), (path.with_suffix(".txt"), screen_line(plan) + "\n")):
+        tmp = target.with_suffix(target.suffix + ".tmp")
+        tmp.write_text(text)
+        tmp.replace(target)
+        try:
+            target.chmod(0o644)  # vision runs as the urban user and only reads it
+        except OSError:
+            pass
 
 
 def summary(plan: dict) -> str:
     v = plan["vision"]
     temp = f"{plan['temp_c']}C" if plan["sensor"] else "no-sensor"
-    work = "paused" if v["paused"] else f"{v['fps']}fps/{v['threads']}thr" + (" overloaded" if v["overloaded"] else "")
+    work = "off" if v.get("off") else "paused" if v["paused"] else f"{v['fps']}fps/{v['threads']}thr" + (" overloaded" if v["overloaded"] else "")
     return (f"URBAN-POWER roles={','.join(plan['roles'])} level={plan['level']} temp={temp} busy={plan['busy_pct']}% "
             f"clock={plan['clock_pct']}% epp={plan['epp']} vision={work} cameras={v['cameras']}")
 
@@ -268,12 +289,14 @@ def main(argv=None):
     args = ap.parse_args(argv)
     root, plan_path = Path(args.root), Path(args.plan)
     roles = roles_from(Path(args.conf))
+    light = vision_off(Path(args.conf))
     level, said, before = None, None, cpu_times(root)
     while True:
         time.sleep(0 if args.once else args.interval)
         after = cpu_times(root)
-        cams, ms = camera_load(plan_path.parent, Path(args.conf).parent)
-        plan = decide(roles, temperature(root), busy_pct(before, after), cores(root), cams, ms, args.base_fps, level)
+        cams, ms = (0, None) if light else camera_load(plan_path.parent, Path(args.conf).parent)
+        plan = decide(roles, temperature(root), busy_pct(before, after), cores(root), cams, ms, args.base_fps, level,
+                      vision_off=light)
         before, level = after, plan["level"]
         plan["applied"] = len(apply(plan, root))
         plan["at"] = round(time.time(), 1)

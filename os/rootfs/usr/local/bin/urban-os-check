@@ -12,6 +12,13 @@ if touch /usr/.urban-write-test 2>/dev/null; then rm -f /usr/.urban-write-test; 
 
 dopts=$(findmnt -n -o OPTIONS /var/lib/urban 2>/dev/null)
 [[ ",$dopts," == *,rw,* ]] || fail+=("data partition not mounted read-write")
+dsrc=$(findmnt -n -o SOURCE /var/lib/urban 2>/dev/null)
+crypt=plain
+if [ "$dsrc" = /dev/mapper/urban-data ] && cryptsetup status urban-data 2>/dev/null | grep -q 'type: *LUKS2'; then
+  crypt=luks2-tpm2
+elif [ -c /dev/tpmrm0 ]; then
+  fail+=("this machine has a TPM but its data partition is not encrypted")
+fi
 
 if systemctl is-active --quiet nftables && nft list table inet urban >/dev/null 2>&1; then
   nft list chain inet urban input | grep -q 'policy drop' || fail+=("firewall input policy is not drop")
@@ -33,18 +40,38 @@ if [ -z "$unit" ]; then
 elif [ "$role" = unit ]; then
   [ -f "/var/lib/urban/etc/pki/edge/$unit.key" ] || fail+=("unit $unit has no key")
 fi
-/opt/urban/.venv/bin/python -c "import urban.edge.__main__, urban.node.power" 2>/dev/null || fail+=("URBAN software does not start")
+# The URBAN software: where its service is meant to run, the proof is that it runs and stays up (a broken update
+# shows here and is rolled back); elsewhere every module must at least be found (no execution, no import cost:
+# the full import used to be the most expensive thing this machine did at boot).
+python_ok() {
+  /opt/urban/.venv/bin/python -I -c "import importlib.util as u, sys; sys.exit(any(u.find_spec(m) is None for m in sys.argv[1:]))" "$@" 2>/dev/null
+}
+stays_up() {  # the unit active now, and the same process five seconds later
+  local i pid
+  for i in $(seq 1 60); do systemctl is-active --quiet "$1" && break; sleep 1; done
+  pid=$(systemctl show -p MainPID --value "$1"); sleep 5
+  systemctl is-active --quiet "$1" && [ "$pid" != 0 ] && [ "$(systemctl show -p MainPID --value "$1")" = "$pid" ]
+}
+python_ok urban.edge.__main__ urban.node.power urban.node.district urban.platform || fail+=("URBAN software does not start")
 systemctl cat urban-edge@check.service >/dev/null 2>&1 || fail+=("urban-edge@ service missing")
+systemctl cat urban-relay.service urban-district@check.service >/dev/null 2>&1 || fail+=("district services missing")
+if [ "$role" = district ]; then
+  [ -f "/var/lib/urban/etc/pki/edge/$unit.key" ] || fail+=("district $unit has no key")
+fi
+if [ "$role" = unit ] && [ -f "/var/lib/urban/etc/edge-$unit.env" ]; then
+  stays_up "urban-edge@$unit.service" || fail+=("the unit service urban-edge@$unit does not stay up")
+fi
 case ",$role," in *,center,*)
-  # its libraries only: importing the app itself would make the centre's keys here, as root
-  /opt/urban/.venv/bin/python -c "import fastapi, uvicorn, urban.platform" 2>/dev/null || fail+=("the control centre's software is broken")
+  python_ok fastapi uvicorn || fail+=("the control centre's software is broken")
+  stays_up urban-platform.service || fail+=("the control centre urban-platform does not stay up")
   [ -f /opt/urban/web/dist/index.html ] || fail+=("the control centre's interface is missing") ;;
 esac
 
 install -d /run/urban
 if [ ${#fail[@]} -eq 0 ]; then
-  echo "URBAN-OS-CHECK OK version=$version slot=$slot root=ro data=rw firewall=on watchdog=$wd unit=$unit role=$role"
+  echo "URBAN-OS-CHECK OK version=$version slot=$slot root=ro data=rw,$crypt firewall=on watchdog=$wd unit=$unit role=$role"
   echo "OK - read-only system, data writable, firewall on, watchdog $wd" > /run/urban/os-check
+  echo "$crypt" > /run/urban/data-crypt
   /usr/local/bin/urban-console
   exit 0
 fi

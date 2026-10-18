@@ -8,7 +8,11 @@
 #        district,center  both on one machine (the pilot)         UNIT=center or center-<name>
 # SERIAL the number printed on the box
 # HOST   control centre only: the name or address units and operators use for it (goes on its certificate)
+# CENTER district only: the control centre's address its relay carries the units' connections to (host[:port])
+# VISION unit only: off = a light unit, no camera work at all (a small box: 1 GB of memory is enough)
 UNIT=edge-J-00
 SERIAL=
 ROLE=unit
 HOST=
+CENTER=
+VISION=

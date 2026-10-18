@@ -62,8 +62,22 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
     return [...count.entries()].sort((a, b) => b[1] - a[1]);
   };
 
-  // URBAN Edge units: the registry with live health, one row per junction
+  // URBAN Edge units: the registry with live health, one row per junction; district servers have rows of their own
   const waiting = (d) => !d.o && !d.f && d.s !== 'revoked';  // enrolled, never connected with this key
+  const isDistrict = (d) => d.k === 'district';
+  const districtRow = (d) => `<div class="item dev">
+        <div class="row"><span>${tag('районный сервер')} <b>${esc(d.id)}</b> <small>${esc(d.addr ?? '')}${d.serial ? ` · ${esc(d.serial)}` : ''}</small></span>${devState(d)}</div>
+        <div class="row meta">
+          <span title="блоков на связи через него">${d.r ? `${esc(d.r.units)} ${plural(d.r.units, 'блок', 'блока', 'блоков')} через него` : 'ретранслятор: нет данных'}</span>
+          <span title="отчётов, накопленных без связи с центром">${d.b ? `${esc(d.b)} отчётов ждут` : 'буфер пуст'}</span>
+          <span title="температура в шкафу">${d.t == null ? '—' : `${esc(d.t)} °C`}</span>
+          <span title="версия ПО">${esc(d.v ?? '—')}</span>
+          <span title="последний отчёт">${age(d.a)} назад</span>
+          ${devButton(d)}
+        </div>
+        ${d.al.length > 1 ? `<small>${d.al.slice(1).map((a) => esc(a[1])).join(' · ')}</small>` : ''}
+      </div>`;
+  const plural = (n, one, few, many) => (n % 10 === 1 && n % 100 !== 11 ? one : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? few : many);
   const devState = (d) => (d.s === 'revoked' ? chip('bad', 'отозвано') : d.lock ? chip('bad', 'заблокирован')
     : d.o ? (d.al.length ? chip(d.al[0][0] === 'alert' ? 'bad' : 'warn', d.al[0][1]) : chip('ok', 'норма'))
       : waiting(d) ? chip('info', 'ждёт первого подключения') : chip('warn', 'нет связи'));
@@ -81,7 +95,7 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
         ${bad.length ? `${bad.length} с замечаниями, подробности во вкладке «Устройства».` : 'Замечаний нет.'}</div>`;
   };
   const enrolButton = (junction = '') => (S.mode === 'field' && S.can('admin')
-    ? `<div class="btns"><button class="go" data-act="enrol" data-id="${esc(junction)}">Подключить блок</button></div>` : '');
+    ? `<div class="btns"><button class="go" data-act="enrol" data-id="${esc(junction)}">Подключить блок или районный сервер</button></div>` : '');
   const devicesTab = () => {
     const all = Object.entries(S.dev);
     if (!all.length) {
@@ -91,7 +105,7 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
           <h4>Как подключить</h4>
           <div class="item"><b>1.</b> На блоке создать ключ — он не покидает блок:
             <code>python -m urban.edge --keygen --unit edge-J-07 --serial URB-0042</code>. Блок напечатает код подключения и отпечаток ключа.</div>
-          <div class="item"><b>2.</b> Здесь: «Подключить блок», вставить код, выбрать перекрёсток, сверить отпечаток с тем, что напечатал блок.</div>
+          <div class="item"><b>2.</b> Здесь: «Подключить», вставить код, выбрать перекрёсток (и районный сервер, если блок подключается через него), сверить отпечаток с тем, что напечатал блок.</div>
           <div class="item"><b>3.</b> Скачать комплект и поставить его на блок:
             <code>python -m urban.edge --setup urban-edge-J-07.json --unit edge-J-07</code>, затем запустить службу блока.</div>
           ${enrolButton() || '<p class="muted">Подключать блоки может администратор.</p>'}`
@@ -104,8 +118,8 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
     const hot = all.map(([, d]) => d.t).filter((t) => typeof t === 'number');
     const rows = all
       .sort(([, a], [, b]) => (b.lock - a.lock) || (b.al.length - a.al.length) || (a.o - b.o))
-      .map(([junction, d]) => `<div class="item dev" data-fly="${esc(junction)}">
-        <div class="row"><span><b>${esc(d.id)}</b> <small>${esc(junction)}${d.serial ? ` · ${esc(d.serial)}` : ''}</small></span>${devState(d)}</div>
+      .map(([junction, d]) => (isDistrict(d) ? districtRow(d) : `<div class="item dev" data-fly="${esc(junction)}">
+        <div class="row"><span><b>${esc(d.id)}</b> <small>${esc(junction)}${d.via ? ` · через ${esc(d.via)}` : ''}${d.serial ? ` · ${esc(d.serial)}` : ''}</small></span>${devState(d)}</div>
         <div class="row meta">
           <span title="температура в шкафу">${d.t == null ? '—' : `${esc(d.t)} °C`}</span>
           <span title="дверь шкафа">${d.d === 'open' ? 'дверь открыта' : d.d === 'closed' ? 'дверь закрыта' : '—'}</span>
@@ -116,7 +130,7 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
           ${devButton(d)}
         </div>
         ${d.al.length > 1 ? `<small>${d.al.slice(1).map((a) => esc(a[1])).join(' · ')}</small>` : ''}
-      </div>`).join('');
+      </div>`)).join('');
     const recent = [...S.devAlerts].reverse().slice(0, 6);
     return `<div class="grid">
         ${kpi('на связи', `${online} / ${all.length}`, online === all.length ? 'ok' : 'warn')}
@@ -124,7 +138,8 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
         ${kpi('макс. температура, °C', hot.length ? Math.max(...hot) : '—')}
       </div>
       <p class="muted">Реестр устройств URBAN Edge: у каждого свой ключ, команды подписаны шлюзом. Вскрытый шкаф или
-        потеря контроллера блокируют перекрёсток: команды снимаются, новые не принимаются.
+        потеря контроллера блокируют перекрёсток: команды снимаются, новые не принимаются. Районный сервер несёт
+        соединения своих блоков в центр, не читая их, и отчитывается очередями своих камер.
         ${pendingUnits ? `Ждут первого подключения: ${pendingUnits}.` : ''}</p>
       ${enrolButton()}
       ${recent.length ? `<h4>Последние события</h4>${recent.map((a) => `<div class="item"><time>${clock(a.t)}</time>

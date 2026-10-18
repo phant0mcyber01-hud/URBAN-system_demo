@@ -28,6 +28,10 @@ COMPATIBLE=urban-edge-x86_64
 PACKAGES="systemd,systemd-sysv,systemd-timesyncd,systemd-resolved,udev,dbus,linux-image-amd64,initramfs-tools,\
 rauc,rauc-service,netbase,grub-common,openssh-server,nftables,python3,python3-venv,ca-certificates,iproute2,iputils-ping,kmod,\
 e2fsprogs,dosfstools,util-linux,fdisk,procps,libglib2.0-0,libgomp1,firmware-realtek,intel-microcode,amd64-microcode"
+# packages added later go on top of the cached base (a few MB to fetch, not the whole system again):
+# cryptsetup and the TPM 2.0 libraries - the data partition is LUKS2 with its key sealed in the machine's TPM
+# (systemd-cryptenroll / systemd-cryptsetup load libtss2 at run time)
+EXTRA_PACKAGES="cryptsetup-bin libcryptsetup12 libtss2-esys-3.0.2-0 libtss2-mu0 libtss2-rc0 libtss2-tcti-device0"
 # real mini-PCs: Realtek network chips want their firmware, and the CPU its microcode fixes (Debian's
 # non-free-firmware section, redistributable); Intel network chips need nothing
 ESP_MB=128; SLOT_MB=1536; DATA_MB=2048  # data: keys, kit, cameras and room for one update bundle
@@ -37,19 +41,36 @@ log() { echo ">> $*"; }
 # ---- update signing keys: a CA whose certificate goes into the image, and a signing certificate from it
 bash /work/os/build/keys.sh "$OUT/keys"  # made once; valid from 2020 so a unit's wrong clock cannot block updates
 
-# ---- base system, cached by its package list
+# ---- base system, cached by its package list; the extras on top, cached again
 COMPONENTS=main,non-free-firmware
 BASE_ID=$(echo "bookworm $COMPONENTS $PACKAGES" | sha256sum | cut -c1-12)
 BASE="$OUT/cache/base-$BASE_ID.tar"
+FULL_ID=$(echo "$BASE_ID $EXTRA_PACKAGES" | sha256sum | cut -c1-12)
+FULL="$OUT/cache/base-$BASE_ID-$FULL_ID.tar"
+APT="apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30"  # a stalled mirror must not hang the build
 ROOT=/tmp/root
 rm -rf "$ROOT"; mkdir -p "$ROOT"
-if [ ! -f "$BASE" ]; then
-  log "debootstrap bookworm (first build takes a while)"
-  debootstrap --variant=minbase --components="$COMPONENTS" --include="$PACKAGES" bookworm "$ROOT" http://deb.debian.org/debian
-  tar -C "$ROOT" -cf "$BASE.tmp" . && mv "$BASE.tmp" "$BASE"
+if [ -f "$FULL" ]; then
+  log "base system from cache ($BASE_ID+$FULL_ID)"
+  tar -C "$ROOT" -xf "$FULL"
 else
-  log "base system from cache ($BASE_ID)"
-  tar -C "$ROOT" -xf "$BASE"
+  if [ ! -f "$BASE" ]; then
+    log "debootstrap bookworm (first build takes a while)"
+    debootstrap --variant=minbase --components="$COMPONENTS" --include="$PACKAGES" bookworm "$ROOT" http://deb.debian.org/debian
+    tar -C "$ROOT" -cf "$BASE.tmp" . && mv "$BASE.tmp" "$BASE"
+  else
+    log "base system from cache ($BASE_ID)"
+    tar -C "$ROOT" -xf "$BASE"
+  fi
+  log "extra packages: $EXTRA_PACKAGES"
+  mount -t proc proc "$ROOT/proc"; mount -t sysfs sys "$ROOT/sys"; mount --bind /dev "$ROOT/dev"
+  rm -f "$ROOT/etc/resolv.conf"; cp /etc/resolv.conf "$ROOT/etc/resolv.conf"  # the base's is a link into /run: no DNS in a chroot
+  chroot "$ROOT" $APT update -qq
+  DEBIAN_FRONTEND=noninteractive chroot "$ROOT" $APT install -y -qq --no-install-recommends $EXTRA_PACKAGES >/dev/null
+  chroot "$ROOT" apt-get clean
+  rm -rf "$ROOT"/var/lib/apt/lists/*
+  for m in dev sys proc; do umount "$ROOT/$m"; done
+  tar -C "$ROOT" -cf "$FULL.tmp" . && mv "$FULL.tmp" "$FULL"
 fi
 
 mount_chroot() {
@@ -86,6 +107,8 @@ fi
 log "system configuration"
 cp -r /work/os/rootfs/. "$ROOT/"
 cp /work/deploy/urban-edge@.service /work/deploy/urban-vision@.service "$ROOT/etc/systemd/system/"
+# the data partition is mounted by label; systemd-cryptsetup needs the dm-crypt module early
+echo dm_crypt >> "$ROOT/etc/modules"
 cp "$OUT/keys/ca.pem" "$ROOT/etc/rauc/keyring.pem"
 # the repository may sit on a file system without Unix modes (Windows): set them, never copy them
 (cd /work/os/rootfs && find . -type d) | while read -r d; do chmod 755 "$ROOT/$d"; done

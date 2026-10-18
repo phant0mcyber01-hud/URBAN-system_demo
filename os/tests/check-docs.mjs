@@ -12,11 +12,17 @@ const need = {
   "building the image": /сборк/, "writing it onto the unit": /запис/, "first boot": /первая загрузка/,
   "updates": /обновлени/, "rollback": /откат/, "not tried on hardware": /не проверено/,
   "levels and roles": /уровн.*рол|рол.*уровн/, "power": /мощност/,
+  "the district relay": /районный сервер/, "the light unit": /лёгкий блок/, "encryption": /шифрован/, "the demo": /демонстрац/,
+  "what an intruder gets": /взломщик/, "speed": /скорост/,
 };
 const missing = Object.entries(need).filter(([, rx]) => !headings.some((h) => rx.test(h))).map(([k]) => k);
 if (missing.length) fail("sections missing: " + missing.join(", "));
 for (const cmd of ["node os/build.mjs", "urban-unit setup", "urban-unit update", "urban-unit.txt", "ROLE=",
-  "district,center", "urban-power", "/run/urban/power.json", "check-roles.mjs", "Подписывает команды только центр"]) {
+  "district,center", "urban-power", "/run/urban/power.json", "check-roles.mjs", "Подписывает команды только центр",
+  "CENTER=", "VISION=off", "urban-relay", "LUKS2", "TPM", "--tpm2-device=auto", "node os/demo.mjs", "WireGuard", "ARM",
+  "check-chain.mjs", "check-encrypted.mjs", "check-light.mjs", "provision assign", "видит только шифртекст",
+  "check-hardened.mjs", "check-speed.mjs", "lockdown=confidentiality", "ptrace_scope = 3", "systemd-analyze security",
+  "vm.py measure", "Честные пределы", "sntrup761"]) {
   if (!text.includes(cmd)) fail(`the guide never shows ${cmd}`);
 }
 if (text.length < 4000) fail("the guide is too short to be followed");
@@ -34,13 +40,14 @@ const gneed = {
 const gmissing = Object.entries(gneed).filter(([, rx]) => !gh.some((h) => rx.test(h))).map(([k]) => k);
 if (gmissing.length) fail("mini-pc.md sections missing: " + gmissing.join(", "));
 for (const must of ["node os/unit-image.mjs", "Rufus", "Secure Boot", "maintenance_ed25519", "Get-FileHash",
-  "urban-unit setup", "urban-unit code", "Power On", "ADAPTER=none", "не запускался ни разу"]) {
+  "urban-unit setup", "urban-unit code", "Power On", "ADAPTER=none", "не запускался ни разу", "fTPM", "--vision off", "--center"]) {
   if (!g.includes(must)) fail(`mini-pc.md never says ${JSON.stringify(must)}`);
 }
 const context = readFileSync(join(ROOT, "CONTEXT.md"), "utf8");
 if (!context.includes("docs/mini-pc.md") || !context.includes("unit-image.mjs")) fail("CONTEXT.md does not record the mini-PC step");
 for (const must of ["## Три уровня", "Решения владельца", "Подписывает только центр", "Кадры не выходят за пределы района",
-  "ROLE=district,center", "node/power.py", "Не сделано (следующие шаги)"]) {
+  "ROLE=district,center", "node/power.py", "Не сделано (следующие шаги)", "Районный сервер пересылает", "LUKS2",
+  "VISION=off", "node os/demo.mjs", "WireGuard", "без привязки к PCR"]) {
   if (!context.includes(must)) fail(`CONTEXT.md does not record ${JSON.stringify(must)}`);
 }
 console.log("DOCS CHECK PASSED");

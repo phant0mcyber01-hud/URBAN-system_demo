@@ -16,6 +16,7 @@ from .junctions import approved_plans
 SETTLE = 2 * WINDOW  # seconds after a plan change before judging it: a controller needs a cycle to switch
 STALE = 5            # seconds without a report before a junction counts as "no data"
 SAMPLE = 60          # seconds between history samples of queues and device health
+LATE = 5  # seconds: a report older than this was kept through an outage; it is history, not the live reading
 SPILL = 0.8          # a downstream approach queued over this share of its sensor zone counts as full
 
 M_LAT = 111320.0
@@ -246,21 +247,31 @@ class Platform:
             if row.get("tls"):
                 self.gateway.set_locked(row["tls"], bool(blocking), "; ".join(blocking) or "unit trusted again", t)
             h = row.get("health") or {}
-            self.dev[row["junction"]] = {
-                "id": row["id"], "serial": row.get("serial", ""), "o": int(row["online"]), "s": row["status"],
+            kind = row.get("kind") or "unit"
+            self.dev[row["junction"] if kind == "unit" else row["id"]] = {
+                "id": row["id"], "k": kind, "addr": row.get("address"), "via": row.get("district"),
+                "r": h.get("relay"), "b": h.get("buffered"),
+                "serial": row.get("serial", ""), "o": int(row["online"]), "s": row["status"],
                 "v": h.get("version"), "t": h.get("temp"), "d": h.get("door"), "c": h.get("controller"),
                 "l": h.get("leases"), "u": h.get("uptime"), "a": row.get("age"), "n": row.get("connects", 0),
                 "f": int(bool(row.get("first_seen"))),
                 "al": [[a["level"], a["text"]] for a in alerts], "lock": row.get("tls") in self.gateway.locked,
             }
-        present = {row["junction"] for row in rows}
-        for junction in [j for j in self.dev if j not in present]:  # removed from the registry
-            del self.dev[junction]
+        present = {row["junction"] if (row.get("kind") or "unit") == "unit" else row["id"] for row in rows}
+        for key in [k for k in self.dev if k not in present]:  # removed from the registry
+            del self.dev[key]
         self.dev_alerts = self.dev_alerts[-200:]
         return new
 
-    def on_report(self, tls: str, report: dict):
-        """A report from the Edge unit of a junction: queue readings and what happened to its leases."""
+    def on_report(self, rec, report: dict):
+        """A report from a device: the Edge unit of a junction (queue readings and what happened to its leases),
+        or a district server (queues of its cameras, for the junctions routed through it). rec: the registry
+        record, or just the junction's tls as older callers pass it."""
+        if isinstance(rec, str):
+            rec = {"tls": rec}
+        if rec.get("kind") == "district":
+            return self._district_report(rec, report)
+        tls = rec.get("tls")
         cam = self._by_tls.get(tls)
         if cam is None:
             return
@@ -277,7 +288,11 @@ class Platform:
             at = int(report.get("t", self.t))
         except (TypeError, ValueError):
             at = self.t
-        self.sensors[cam["id"]] = (at, queues)
+        before = self.sensors.get(cam["id"])
+        # a unit without cameras (a light unit) reports no queues: it must not wipe out what its district's
+        # cameras measured for this junction a moment ago
+        if queues or before is None or not before[1] or abs(at - before[0]) > STALE:
+            self.sensors[cam["id"]] = (at, queues)
         events = report.get("events")
         for ev in events if isinstance(events, list) else []:
             if not isinstance(ev, dict):
@@ -285,6 +300,44 @@ class Platform:
             if ev.get("type") == "tls":
                 self.gateway.on_equipment(ev, self.t, tls)
             elif ev.get("type") == "edge":
+                self.gateway.audit.append(self.t, "device-refused", "-", "-", str(ev.get("device")),
+                                          str(ev.get("reason")), actor="equipment", mode="approval")
+
+    def routed_through(self, district: str) -> set[str]:
+        """Junction ids whose unit connects through this district server: the junctions it is trusted for."""
+        return {j for j, d in self.dev.items() if d.get("k", "unit") == "unit" and d.get("via") == district}
+
+    def _district_report(self, rec: dict, report: dict):
+        """A district is trusted for numbers only, and only for the junctions routed through it. A report that
+        arrives late (kept through an outage) goes to history at its own time and leaves the live reading alone."""
+        raw = report.get("queues")
+        mine = set(rec["junctions"]) if isinstance(rec.get("junctions"), list) else self.routed_through(rec["id"])
+        try:
+            at = int(report.get("t", self.t))
+        except (TypeError, ValueError):
+            at = self.t
+        per = {}
+        if isinstance(raw, dict):
+            for cam in self.cameras:
+                if cam["id"] not in mine:
+                    continue
+                queues = {}
+                for a in cam["approaches"]:
+                    try:
+                        queues[a["id"]] = max(0.0, float(raw[a["id"]]))
+                    except (KeyError, TypeError, ValueError):
+                        pass
+                if queues:
+                    per[cam["id"]] = queues
+        if per:
+            if at < self.t - LATE and self.store is not None:
+                self.store.add_queues(per, at=at)
+            else:
+                for j, queues in per.items():
+                    self.sensors[j] = (at, queues)
+        events = report.get("events")
+        for ev in events if isinstance(events, list) else []:
+            if isinstance(ev, dict) and ev.get("type") == "edge":
                 self.gateway.audit.append(self.t, "device-refused", "-", "-", str(ev.get("device")),
                                           str(ev.get("reason")), actor="equipment", mode="approval")
 

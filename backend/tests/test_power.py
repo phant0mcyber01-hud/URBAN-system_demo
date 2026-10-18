@@ -40,6 +40,30 @@ def test_levels_come_down_only_well_below_their_threshold():
     assert p.level_for(91, unit, "cool") == "critical"  # up at once
 
 
+def test_the_screen_line_is_written_next_to_the_plan(tmp_path):
+    plan = p.decide(["unit"], 72.5, busy=30, cores=4)
+    p.write_plan(plan, tmp_path / "power.json")
+    assert json.loads((tmp_path / "power.json").read_text())["level"] == "warm"
+    assert (tmp_path / "power.txt").read_text() == "warm - 72.5 C, clock up to 80%, vision 2.0 frames/s per camera, 2 thread(s)\n"
+    light = p.decide(["unit"], None, busy=1, cores=2, vision_off=True)
+    assert p.screen_line(light) == "cool - no temperature sensor, clock up to 100%, no vision (light unit)"
+
+
+def test_a_light_unit_plans_no_vision_work_whatever_is_configured():
+    plan = p.decide(["unit"], 40, busy=30, cores=4, cameras=3, ms_per_frame=50, vision_off=True)
+    assert plan["vision"] == p.NO_VISION and plan["vision"]["off"] and plan["vision"]["cameras"] == 0
+    assert "vision=off" in p.summary(plan)
+    assert not p.decide(["unit"], 40, busy=30, cores=4)["vision"]["off"]
+
+
+def test_vision_off_comes_from_the_unit_conf(tmp_path):
+    conf = tmp_path / "unit.conf"
+    conf.write_text("UNIT=edge-J-07\nROLE=unit\nVISION=off\n")
+    assert p.vision_off(conf)
+    conf.write_text("UNIT=edge-J-07\nROLE=unit\n")
+    assert not p.vision_off(conf)
+
+
 def test_no_sensor_means_cool_and_says_so():
     plan = p.decide(["unit"], None, busy=10, cores=4)
     assert plan["level"] == "cool" and plan["sensor"] is False and plan["temp_c"] is None

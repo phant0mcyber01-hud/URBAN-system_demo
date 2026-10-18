@@ -1,0 +1,116 @@
+#!/usr/bin/python3
+"""The district server's relay, in the kernel: the junction units' connections to the control centre are
+forwarded by netfilter (DNAT), not carried by a program. No process ever holds a unit's bytes, so there is
+nothing here to hack into and nothing to read: the TLS session is between the unit and the centre, and the
+district sees only ciphertext passing through its kernel.
+
+    urban-relay CENTER          CENTER = host[:port] of the centre's device listener (default port 8443)
+
+Sets the rules once (re-resolving the centre's name until it resolves), then every few seconds writes what the
+relay does to /run/urban/relay.json for the district's report: units seen in the last 30 s, connections since
+start, bytes each way. Runs as root (nftables), with no network access of its own beyond the rule set.
+"""
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+
+PORT = 8443          # where the district's units connect
+PRIVATE = "{ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 }"
+STATS = "/run/urban/relay.json"
+
+
+def resolve(host: str) -> str:
+    while True:
+        try:
+            return socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)[0][4][0]
+        except OSError as err:
+            print(f"URBAN-RELAY waiting for the centre's name {host} to resolve ({err})", flush=True)
+            time.sleep(5)
+
+
+def rules(ip: str, port: int) -> str:
+    return f"""
+table ip urban_relay
+delete table ip urban_relay
+table ip urban_relay {{
+    set units {{ type ipv4_addr; flags dynamic, timeout; timeout 30s; }}
+    counter sessions {{ }}
+    counter up {{ }}
+    counter down {{ }}
+    chain prerouting {{
+        type nat hook prerouting priority dstnat; policy accept;
+        ip saddr {PRIVATE} tcp dport {PORT} dnat to {ip}:{port}
+    }}
+    chain postrouting {{
+        type nat hook postrouting priority srcnat; policy accept;
+        ip daddr {ip} tcp dport {port} ct status dnat masquerade
+    }}
+    chain forward {{
+        type filter hook forward priority -10; policy accept;
+        ip daddr {ip} tcp dport {port} ct status dnat ct state new counter name sessions
+        ip daddr {ip} tcp dport {port} ct status dnat update @units {{ ip saddr }} counter name up
+        ip saddr {ip} tcp sport {port} ct status dnat counter name down
+    }}
+}}
+"""
+
+
+def nft_json(*args) -> dict:
+    r = subprocess.run(["nft", "-j", *args], capture_output=True, text=True, timeout=10)
+    return json.loads(r.stdout) if r.returncode == 0 and r.stdout else {}
+
+
+def counter(name: str) -> dict:
+    for item in nft_json("list", "counter", "ip", "urban_relay", name).get("nftables", []):
+        if "counter" in item:
+            return item["counter"]
+    return {}
+
+
+def units() -> int:
+    for item in nft_json("list", "set", "ip", "urban_relay", "units").get("nftables", []):
+        if "set" in item:
+            return len(item["set"].get("elem", []))
+    return 0
+
+
+def main():
+    if len(sys.argv) != 2 or not sys.argv[1]:
+        raise SystemExit("urban-relay CENTER (host[:port] of the centre's device listener)")
+    host, _, port = sys.argv[1].rpartition(":")
+    if not host:
+        host, port = sys.argv[1], str(PORT)
+    ip = resolve(host)
+    with open("/proc/sys/net/ipv4/ip_forward", "w") as f:  # only a district forwards, and only this
+        f.write("1")
+    r = subprocess.run(["nft", "-f", "-"], input=rules(ip, int(port)), capture_output=True, text=True)
+    if r.returncode != 0:
+        raise SystemExit(f"URBAN-RELAY rules refused: {r.stderr.strip()}")
+    # the main firewall drops forwarded packets by default; these are the relay's and only these
+    subprocess.run(["nft", "-f", "-"], check=True, input=f"""
+add rule inet urban forward ct state established,related accept
+add rule inet urban forward ip daddr {ip} tcp dport {port} ct status dnat accept comment "district relay: units to the centre"
+""", capture_output=True, text=True)
+    print(f"URBAN-RELAY units -> {ip}:{port} in the kernel (no relay process)", flush=True)
+    started = time.monotonic()
+    os.makedirs(os.path.dirname(STATS), exist_ok=True)
+    while True:
+        s, u, d = counter("sessions"), counter("up"), counter("down")
+        stats = {"units": units(), "sessions": s.get("packets", 0), "refused": 0,
+                 "bytes_up": u.get("bytes", 0), "bytes_down": d.get("bytes", 0),
+                 "centre": f"{ip}:{port}", "uptime": round(time.monotonic() - started), "kernel": True}
+        for target, text in ((STATS, json.dumps(stats)),
+                             (STATS[:-5] + ".txt", f"{stats['units']} unit(s) connected through it now, "
+                                                   f"{stats['sessions']} session(s) since start\n")):
+            with open(target + ".tmp", "w") as f:
+                f.write(text)
+            os.chmod(target + ".tmp", 0o644)
+            os.replace(target + ".tmp", target)
+        time.sleep(3)
+
+
+if __name__ == "__main__":
+    main()

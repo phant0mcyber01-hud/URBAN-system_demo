@@ -5,9 +5,11 @@
 #
 # One OS, three roles (urban-unit.txt on the ESP, read once at first boot):
 #   unit      a junction's box: makes its key, shows its enrolment code, runs the unit once it has its kit
-#   district  a district's server: camera work for the district's junctions (its relay comes next)
+#   district  a district's server: its relay carries the junction units' connections to the centre (CENTER=),
+#             it reports the queues of the district's cameras to the centre as a device of its own
 #   center    the control centre: the platform and its interface over HTTPS
 #   district,center   both on one machine (the pilot)
+# A unit with VISION=off is a light unit: no camera work, ever.
 set -eu
 D=/var/lib/urban
 install -d -m 755 "$D" "$D/etc" "$D/rauc"
@@ -51,6 +53,8 @@ if [ ! -f "$D/etc/unit.conf" ] && [ -f /boot/efi/urban-unit.txt ]; then
   serial=$(value SERIAL /boot/efi/urban-unit.txt)
   role=$(value ROLE /boot/efi/urban-unit.txt); role=${role:-unit}
   host=$(value HOST /boot/efi/urban-unit.txt)
+  center=$(tr -d '\r' < /boot/efi/urban-unit.txt | sed -n 's/^[[:space:]]*CENTER[[:space:]]*=[[:space:]]*\([A-Za-z0-9.-]*\(:[0-9]*\)\{0,1\}\)[[:space:]]*$/\1/p' | tail -n 1)
+  vision=$(value VISION /boot/efi/urban-unit.txt | tr 'A-Z' 'a-z')
   # each role has its own kind of name; the template's placeholder is no name at all
   case "$role" in
     unit) ok='^edge-[A-Za-z0-9._-]+$' ;;
@@ -59,7 +63,8 @@ if [ ! -f "$D/etc/unit.conf" ] && [ -f /boot/efi/urban-unit.txt ]; then
     *) ok='^$'; echo "URBAN-ROLE refused: ROLE=$role (unit, district, center or district,center)" ;;
   esac
   if [[ "$unit" =~ $ok ]] && [ "$unit" != "edge-J-00" ]; then
-    printf "UNIT=%s\nSERIAL=%s\nROLE=%s\nHOST=%s\n" "$unit" "$serial" "$role" "$host" > "$D/etc/unit.conf"
+    printf "UNIT=%s\nSERIAL=%s\nROLE=%s\nHOST=%s\nCENTER=%s\n" "$unit" "$serial" "$role" "$host" "$center" > "$D/etc/unit.conf"
+    if [ "$role" = unit ] && [ "$vision" = off ]; then echo "VISION=off" >> "$D/etc/unit.conf"; fi
   elif [ -n "$unit" ] && [ "$unit" != "edge-J-00" ]; then
     echo "URBAN-ROLE refused: the name $unit does not fit the role $role (edge-..., district-..., center...)"
   fi
@@ -74,8 +79,10 @@ UNIT=$(sed -n 's/^UNIT=//p' "$D/etc/unit.conf")
 SERIAL=$(sed -n 's/^SERIAL=//p' "$D/etc/unit.conf")
 ROLE=$(sed -n 's/^ROLE=//p' "$D/etc/unit.conf"); ROLE=${ROLE:-unit}  # units set up before roles existed
 HOST=$(sed -n 's/^HOST=//p' "$D/etc/unit.conf")
+CENTER=$(sed -n 's/^CENTER=//p' "$D/etc/unit.conf")
+VISION=$(sed -n 's/^VISION=//p' "$D/etc/unit.conf")
 hostname "$UNIT"  # /etc/hostname is read-only; the name is this machine's own
-echo "URBAN-ROLE role=$ROLE name=$UNIT"
+echo "URBAN-ROLE role=$ROLE name=$UNIT${VISION:+ vision=$VISION}${CENTER:+ center=$CENTER}"
 
 # The firewall's role-dependent openings, read by nftables.conf (include /run/urban/nft/*.nft)
 install -d /run/urban/nft
@@ -86,8 +93,10 @@ case ",$ROLE," in *,center,*)
     echo 'add rule inet urban output tcp dport 443 accept comment "control centre: map data (OpenStreetMap)"'
   } >> /run/urban/nft/role.nft ;;
 esac
+# a district's relay opens nothing here: urban-relay forwards 8443 from private networks to the centre in the
+# kernel (its own nat table and one forward rule), so no port of this machine answers its units at all
 
-if [ "$ROLE" = unit ]; then
+case "$ROLE" in unit|district)  # a unit and a district have a key of their own and enrol with a code (the pilot's centre has neither)
   KEY="$D/etc/pki/edge/$UNIT.key"
   if [ ! -f "$KEY" ]; then
     /opt/urban/.venv/bin/python -m urban.edge --keygen --unit "$UNIT" --serial "$SERIAL" --pki "$D/etc/pki" > "$D/etc/enrolment.txt"
@@ -96,8 +105,8 @@ if [ "$ROLE" = unit ]; then
   fi
   fingerprint=$(sed -n 's/^fingerprint: *\([0-9A-F-]*\).*/\1/p' "$D/etc/enrolment.txt")
   code=$(grep -o 'URBAN1:[^[:space:]]*' "$D/etc/enrolment.txt")
-  echo "URBAN-ENROLMENT unit=$UNIT serial=${SERIAL:--} fingerprint=$fingerprint code=$code"
-fi
+  echo "URBAN-ENROLMENT unit=$UNIT serial=${SERIAL:--} fingerprint=$fingerprint code=$code" ;;
+esac
 /usr/local/bin/urban-console  # the same, on the machine's own screen
 
 # The role's services. They cannot be "enabled" (that writes into the read-only /etc), so they are started
@@ -122,10 +131,21 @@ case ",$ROLE," in *,center,*)
   echo "URBAN-SERVICE starting the control centre (https://${HOST:-$UNIT}/)" ;;
 esac
 case ",$ROLE," in *,district,*)
-  if [ -f "$D/etc/cameras.json" ]; then systemctl start --no-block "urban-vision@$UNIT.service"; fi ;;
+  if [ -f "$D/etc/cameras.json" ]; then systemctl start --no-block "urban-vision@$UNIT.service"; fi
+  if [ "$ROLE" = district ] && [ -n "$CENTER" ]; then  # the relay (the pilot's centre is on this very machine: no relay)
+    echo "CENTER=$CENTER" > /run/urban/relay.env
+    systemctl start --no-block urban-relay.service
+    echo "URBAN-RELAY units -> $CENTER (kernel forwarding)"
+  elif [ "$ROLE" = district ]; then
+    echo "URBAN-RELAY not started: no CENTER= in urban-unit.txt"
+  fi
+  if [ -f "$D/etc/edge-$UNIT.env" ]; then  # its own link to the centre, once the district's kit is in place
+    systemctl start --no-block "urban-district@$UNIT.service"
+    echo "URBAN-DISTRICT starting urban-district@$UNIT"
+  fi ;;
 esac
 if [ "$ROLE" = unit ] && [ -f "$D/etc/edge-$UNIT.env" ]; then
   systemctl start --no-block "urban-edge@$UNIT.service"
-  if [ -f "$D/etc/cameras.json" ]; then systemctl start --no-block "urban-vision@$UNIT.service"; fi
-  echo "URBAN-UNIT starting urban-edge@$UNIT"
+  if [ -f "$D/etc/cameras.json" ] && [ "$VISION" != off ]; then systemctl start --no-block "urban-vision@$UNIT.service"; fi
+  echo "URBAN-UNIT starting urban-edge@$UNIT${VISION:+ (light: no vision)}"
 fi

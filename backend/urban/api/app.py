@@ -38,7 +38,7 @@ from ..accounts import Accounts, CodeRequired, allows
 from ..core.bus import PLATFORM_FRAME, SOURCE_FRAME, Bus
 from ..devices import crypto
 from ..devices.hub import DeviceHub
-from ..devices.enrolment import make_kit, parse_code
+from ..devices.enrolment import is_district, make_kit, parse_code
 from ..devices.registry import ACTIVE, REVOKED, Registry, device_id, provision
 from ..city.passport import PassportError, Passports, problems
 from ..junctions import APPROVED, DRAFT, _junction, approved, approved_plans, load_all_junctions, load_cameras
@@ -76,7 +76,7 @@ def _meta() -> dict:
 meta = _meta()
 GATEWAY_CERT = json.loads((c.PKI / "gateway.cert.json").read_text())
 hub = DeviceHub(Registry(c.PKI / "devices.json"), crypto.load_private((c.PKI / "gateway.key").read_text()),
-                on_report=lambda rec, report: platform.on_report(rec["tls"], report), clock=lambda: platform.t,
+                on_report=lambda rec, report: platform.on_report(rec, report), clock=lambda: platform.t,
                 plans=approved_plans(junctions), gateway_cert=GATEWAY_CERT)
 store = Store(c.DB, mode=c.SOURCE, retention_days=c.HISTORY_DAYS)
 platform = Platform(meta["center"], meta["radius"], junctions, send=hub.send, reachable=hub.online, store=store,
@@ -512,17 +512,38 @@ class Enrolment(BaseModel):
 
 
 class CodeEnrolment(BaseModel):
-    code: str       # printed by `python -m urban.edge --keygen` on the unit
-    junction: str   # junction id the unit is installed at
+    code: str                 # printed by `python -m urban.edge --keygen` on the unit (or the district server)
+    junction: str = ""        # a unit: junction id it is installed at
+    district: str | None = None  # a unit: the district server it connects through (its next kit points there)
+    address: str = ""         # a district server: the host name or IP its units connect to
+
+
+class Assignment(BaseModel):
+    district: str | None = None  # a district id, or null for a direct link to the centre
 
 
 @app.post("/api/devices/enroll-code")
 async def device_enroll_code(body: CodeEnrolment, who: str = Depends(admin)):
-    """Enrol a unit from the code it printed: installation, or a replaced box at the same junction."""
+    """Enrol a device from the code it printed: a unit (installation, or a replaced box at the same junction),
+    or a district server with the address its units connect to."""
     try:
         code = parse_code(body.code)
     except ValueError as err:
         raise HTTPException(400, str(err))
+    if is_district(code["device"]):
+        if not body.address.strip():
+            raise HTTPException(400, "для районного сервера нужен адрес, по которому к нему подключаются блоки")
+        before = hub.registry.devices.get(code["device"])
+        try:
+            rec = await hub.enroll_district(code["device"], body.address, code["public"], code["serial"])
+        except ValueError as err:
+            raise HTTPException(400, str(err))
+        fp = crypto.fingerprint(rec["public_key"])
+        replaced = before is not None and before["public_key"] != rec["public_key"]
+        platform.gateway.audit.append(platform.t, "district-enrolled", "-", "-", rec["id"],
+                                      f"{rec['address']} key {fp}{' (box replaced)' if replaced else ''}", actor=who, mode="approval")
+        return {"id": rec["id"], "kind": "district", "address": rec["address"], "serial": rec["serial"],
+                "fingerprint": fp, "replaced": replaced}
     junction = next((j for j in junctions if j["id"] == body.junction), None)
     if junction is None:
         raise HTTPException(404, "нет такого перекрёстка")
@@ -531,14 +552,30 @@ async def device_enroll_code(body: CodeEnrolment, who: str = Depends(admin)):
                                  f"{device_id(junction['id'])}: на блоке нужен ключ с --unit {device_id(junction['id'])}")
     before = hub.registry.devices.get(code["device"])
     try:
-        rec = await hub.enroll(code["device"], junction, code["public"], code["serial"])
+        rec = await hub.enroll(code["device"], junction, code["public"], code["serial"], body.district or None)
     except ValueError as err:
         raise HTTPException(400, str(err))
     fp = crypto.fingerprint(rec["public_key"])
     replaced = before is not None and before["public_key"] != rec["public_key"]
+    via = f" via {rec['district']}" if rec.get("district") else ""
     platform.gateway.audit.append(platform.t, "device-enrolled", "-", "-", rec["id"],
-                                  f"{junction['id']} key {fp}{' (box replaced)' if replaced else ''}", actor=who, mode="approval")
-    return {"id": rec["id"], "junction": rec["junction"], "serial": rec["serial"], "fingerprint": fp, "replaced": replaced}
+                                  f"{junction['id']}{via} key {fp}{' (box replaced)' if replaced else ''}", actor=who, mode="approval")
+    return {"id": rec["id"], "kind": "unit", "junction": rec["junction"], "district": rec.get("district"),
+            "serial": rec["serial"], "fingerprint": fp, "replaced": replaced}
+
+
+@app.post("/api/devices/{device}/district")
+async def device_district(device: str, body: Assignment, who: str = Depends(admin)):
+    """Route a unit through a district server, or directly to the centre; its next kit says so."""
+    try:
+        rec = hub.assign(device, body.district)
+    except ValueError as err:
+        raise HTTPException(400, str(err))
+    if rec is None:
+        raise HTTPException(404, "unknown unit")
+    platform.gateway.audit.append(platform.t, "device-routed", "-", "-", device, rec.get("district") or "direct",
+                                  actor=who, mode="approval")
+    return {"id": rec["id"], "district": rec.get("district")}
 
 
 @app.get("/api/devices/{device}/kit")
@@ -547,8 +584,9 @@ def device_kit(device: str, who: str = Depends(admin)):
     rec = hub.registry.devices.get(device)
     if rec is None:
         raise HTTPException(404, "unknown device")
-    junction = next((j for j in junctions if j["id"] == rec["junction"]), {})
-    kit = make_kit(rec, c.PKI, c.DEVICE_NAME, c.DEVICE_PORT, junction.get("approaches"))
+    junction = next((j for j in junctions if j["id"] == rec.get("junction")), {})
+    via = hub.registry.devices.get(rec["district"]) if rec.get("district") else None
+    kit = make_kit(rec, c.PKI, c.DEVICE_NAME, c.DEVICE_PORT, junction.get("approaches"), via=via)
     return JSONResponse(kit, headers={"Content-Disposition": f'attachment; filename="urban-{device}.json"'})
 
 
@@ -561,7 +599,8 @@ async def device_remove(device: str, who: str = Depends(admin)):
         raise HTTPException(409, "сначала отзовите блок")
     if rec is None:
         raise HTTPException(404, "unknown device")
-    platform.gateway.audit.append(platform.t, "device-removed", "-", "-", device, rec["junction"], actor=who, mode="approval")
+    platform.gateway.audit.append(platform.t, "device-removed", "-", "-", device, rec.get("junction") or rec.get("address") or "-",
+                                  actor=who, mode="approval")
     return {"ok": True}
 
 

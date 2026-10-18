@@ -1,0 +1,36 @@
+# The district server's relay (ROLE=district): its junction units' connections are forwarded to the control
+# centre by the kernel (urban-relay sets the rules and counts). Started by urban-prepare; the centre's address
+# comes from CENTER= in urban-unit.txt (written to /run/urban/relay.env).
+[Unit]
+Description=URBAN district relay: units' connections forwarded to the control centre in the kernel
+After=network.target nftables.service urban-prepare.service
+
+[Service]
+EnvironmentFile=/run/urban/relay.env
+ExecStart=/usr/local/bin/urban-relay ${CENTER}
+Restart=always
+RestartSec=5
+StandardOutput=journal+console
+# The sandbox: it changes firewall rules and turns on forwarding, nothing else
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/run/urban /proc/sys/net/ipv4/ip_forward
+InaccessiblePaths=-/var/lib/urban
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM

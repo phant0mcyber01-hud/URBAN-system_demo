@@ -1,65 +1,125 @@
-# Gates: one URBAN OS for the junction unit, the district server and the control centre, each sizing its own power
+# Gates: the district server relays and reports, a light unit, an encrypted data partition, a three-machine demo; then speed and hardening
 
-OWNS: os/**, backend/urban/node/**, backend/urban/vision/**, backend/urban/__main__.py, backend/urban/config.py, backend/tests/**, deploy/**, docs/**, GATES.md, CONTEXT.md, README.md, tools/**
+OWNS: os/**, backend/urban/node/**, backend/urban/devices/**, backend/urban/edge/**, backend/urban/platform.py, backend/urban/api/app.py, backend/urban/provision.py, backend/tests/**, web/src/**, deploy/**, docs/**, GATES.md, CONTEXT.md, README.md, tools/**
 
-Scope: the three-level architecture agreed with the owner - a light unit at each junction, a district server that relays signed commands and takes the camera work, the most powerful machine in the office as the control centre; commands are signed only by the centre; for the pilot the district server and the centre are one machine. This step makes the OS universal: one image, the role (unit, district, center, or district,center) chosen on its ESP, the role's services started at boot, the data partition grown to the whole disk, and a power manager that keeps a unit from overheating (fewer frames, lower clock, never touching the control path) and lets the district server and the centre size their vision work and clock to their load. The district's relay and its reports to the centre are the next step.
+Scope: step 2 of the owner's three-level architecture, in time for the team presentation this week. The district server (ROLE=district) relays each junction unit's TLS connection to the control centre unchanged, so the centre still authenticates every unit and signs every command and the district can neither read nor forge them; the district is itself a device of the centre (enrolled with a code like a unit, shown in Devices with its address and health), reports the queues its cameras measure for its own junctions only, and keeps those reports through an outage of the link to the centre. A light unit (VISION=off) runs without camera work and is proven on 1 GB of memory. The data partition is encrypted (LUKS2) with a key sealed in the machine's TPM, so a disk taken out of its machine cannot be read; without a TPM it stays plain and the screen says so. One command brings up a three-machine demo (unit -> district -> centre) with every screen in a browser. WireGuard between junction and district and the ARM build are not in this step and the docs say so. Then, at the owner's request (any language, fast, excellent security, a break-in yields nothing): measured speed work (no URBAN service waits for the network, the district's relay moved into the kernel) and hardening (kernel lockdown, ptrace off for everyone, every network-facing service in a sandbox, modern-only SSH), proven by an intruder scenario with a control next to every probe.
 
-- [x] G0: this ledger states outcomes that can fail
+- [ ] G0: this ledger states outcomes that can fail
   CHECK: node C:/Users/DilDa/.claude/skills/unlazy/scripts/gate-lint.mjs GATES.md
   EXPECT: LINT OK
-  EVIDENCE: automatic-evidence=v1; definition-sha256=495aef5e665131d49faba79374b9a7b244c9abc642d22fb4f40ac5ea8b723f19; exit=0; EXPECT=matched; output-sha256=48630b7361dd44ee870917b12c3d19b9d7bdea738aaca16bb04d4cab83b772d2; output-bytes=8; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\DilDa\Desktop\URBAN-system; path=88406f20ec23/51 entries
+  EVIDENCE: pending
 
-- [x] G1: the power manager decides per role from temperature, CPU load and camera load: a unit lowers frames and clock as it heats and pauses vision before it overheats, servers keep full work longer and size vision threads to their cores; levels come down only with hysteresis; missing sensors and missing cpufreq files are handled; the CPU settings it writes are the ones it decided
+- [ ] G1: the centre knows districts: a district enrols with its own code and address (no junction), a unit can be assigned to a district and its kit then points at the district's address while still naming the centre's certificate, a district's queues are accepted only for the junctions assigned to it, and a report replayed from a district's outage buffer is written to history at its own time without disturbing the live reading
+  CHECK: node tools/gates/pytest.mjs tests/test_district.py
+  EXPECT: PYTEST PASSED
+  EVIDENCE: pending
+
+- [ ] G2: the district's own client buffers reports while the centre is unreachable (bounded) and replays them in order after reconnecting, refuses commands and says so in its next report, and carries the relay's counts in its health
+  CHECK: node tools/gates/pytest.mjs tests/test_district_client.py
+  EXPECT: PYTEST PASSED
+  EVIDENCE: pending
+
+- [ ] G3: a light unit's power plan has no vision work and the power manager never starts counting cameras for it
   CHECK: node tools/gates/pytest.mjs tests/test_power.py
   EXPECT: PYTEST PASSED
-  EVIDENCE: automatic-evidence=v1; definition-sha256=011ae077dd785f47b2a4576d0228fccd5ba0fc090a4d6f1e068b57ce611e964c; exit=0; EXPECT=matched; output-sha256=c4591023f99594c4ec3a28821b45d9a5091ec3af42babdaca8827f345a9c600f; output-bytes=44; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\DilDa\Desktop\URBAN-system; path=88406f20ec23/51 entries
+  EVIDENCE: pending
 
-- [x] G2: camera vision follows the power plan: it analyses no more frames per camera than the plan allows, none while paused, and takes its thread count from the plan
-  CHECK: node tools/gates/pytest.mjs tests/test_vision_power.py
-  EXPECT: PYTEST PASSED
-  EVIDENCE: automatic-evidence=v1; definition-sha256=2d6108d56a5b6b920f287058b5d5d90ed38401bbb200e1015161795675803d5f; exit=0; EXPECT=matched; output-sha256=2be7820ec0683e44256b7dce9db270418d0acccde75f2bbbdd44a54e2396f268; output-bytes=42; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\DilDa\Desktop\URBAN-system; path=88406f20ec23/51 entries
-
-- [x] G3: the whole test suite passes
+- [ ] G4: the whole test suite passes
   CHECK: node tools/gates/pytest.mjs
   EXPECT: PYTEST PASSED
-  EVIDENCE: automatic-evidence=v1; definition-sha256=9bfd399191ec244f851e8fc0b2514b369bb16f3d32bef5d5bf99ba40e3f7aad4; exit=0; EXPECT=matched; output-sha256=0e1b6c808a6e4c1c9219efdbfcbb6ac84f0dc2a20ce92beda5acd324f2b7c0a4; output-bytes=47; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\DilDa\Desktop\URBAN-system; path=88406f20ec23/51 entries
+  EVIDENCE: pending
 
-- [x] G4: one image carries all three roles: the power manager, the unit's and the vision services, the control centre's service and its built interface, and the role-dependent firewall
+- [ ] G5: the image carries the relay and district services, the encryption tools (cryptsetup, the TPM libraries systemd needs) and the district's firewall opening
   CHECK: node os/tests/check-image.mjs
   EXPECT: IMAGE LAYOUT VERIFIED
-  EVIDENCE: automatic-evidence=v1; definition-sha256=7ec66d313dd38ea5ed649b8cc003687c0767e121de748530d35504a23ac750cb; exit=0; EXPECT=matched; output-sha256=3481f670e7abe896ee68a0c08757f15f63061bc13a4bc87d6546f11dd4f47d69; output-bytes=261; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\DilDa\Desktop\URBAN-system; path=88406f20ec23/51 entries
+  EVIDENCE: pending
 
-- [x] G5: booted as the pilot's district server and centre on a larger disk, the image grows its data partition to the disk, serves the control centre over HTTPS to the outside, opens only the interface and device ports, writes a power plan for its role, and still passes its self-check
+- [ ] G6: with a TPM the first boot turns the data partition into LUKS2 unlocked by that TPM (the raw partition no longer holds the maintenance key in clear, which the plain control does), what the installer put on it before is kept, a reboot unlocks it again with the same unit key, and without a TPM the partition stays plain and the screen and self-check say so
+  CHECK: node os/tests/check-encrypted.mjs
+  EXPECT: ENCRYPTION CHECK PASSED
+  EVIDENCE: pending
+
+- [ ] G7: a light unit (VISION=off) boots in 1024 MB, passes its self-check, runs its unit service after the kit with no vision process and under 400 MB in use, its plan says vision is off and its screen says it is a light unit
+  CHECK: node os/tests/check-light.mjs
+  EXPECT: LIGHT UNIT CHECK PASSED
+  EVIDENCE: pending
+
+- [ ] G8: three machines in a chain: a unit enrolled through a district reaches the centre through the district's kernel forwarding, no program on the district listening on 8443 (two devices online at the centre, the certificate seen through the district is the centre's), the district shows up in Devices with its address and health, the district's queues for its junction arrive at the centre, during a 60 s outage of the centre's device listener the district keeps its reports and the centre's history has samples from inside the outage afterwards, and the district forwards 8443 from private networks only
+  CHECK: node os/tests/check-chain.mjs
+  EXPECT: CHAIN CHECK PASSED
+  EVIDENCE: pending
+
+- [ ] G9: the pilot machine (district,center) still grows its data partition, serves the centre over HTTPS and passes its self-check
   CHECK: node os/tests/check-roles.mjs
   EXPECT: ROLES CHECK PASSED
-  EVIDENCE: automatic-evidence=v1; definition-sha256=d9661fad1e0797a91d47afbe4bb4b62f9874a1b396749c208280915de8f7c6fd; exit=0; EXPECT=matched; output-sha256=d42ca60260bbfe1c33821164ea0aac4e484dee41aee52d27bad82555d3a938dd; output-bytes=2953; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\DilDa\Desktop\URBAN-system; path=88406f20ec23/51 entries
+  EVIDENCE: pending
 
-- [x] G6: as a junction unit the image still takes its name and maintenance key from the ESP, sets up its kit and keeps its service running across a reboot, now with a unit power plan
+- [ ] G10: a unit image still takes its name and maintenance key from the ESP and keeps its service across a reboot
   CHECK: node os/tests/check-unit-image.mjs
   EXPECT: UNIT IMAGE CHECK PASSED
-  EVIDENCE: automatic-evidence=v1; definition-sha256=d80e94bbbb7bec968ec8398b2fb386cab0493440208906891c5837967d1442ab; exit=0; EXPECT=matched; output-sha256=a25fd0599eb224c1c4418c585b9ffb67d88fc78ebd2ba147a697b24e83eb37c9; output-bytes=4993; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\DilDa\Desktop\URBAN-system; path=88406f20ec23/51 entries
+  EVIDENCE: pending
 
-- [x] G7: the first-boot behaviour is unchanged: no key without a name, one key kept across reboots
+- [ ] G11: first boot is unchanged: no key without a name, one key kept across reboots
   CHECK: node os/tests/check-firstboot.mjs
   EXPECT: FIRSTBOOT CHECK PASSED
-  EVIDENCE: automatic-evidence=v1; definition-sha256=d884b261b8b2b557f51e80f0801a933c0f4fa0f8a5a29082d34b17526458f617; exit=0; EXPECT=matched; output-sha256=64d51604e75e7f4df26f6f8fc8fdfe74cf1ca835f4596b7b8fb4b60ded8dae7f; output-bytes=4581; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\DilDa\Desktop\URBAN-system; path=88406f20ec23/51 entries
+  EVIDENCE: pending
 
-- [x] G8: a signed update still installs into the other slot and boots
+- [ ] G12: a signed update still installs into the other slot and boots, and the new slot opens the encrypted data partition
   CHECK: node os/tests/check-update.mjs good
   EXPECT: UPDATE CHECK PASSED
-  EVIDENCE: automatic-evidence=v1; definition-sha256=d3d590f1d607e64055329e2b4c6dbd20ee080074930ac93276d27cdd4874814c; exit=0; EXPECT=matched; output-sha256=1389cf1df88af7bd0622c46cdc5085ee754f9cff2f019cb82514798e10110804; output-bytes=4273; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\DilDa\Desktop\URBAN-system; path=88406f20ec23/51 entries
+  EVIDENCE: pending
 
-- [x] G9: a broken update still rolls back to the working system by itself
+- [ ] G13: a broken update still rolls back by itself
   CHECK: node os/tests/check-update.mjs broken
   EXPECT: ROLLBACK CHECK PASSED
-  EVIDENCE: automatic-evidence=v1; definition-sha256=05b095097fa8787ce6e4c7f65f3f3565d1e9c840b6ee760706fdb3ca1b2106a0; exit=0; EXPECT=matched; output-sha256=f2abc00db71853cfeb6c2fe9de30212fed11f7dd2d1df821ba361be15650b0df; output-bytes=6251; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\DilDa\Desktop\URBAN-system; path=88406f20ec23/51 entries
+  EVIDENCE: pending
 
-- [x] G10: the image still boots from NVMe, SATA and a USB stick with an Intel network card
+- [ ] G14: the image still boots from NVMe, SATA and a USB stick with an Intel network card
   CHECK: node os/tests/check-hardware.mjs
   EXPECT: HARDWARE CHECK PASSED
-  EVIDENCE: automatic-evidence=v1; definition-sha256=cf4b5ebd31b9d786d1b5cd75acdc1212ce6a230332cc265e862108453979b75a; exit=0; EXPECT=matched; output-sha256=21a84b3dc82a68a419b311a1e109a188f50a85dbd7ad342c78e822c794177cde; output-bytes=5155; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\DilDa\Desktop\URBAN-system; path=88406f20ec23/51 entries
+  EVIDENCE: pending
 
-- [x] G11: the docs describe the three levels, the roles, how power is sized and what is not built yet, and CONTEXT.md records the architecture and the owner's decisions with their reasons
+- [ ] G15: one command brings the demo up - a unit, a district and the centre, three screens and the centre's interface reachable from this computer - and one command takes it down
+  CHECK: node os/demo.mjs smoke
+  EXPECT: DEMO SMOKE PASSED
+  EVIDENCE: pending
+
+- [ ] G17: the unit's control service is up within 15 s of urban-prepare also with the network cable pulled, and booting costs less CPU than the previous image did in the same emulated VM, with no more CPU in use while it runs
+  CHECK: node os/tests/check-speed.mjs
+  EXPECT: SPEED CHECK PASSED
+  EVIDENCE: pending
+
+- [ ] G18: an intruder on a junction unit gets nothing: as root no kernel memory and no memory of the unit's process (own memory readable: the control), kernel lockdown confidentiality, ptrace off, no kexec, no core dumps; as the hijacked unit service no SSH keys, no boot files, no writes outside its key folder (inside it: the control), no other process; every network-facing URBAN service at systemd exposure 3.0 or better; SSH refuses CBC, SHA-1 key exchange and SHA-1 MACs while the modern default works; nothing but SSH listens
+  CHECK: node os/tests/check-hardened.mjs
+  EXPECT: HARDENING CHECK PASSED
+  EVIDENCE: pending
+
+- [ ] G16: the docs describe the relay, districts as devices, the light unit, the encryption and its TPM rule, the demo, what an intruder gets at each level and how speed was measured, and what is still not built (WireGuard, ARM, Secure Boot), and CONTEXT.md records the decisions of this step with their reasons
   CHECK: node os/tests/check-docs.mjs
   EXPECT: DOCS CHECK PASSED
-  EVIDENCE: automatic-evidence=v1; definition-sha256=7a7eaf5b4aedd293d3eee5e14b8e0be9d4a112f9269b1e8e5579c7c3c552f63e; exit=0; EXPECT=matched; output-sha256=a646cb7131c6775144fa7ec37840cdefac1fd1f1fc2efa0f5726e39a3386d30e; output-bytes=18; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\DilDa\Desktop\URBAN-system; path=88406f20ec23/51 entries
+  EVIDENCE: pending
+
+<!-- 2026-10-17: the owner asked to skip the full verification run ("скипни эту часть"). Checked one by one in this
+session, on images of this step (not re-run after the last changes): speed (G17), intruder (G18), image layout (G5),
+encryption (G6), light unit (G7), pilot machine (G9), docs (G16), 238 backend tests (G3/G4); the three-machine chain
+(G8) failed on the district's queue reading, fixed in code (a light unit's empty report wiped it), not re-run.
+Not run at all: G10-G15. -->
+ABANDON: G0 owner skipped the verification run on 2026-10-17; run gate-check.mjs --approve GATES.md before relying on this step
+ABANDON: G1 owner skipped the verification run on 2026-10-17 (district tests passed by hand, not through the gate)
+ABANDON: G2 owner skipped the verification run on 2026-10-17 (district client tests passed by hand, not through the gate)
+ABANDON: G3 owner skipped the verification run on 2026-10-17 (power tests passed by hand, not through the gate)
+ABANDON: G4 owner skipped the verification run on 2026-10-17 (238 tests passed by hand, not through the gate)
+ABANDON: G5 owner skipped the verification run on 2026-10-17 (image layout passed before the last rootfs changes)
+ABANDON: G6 owner skipped the verification run on 2026-10-17 (encryption passed before the hardening changes)
+ABANDON: G7 owner skipped the verification run on 2026-10-17 (light unit passed before the hardening changes)
+ABANDON: G8 owner skipped the verification run on 2026-10-17 (chain failed once; fix in code not re-run on three machines)
+ABANDON: G9 owner skipped the verification run on 2026-10-17 (pilot passed before the hardening changes)
+ABANDON: G10 owner skipped the verification run on 2026-10-17 (unit image not run in this step)
+ABANDON: G11 owner skipped the verification run on 2026-10-17 (first boot not run in this step)
+ABANDON: G12 owner skipped the verification run on 2026-10-17 (update not run in this step)
+ABANDON: G13 owner skipped the verification run on 2026-10-17 (rollback not run in this step)
+ABANDON: G14 owner skipped the verification run on 2026-10-17 (hardware not run in this step)
+ABANDON: G15 owner skipped the verification run on 2026-10-17 (demo smoke not run)
+ABANDON: G16 owner skipped the verification run on 2026-10-17 (docs check passed by hand, not through the gate)
+ABANDON: G17 owner skipped the verification run on 2026-10-17 (speed passed by hand on the final image of the speed work)
+ABANDON: G18 owner skipped the verification run on 2026-10-17 (intruder check passed by hand on the final hardened image)

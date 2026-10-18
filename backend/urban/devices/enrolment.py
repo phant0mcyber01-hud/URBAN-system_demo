@@ -22,7 +22,12 @@ from . import crypto
 PREFIX = "URBAN1"
 KIT_VERSION = 1
 SERIAL = re.compile(r"^[A-Za-z0-9._-]{0,40}$")
-DEVICE = re.compile(r"^edge-[A-Za-z0-9._-]{1,54}$")
+DEVICE = re.compile(r"^(edge|district)-[A-Za-z0-9._-]{1,54}$")  # a junction unit, or a district server
+DEFAULT_PORT = 8443
+
+
+def is_district(device: str) -> bool:
+    return device.startswith("district-")
 
 
 def _check(body: str) -> str:
@@ -31,7 +36,7 @@ def _check(body: str) -> str:
 
 def make_code(device: str, serial: str, public: str) -> str:
     if not DEVICE.match(device) or not SERIAL.match(serial):
-        raise ValueError("unit id is edge-<junction>, serial: letters, digits, . _ - (up to 40)")
+        raise ValueError("device id is edge-<junction> or district-<name>, serial: letters, digits, . _ - (up to 40)")
     body = f"{PREFIX}:{device}:{serial}:{public.lower()}"
     return f"{body}:{_check(body)}"
 
@@ -55,20 +60,39 @@ def parse_code(code: str) -> dict:
     return {"device": device, "serial": serial, "public": public}
 
 
-def make_kit(rec: dict, pki: Path, server_name: str, port: int, approaches: list[dict] | None = None) -> dict:
-    """What a unit needs besides its own key: where the platform is and whom to trust, and the approaches of
-    its junction for the camera calibration page. All of it public."""
+def make_kit(rec: dict, pki: Path, server_name: str, port: int, approaches: list[dict] | None = None,
+             via: dict | None = None) -> dict:
+    """What a device needs besides its own key: where to connect and whom to trust, and for a unit the approaches
+    of its junction for the camera calibration page. All of it public.
+
+    via: the district server record a unit connects through. Its address replaces the centre's, the certificate
+    name stays the centre's: the district only carries the bytes, the unit still checks the centre."""
     root, gateway = pki / "root.pub", pki / "gateway.pub"
+    platform = f"{server_name}:{port}"
+    if via is not None:
+        address = str(via.get("address", "")).strip()
+        platform = address if ":" in address else f"{address}:{DEFAULT_PORT}"
     return {
-        "urban_kit": KIT_VERSION, "unit": rec["id"], "junction": rec["junction"], "name": rec.get("name", ""),
+        "urban_kit": KIT_VERSION, "unit": rec["id"], "kind": rec.get("kind", "unit"), "junction": rec.get("junction"),
+        "name": rec.get("name", ""), "via": via["id"] if via is not None else None,
         "serial": rec.get("serial", ""), "fingerprint": crypto.fingerprint(rec["public_key"]),
-        "platform": f"{server_name}:{port}", "server_name": server_name,
+        "platform": platform, "server_name": server_name,
         "ca_pem": (pki / "ca.pem").read_text(),
         "root_pub": root.read_text().strip() if root.exists() else None,
         "gateway_pub": None if root.exists() else gateway.read_text().strip(),  # older setups without a root key
         "approaches": [{k: a.get(k) for k in ("id", "name", "from", "lanes", "zone")} for a in approaches or []],
     }
 
+
+DISTRICT_ENV_TEMPLATE = """# URBAN district server {unit}: its own link to the control centre (urban-district.service)
+# made by `python -m urban.edge --setup`; PLATFORM and SERVER_NAME are rewritten by the next setup, the rest is kept.
+PLATFORM={platform}
+SERVER_NAME={server_name}
+# queue lengths of the district's cameras (python -m urban.vision run), keyed by approach id
+SENSORS=/run/urban/queues.json
+# cabinet temperature sensor; empty: the computer's own board
+TEMP_SENSOR=
+"""
 
 ENV_TEMPLATE = """# URBAN Edge unit {unit} at {junction} {name}
 # made by `python -m urban.edge --setup`; PLATFORM and SERVER_NAME are rewritten by the next setup, the rest is kept.
@@ -123,14 +147,17 @@ def install_kit(kit: dict, unit: str, key_path: Path, pki: Path, env_path: Path)
         env_path.write_text("\n".join(out) + "\n", encoding="utf-8")
     else:
         env_path.parent.mkdir(parents=True, exist_ok=True)
-        env_path.write_text(ENV_TEMPLATE.format(**{k: kit.get(k, "") for k in
-                                                   ("unit", "junction", "name", "platform", "server_name")}),
+        template = DISTRICT_ENV_TEMPLATE if kit.get("kind") == "district" else ENV_TEMPLATE
+        env_path.write_text(template.format(**{k: kit.get(k) or "" for k in
+                                               ("unit", "junction", "name", "platform", "server_name")}),
                             encoding="utf-8")
     try:
         env_path.chmod(0o600)
     except OSError:
         pass
     written.append(str(env_path))
+    if kit.get("kind") == "district":
+        return written  # a district has no junction of its own
     junction = env_path.parent / f"{unit}.junction.json"  # for the camera calibration page
     junction.write_text(json.dumps({"junction": kit.get("junction"), "name": kit.get("name", ""),
                                     "approaches": kit.get("approaches") or []}, ensure_ascii=False, indent=1),

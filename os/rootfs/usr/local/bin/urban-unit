@@ -23,9 +23,19 @@ case "${1:-status}" in
     /opt/urban/.venv/bin/python -m urban.edge --setup "$2" --unit "$UNIT" --pki /etc/urban/pki --env "/etc/urban/edge-$UNIT.env"
     chown -R urban:urban "$D/etc/pki"
     # not "enable": /etc is read-only; urban-prepare starts a set-up unit at every boot
-    systemctl restart "urban-edge@$UNIT"
-    if [ -f /etc/urban/cameras.json ]; then systemctl restart "urban-vision@$UNIT"; fi
-    echo "unit $UNIT started; it appears online in the platform under Устройства"
+    case "$UNIT" in
+      district-*)
+        # a district reaches the centre where its relay does (CENTER= on the ESP), whatever name the kit says;
+        # the certificate name in the kit stays the centre's
+        CENTER=$(sed -n 's/^CENTER=//p' "$D/etc/unit.conf")
+        if [ -n "$CENTER" ]; then sed -i "s|^PLATFORM=.*|PLATFORM=$CENTER|" "/etc/urban/edge-$UNIT.env"; fi
+        systemctl restart "urban-district@$UNIT"
+        echo "district $UNIT linked to the centre; it appears online in the platform under Устройства" ;;
+      *)
+        systemctl restart "urban-edge@$UNIT"
+        if [ -f /etc/urban/cameras.json ] && ! grep -qx 'VISION=off' "$D/etc/unit.conf"; then systemctl restart "urban-vision@$UNIT"; fi
+        echo "unit $UNIT started; it appears online in the platform under Устройства" ;;
+    esac
     ;;
   update)
     rauc install "$2"

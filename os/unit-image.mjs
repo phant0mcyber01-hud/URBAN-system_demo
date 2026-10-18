@@ -1,7 +1,8 @@
 // The file to write onto one machine of URBAN OS: a junction unit, a district server or the control centre.
 //
 //   node os/unit-image.mjs --unit edge-J-07 --serial URB-0001 [--key my-key.pub] [--version 1]
-//   node os/unit-image.mjs --role district --unit district-1 --serial SRV-0001
+//   node os/unit-image.mjs --role district --unit district-1 --serial SRV-0001 --center urban-center
+//   node os/unit-image.mjs --unit edge-J-07 --serial URB-0001 --vision off     (a light unit: no cameras)
 //   node os/unit-image.mjs --role district,center --unit center --serial SRV-0002 --host urban-center
 //
 // Takes the built disk image, puts the machine's name, serial and role (urban-unit.txt) and the maintenance key
@@ -21,6 +22,8 @@ const serial = opt("--serial", "");
 const version = opt("--version", "1");
 const role = opt("--role", "unit");
 const host = opt("--host", "");
+const center = opt("--center", "");
+const vision = opt("--vision", "");
 const names = { unit: /^edge-[A-Za-z0-9._-]+$/, district: /^district-[A-Za-z0-9._-]+$/,
   center: /^center(-[A-Za-z0-9._-]+)?$/, "district,center": /^center(-[A-Za-z0-9._-]+)?$/ };
 if (!names[role]) fail("--role unit | district | center | district,center");
@@ -29,6 +32,10 @@ if (!names[role].test(unit) || unit === "edge-J-00") {
     || "--unit center or center-<name>");
 }
 if (host && !/^[A-Za-z0-9.-]+$/.test(host)) fail("--host: a host name or an address");
+if (center && !/^[A-Za-z0-9.-]+(:[0-9]+)?$/.test(center)) fail("--center: the centre's host name or address, host[:port]");
+if (role === "district" && !center) fail("--role district needs --center <the control centre's address>");
+if (vision && vision !== "off") fail("--vision off is the only choice (a light unit); leave it out for a unit with cameras");
+if (vision && role !== "unit") fail("--vision off is for a junction unit");
 if (!/^[A-Za-z0-9._-]+$/.test(serial)) fail("--serial: the number on the box (letters, digits, . _ -)");
 if (!/^[0-9][0-9A-Za-z.+-]*$/.test(version)) fail("--version: digits first");
 
@@ -54,7 +61,8 @@ const name = `urban-edge-${version}-${unit}`;
 // the installer's text file, as the image ships it but with this unit's lines; CRLF so Notepad shows it right
 const unitTxt = readFileSync(join(ROOT, "os", "build", "urban-unit.txt"), "utf8")
   .replace(/^UNIT=.*$/m, `UNIT=${unit}`).replace(/^SERIAL=.*$/m, `SERIAL=${serial}`)
-  .replace(/^ROLE=.*$/m, `ROLE=${role}`).replace(/^HOST=.*$/m, `HOST=${host}`).replace(/\r?\n/g, "\r\n");
+  .replace(/^ROLE=.*$/m, `ROLE=${role}`).replace(/^HOST=.*$/m, `HOST=${host}`)
+  .replace(/^CENTER=.*$/m, `CENTER=${center}`).replace(/^VISION=.*$/m, `VISION=${vision}`).replace(/\r?\n/g, "\r\n");
 const script = `set -euo pipefail
 img=/tmp/${name}.img
 cp --sparse=always /out/urban-edge-${version}.img "$img"

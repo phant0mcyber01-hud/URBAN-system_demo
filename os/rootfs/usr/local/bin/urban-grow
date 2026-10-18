@@ -1,28 +1,123 @@
 #!/bin/bash
-# Before the data partition is mounted: if the disk is bigger than the image, the data partition (the last one)
-# takes the rest. The image is ~5 GB whatever the disk.
+# The data partition, before it is mounted (every boot, urban-grow.service):
+#   1. first boot on a disk bigger than the image: the partition (the last one) takes the rest of the disk;
+#   2. with a TPM: at first boot the partition becomes LUKS2 and its key is sealed in this machine's TPM;
+#      every boot after that the TPM unlocks it. A disk taken out of its machine cannot be read. Whatever the
+#      installer put on the partition before (maintenance keys) is kept.
+#      Without a TPM the partition stays plain, and the screen and the self-check say so.
+# The file system is then mounted by its label (fstab: LABEL=urban-data): the plain partition or the opened
+# LUKS volume, whichever this machine has.
 #
-# Done unmounted on purpose. Rewriting the partition table of a disk whose partition is mounted makes udev
-# re-read it; systemd then sees the partition vanish for a moment and unmounts it under the running system.
-# So: nothing is written when there is nothing to grow (every boot but the first on a bigger disk), the table
-# is written under the disk's lock (udev waits), and udev is let settle before the partition is checked,
-# grown and mounted.
+# Growing is done unmounted on purpose: rewriting the partition table under a mounted partition makes udev
+# re-read it, systemd sees the partition vanish for a moment and unmounts it under the running system. So
+# nothing is written when there is nothing to grow, the table is written under the disk's lock, and udev is
+# let settle before anything else touches the partition.
+#
+# The TPM key is bound to the chip only, not to the boot measurements (no PCRs): a firmware or system update
+# must never lock the unit out of its own data; the stolen-disk case is what this protects against.
 set -u
 part=$(readlink -f /dev/disk/by-partlabel/urban-data) || exit 0
 name=${part##*/}
-disk=/dev/$(lsblk -ndo PKNAME "$part")
-num=$(cat "/sys/class/block/$name/partition")
-end=$(( $(cat "/sys/class/block/$name/start") + $(cat "/sys/class/block/$name/size") ))
-total=$(blockdev --getsz "$disk")
-spare_mb=$(( (total - end) / 2048 ))
-if [ "$spare_mb" -lt 64 ]; then  # the backup GPT and rounding take a little; nothing worth growing
-  exit 0
-fi
-fail() { echo "URBAN-DATA could not grow: $*"; udevadm settle; exit 0; }  # the old size still works
-out=$(sfdisk --lock --no-reread --force --relocate gpt-bak-std "$disk" 2>&1) || fail "relocate: $out"
-out=$(echo ", +" | sfdisk --lock --no-reread --force -N "$num" "$disk" 2>&1) || fail "sfdisk: $out"
-out=$(partx -u -n "$num" "$disk" 2>&1) || fail "partx: $out"
+MAPPED=/dev/mapper/urban-data
+CRYPTSETUP=/usr/lib/systemd/systemd-cryptsetup  # not on PATH: systemd's own helper, the one crypttab would use
+[ -x "$CRYPTSETUP" ] || CRYPTSETUP=/lib/systemd/systemd-cryptsetup
+
+say() { echo "URBAN-DATA $*"; }
+
+grow() {
+  local disk num end total spare_mb out
+  disk=/dev/$(lsblk -ndo PKNAME "$part")
+  num=$(cat "/sys/class/block/$name/partition")
+  end=$(( $(cat "/sys/class/block/$name/start") + $(cat "/sys/class/block/$name/size") ))
+  total=$(blockdev --getsz "$disk")
+  spare_mb=$(( (total - end) / 2048 ))
+  if [ "$spare_mb" -lt 64 ]; then  # the backup GPT and rounding take a little; nothing worth growing
+    return 0
+  fi
+  out=$(sfdisk --lock --no-reread --force --relocate gpt-bak-std "$disk" 2>&1) || { say "could not grow: relocate: $out"; return 0; }
+  out=$(echo ", +" | sfdisk --lock --no-reread --force -N "$num" "$disk" 2>&1) || { say "could not grow: sfdisk: $out"; return 0; }
+  out=$(partx -u -n "$num" "$disk" 2>&1) || { say "could not grow: partx: $out"; return 0; }
+  udevadm settle
+  e2fsck -f -p "$part" >/dev/null 2>&1; [ $? -le 1 ] || { say "could not grow: e2fsck found errors"; return 0; }
+  out=$(resize2fs "$part" 2>&1) || { say "could not grow: resize2fs: $out"; return 0; }
+  say "grown by ${spare_mb} MiB to the end of $disk"
+}
+
+have_tpm() {
+  modprobe tpm_tis 2>/dev/null; modprobe tpm_crb 2>/dev/null
+  local i
+  for i in 1 2 3 4; do
+    [ -c /dev/tpmrm0 ] && return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+unlock() {
+  local out
+  if out=$("$CRYPTSETUP" attach urban-data "$part" - tpm2-device=auto,headless=true 2>&1); then
+    udevadm settle
+    say "encrypted (LUKS2), unlocked by this machine's TPM"
+    return 0
+  fi
+  say "LOCKED: the TPM did not release the key ($(echo "$out" | tail -n 1))"  # the mount fails; the self-check says so
+  return 1
+}
+
+undo() {
+  # encryption failed after the plain file system was gone: a plain one again, with what was on it
+  say "could not encrypt: $*"
+  "$CRYPTSETUP" detach urban-data 2>/dev/null
+  mkfs.ext4 -q -L urban-data "$part" 2>/dev/null
+  if [ -s /run/urban-data-keep.tar ] && mount "$part" /run/urban-data-mnt; then
+    tar -C /run/urban-data-mnt -xf /run/urban-data-keep.tar; umount /run/urban-data-mnt
+  fi
+  rm -f /run/urban-data-keep.tar /run/urban-data.key
+  udevadm settle
+  return 1
+}
+
+encrypt() {
+  # what is on the plain partition now (the installer's maintenance keys, nothing else yet) comes along
+  local keep=/run/urban-data-keep.tar key=/run/urban-data.key out
+  for tool in "$CRYPTSETUP" /usr/bin/systemd-cryptenroll /usr/sbin/cryptsetup; do
+    [ -x "$tool" ] || { say "could not encrypt: $tool is missing"; return 1; }
+  done
+  mkdir -p /run/urban-data-mnt
+  if mount -o ro "$part" /run/urban-data-mnt; then
+    tar -C /run/urban-data-mnt -cf "$keep" .
+    umount /run/urban-data-mnt
+  else
+    : > "$keep"
+  fi
+  ( umask 077; head -c 48 /dev/urandom | base64 -w0 > "$key" )  # a one-time passphrase, gone after this boot
+  out=$(cryptsetup luksFormat --type luks2 --batch-mode --key-file "$key" "$part" 2>&1) || undo "luksFormat: $out" || return 1
+  out=$(PASSWORD="$(cat "$key")" systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs= "$part" 2>&1) || undo "TPM enrolment: $out" || return 1
+  out=$(PASSWORD="$(cat "$key")" systemd-cryptenroll --wipe-slot=password "$part" 2>&1) || undo "wiping the passphrase: $out" || return 1
+  rm -f "$key"
+  unlock || undo "the TPM did not unlock what it had just sealed" || return 1
+  out=$(mkfs.ext4 -q -L urban-data "$MAPPED" 2>&1) || undo "mkfs: $out" || return 1
+  if [ -s "$keep" ]; then
+    mount "$MAPPED" /run/urban-data-mnt && tar -C /run/urban-data-mnt -xf "$keep" && umount /run/urban-data-mnt
+  fi
+  rm -f "$keep"
+  udevadm settle
+  say "the partition is now LUKS2 with its key sealed in this machine's TPM"
+}
+
+kind=$(blkid -o value -s TYPE "$part" 2>/dev/null)
+case "$kind" in
+  crypto_LUKS)
+    unlock; exit 0 ;;
+  ext4)
+    grow
+    if have_tpm; then
+      encrypt || say "plain: encryption failed, the partition stays readable"
+    else
+      say "plain: no TPM on this machine, the data partition is not encrypted"
+    fi ;;
+  *)
+    say "the partition holds $kind, not a file system of ours" ;;
+esac
 udevadm settle
-e2fsck -f -p "$part" >/dev/null 2>&1; [ $? -le 1 ] || fail "e2fsck found errors"
-out=$(resize2fs "$part" 2>&1) || fail "resize2fs: $out"
-echo "URBAN-DATA grown by ${spare_mb} MiB to the end of $disk"
+exit 0

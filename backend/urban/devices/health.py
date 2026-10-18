@@ -23,10 +23,14 @@ def clean(health) -> dict:
     temp = health.get("temp")
     if isinstance(temp, (int, float)) and not isinstance(temp, bool) and math.isfinite(temp):
         out["temp"] = round(float(temp), 1)
-    for key in ("leases", "uptime"):
+    for key in ("leases", "uptime", "buffered"):
         v = health.get(key)
         if isinstance(v, int) and not isinstance(v, bool) and 0 <= v < 10 ** 9:
             out[key] = v
+    relay = health.get("relay")  # a district server: what its relay is doing, counts only
+    if isinstance(relay, dict):
+        out["relay"] = {k: v for k, v in relay.items() if k in ("units", "sessions", "refused", "bytes_up", "bytes_down")
+                        and isinstance(v, int) and not isinstance(v, bool) and 0 <= v < 10 ** 15}
     if health.get("door") in ("open", "closed"):
         out["door"] = health["door"]
     for key in ("controller", "version"):

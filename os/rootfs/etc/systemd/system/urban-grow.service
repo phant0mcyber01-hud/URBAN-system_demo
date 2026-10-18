@@ -1,9 +1,9 @@
 [Unit]
-Description=URBAN OS: the data partition takes the whole disk (before it is mounted)
+Description=URBAN OS: the data partition - grown to the disk, encrypted with the TPM (before it is mounted)
 DefaultDependencies=no
 Requires=dev-disk-by\x2dpartlabel-urban\x2ddata.device
-After=dev-disk-by\x2dpartlabel-urban\x2ddata.device
-Before=systemd-fsck@dev-disk-by\x2dpartlabel-urban\x2ddata.service var-lib-urban.mount local-fs.target
+After=dev-disk-by\x2dpartlabel-urban\x2ddata.device systemd-modules-load.service
+Before=systemd-fsck@dev-disk-by\x2dlabel-urban\x2ddata.service var-lib-urban.mount local-fs.target
 
 [Service]
 Type=oneshot

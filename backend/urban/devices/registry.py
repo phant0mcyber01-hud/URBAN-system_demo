@@ -20,10 +20,15 @@ from cryptography.x509.oid import NameOID
 from . import crypto, trust
 
 ACTIVE, REVOKED = "active", "revoked"
+UNIT, DISTRICT = "unit", "district"  # kinds of record: a junction's unit, or a district server units connect through
 
 
 def device_id(junction_id: str) -> str:
     return f"edge-{junction_id}"
+
+
+def kind_of(rec: dict) -> str:
+    return rec.get("kind") or UNIT
 
 
 class Registry:
@@ -36,7 +41,7 @@ class Registry:
 
     def _load(self):
         self.devices = {d["id"]: d for d in json.loads(self.path.read_text(encoding="utf-8"))}
-        self._by_tls = {d["tls"]: d for d in self.devices.values()}
+        self._by_tls = {d["tls"]: d for d in self.devices.values() if d.get("tls")}
 
     def refresh(self) -> set[str]:
         """Re-read the file if another process changed it. Returns the ids whose key or status changed,
@@ -61,27 +66,68 @@ class Registry:
         save(self.path, self.devices)
         st = self.path.stat()
         self._stamp = (st.st_mtime_ns, st.st_size)
-        self._by_tls = {d["tls"]: d for d in self.devices.values()}
+        self._by_tls = {d["tls"]: d for d in self.devices.values() if d.get("tls")}
 
     def by_tls(self, tls: str) -> dict | None:
         return self._by_tls.get(tls)
 
-    def enroll(self, device: str, junction: dict, public: str, serial: str = "") -> dict:
+    def districts(self) -> list[dict]:
+        return [d for d in self.devices.values() if kind_of(d) == DISTRICT]
+
+    def enroll_district(self, device: str, address: str, public: str, serial: str = "") -> dict:
+        """Enrol a district server: its public key and the address its junction units connect to (host or
+        host:port). A known district gets the new key or address."""
+        crypto.load_public(public)
+        if not device.startswith("district-") or len(device) > 60:
+            raise ValueError("district id must look like district-<name>")
+        address = str(address).strip()
+        if not address or any(ch.isspace() for ch in address):
+            raise ValueError("the district's address is the host name or IP its units connect to, e.g. district-1.city or 10.1.0.2")
+        rec = self.devices.get(device, {})
+        if rec.get("public_key") != public.strip().lower():
+            rec.pop("first_seen", None)
+        rec.update({"id": device, "kind": DISTRICT, "junction": None, "tls": None, "name": "", "address": address,
+                    "public_key": public.strip().lower(), "status": ACTIVE,
+                    "serial": serial or rec.get("serial") or f"URB-{secrets.token_hex(3).upper()}",
+                    "enrolled": datetime.date.today().isoformat()})
+        self.devices[device] = rec
+        self._save()
+        return rec
+
+    def assign(self, device: str, district: str | None) -> dict | None:
+        """Route a unit through a district server (its next kit points there), or directly to the centre (None)."""
+        rec = self.devices.get(device)
+        if rec is None or kind_of(rec) != UNIT:
+            return None
+        if district is not None and kind_of(self.devices.get(district, {})) != DISTRICT:
+            raise ValueError(f"{district} is not an enrolled district server")
+        if district is None:
+            rec.pop("district", None)
+        else:
+            rec["district"] = district
+        self._save()
+        return rec
+
+    def enroll(self, device: str, junction: dict, public: str, serial: str = "", district: str | None = None) -> dict:
         """Enrol a unit's public key for a junction ({id, tls, name}); a known unit gets the new key (replaced box).
-        The private key never comes here."""
+        The private key never comes here. district: the district server it connects through, if any."""
         crypto.load_public(public)  # raises ValueError if it is not an Ed25519 public key
         if not device.startswith("edge-") or len(device) > 60:
             raise ValueError("device id must look like edge-<junction>")
+        if district is not None and kind_of(self.devices.get(district, {})) != DISTRICT:
+            raise ValueError(f"{district} is not an enrolled district server")
         other = self._by_tls.get(junction["tls"])
         if other is not None and other["id"] != device:
             raise ValueError(f"junction {junction['id']} already has unit {other['id']}; revoke and remove it first")
         rec = self.devices.get(device, {})
         if rec.get("public_key") != public.strip().lower():
             rec.pop("first_seen", None)  # a new key is a new box: it has not been seen yet
-        rec.update({"id": device, "junction": junction["id"], "tls": junction["tls"], "name": junction.get("name", ""),
-                    "public_key": public.strip().lower(), "status": ACTIVE,
+        rec.update({"id": device, "kind": UNIT, "junction": junction["id"], "tls": junction["tls"],
+                    "name": junction.get("name", ""), "public_key": public.strip().lower(), "status": ACTIVE,
                     "serial": serial or rec.get("serial") or f"URB-{secrets.token_hex(3).upper()}",
                     "enrolled": datetime.date.today().isoformat()})
+        if district is not None:
+            rec["district"] = district
         self.devices[device] = rec
         self._save()
         return rec
@@ -109,6 +155,10 @@ class Registry:
         if rec["status"] != REVOKED:
             raise ValueError("revoke the unit first")
         del self.devices[device]
+        if kind_of(rec) == DISTRICT:  # its units connect to the centre directly from their next kit on
+            for other in self.devices.values():
+                if other.get("district") == device:
+                    other.pop("district", None)
         self._save()
         return rec
 
