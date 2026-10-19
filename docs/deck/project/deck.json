@@ -9,6 +9,8 @@
   "order": [
     "cover",
     "whoami",
+    "how",
+    "glossary",
     "why",
     "signed",
     "intruder",
@@ -22,7 +24,7 @@
   ],
   "sections": {
     "s1": {
-      "description": "Что это: одна ОС для блока, района и центра.",
+      "description": "Что это: одна ОС для блока, района и центра, что она делает и словарь.",
       "start": "cover"
     },
     "s2": {

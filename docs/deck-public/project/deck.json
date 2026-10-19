@@ -1,0 +1,51 @@
+{
+  "v": 4,
+  "createdOnFiles": {
+    "v": 1,
+    "at": "2026-10-19T12:00:00Z"
+  },
+  "lists": "css",
+  "title": "URBAN — умные светофоры",
+  "order": [
+    "cover",
+    "problem",
+    "idea",
+    "screen",
+    "benefit",
+    "privacy",
+    "safety",
+    "levels",
+    "ready",
+    "pilot",
+    "close"
+  ],
+  "sections": {
+    "s1": {
+      "description": "Что это и какую проблему решает.",
+      "start": "cover"
+    },
+    "s2": {
+      "description": "Как работает и что это даёт городу.",
+      "start": "idea"
+    },
+    "s3": {
+      "description": "Почему этому можно доверять.",
+      "start": "privacy"
+    },
+    "s4": {
+      "description": "Что готово и что нужно для пилота.",
+      "start": "ready"
+    }
+  },
+  "faces": {
+    "rubik": {
+      "family": "Rubik",
+      "href": "https://fonts.googleapis.com/css2?family=Rubik:wght@500;600;700&display=swap"
+    },
+    "ibm-plex-sans": {
+      "family": "IBM Plex Sans",
+      "href": "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600&display=swap"
+    }
+  },
+  "designSystems": []
+}
