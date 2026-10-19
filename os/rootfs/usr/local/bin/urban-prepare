@@ -15,6 +15,8 @@ D=/var/lib/urban
 install -d -m 755 "$D" "$D/etc" "$D/rauc"
 install -d -m 750 -o urban -g urban "$D/etc/pki" "$D/etc/pki/edge"
 install -d -m 700 "$D/ssh"
+install -d -m 755 -o root -g root /run/urban  # root's live state (tmpfiles.d/urban.conf says the same)
+install -d -m 755 -o urban-vision -g urban /run/urban/q  # the only place vision writes: its queue lengths
 install -d -m 700 "$D/update"  # update bundles are staged here: the root is read-only, /tmp is small
 [ -f "$D/ssh/ssh_host_ed25519_key" ] || ssh-keygen -q -t ed25519 -N '' -f "$D/ssh/ssh_host_ed25519_key" -C urban-edge
 
@@ -31,10 +33,11 @@ if [ -f /boot/efi/maintenance.pub ]; then
   touch "$D/ssh/authorized_keys"; chmod 600 "$D/ssh/authorized_keys"
   added=0
   while read -r line; do
-    case "$line" in ssh-ed25519\ *|ecdsa-sha2-nistp*\ *|ssh-rsa\ *) ;; *) continue ;; esac
+    line=${line#$'\xef\xbb\xbf'}  # a BOM from Notepad
+    case "$line" in ssh-ed25519\ *|sk-ssh-ed25519@openssh.com\ *|ecdsa-sha2-nistp256\ *|ssh-rsa\ *) ;; *) continue ;; esac
     printf '%s\n' "$line" | ssh-keygen -l -f - >/dev/null 2>&1 || continue
     grep -qxF "$line" "$D/ssh/authorized_keys" || { printf '%s\n' "$line" >> "$D/ssh/authorized_keys"; added=$((added + 1)); }
-  done < <(tr -d '\r' < /boot/efi/maintenance.pub)
+  done < <(tr -d '\r' < /boot/efi/maintenance.pub; echo)  # the echo: a last line without a newline still counts
   mv -f /boot/efi/maintenance.pub /boot/efi/maintenance.pub.imported
   echo "URBAN-MAINTENANCE-KEYS added=$added total=$(grep -c . "$D/ssh/authorized_keys")"
 fi
@@ -46,14 +49,14 @@ fi
 
 # KEY=value from the installer's text file on the ESP: CR/LF tolerant, only safe characters, never executed
 value() {
-  tr -d '\r' < "$2" | sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\([A-Za-z0-9.,_-]*\)[[:space:]]*$/\1/p" | tail -n 1
+  tr -d '\r' < "$2" | sed '1s/^\xEF\xBB\xBF//' | sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\([A-Za-z0-9.,_-]*\)[[:space:]]*$/\1/p" | tail -n 1
 }
 if [ ! -f "$D/etc/unit.conf" ] && [ -f /boot/efi/urban-unit.txt ]; then
   unit=$(value UNIT /boot/efi/urban-unit.txt)
   serial=$(value SERIAL /boot/efi/urban-unit.txt)
   role=$(value ROLE /boot/efi/urban-unit.txt); role=${role:-unit}
   host=$(value HOST /boot/efi/urban-unit.txt)
-  center=$(tr -d '\r' < /boot/efi/urban-unit.txt | sed -n 's/^[[:space:]]*CENTER[[:space:]]*=[[:space:]]*\([A-Za-z0-9.-]*\(:[0-9]*\)\{0,1\}\)[[:space:]]*$/\1/p' | tail -n 1)
+  center=$(tr -d '\r' < /boot/efi/urban-unit.txt | sed -n 's/^[[:space:]]*CENTER[[:space:]]*=[[:space:]]*\([A-Za-z0-9.-]*\(:[0-9][0-9]*\)\{0,1\}\)[[:space:]]*$/\1/p' | tail -n 1)
   vision=$(value VISION /boot/efi/urban-unit.txt | tr 'A-Z' 'a-z')
   # each role has its own kind of name; the template's placeholder is no name at all
   case "$role" in
@@ -62,7 +65,8 @@ if [ ! -f "$D/etc/unit.conf" ] && [ -f /boot/efi/urban-unit.txt ]; then
     center|district,center|center,district) ok='^center(-[A-Za-z0-9._-]+)?$'; role=${role/center,district/district,center} ;;
     *) ok='^$'; echo "URBAN-ROLE refused: ROLE=$role (unit, district, center or district,center)" ;;
   esac
-  if [[ "$unit" =~ $ok ]] && [ "$unit" != "edge-J-00" ]; then
+  if [ -n "$unit" ] && [[ "$unit" =~ $ok ]] && [ "$unit" != "edge-J-00" ]; then
+    case "$center" in ""|*:*) ;; *) center="$center:8443" ;; esac  # the centre's device listener: 8443 unless said
     printf "UNIT=%s\nSERIAL=%s\nROLE=%s\nHOST=%s\nCENTER=%s\n" "$unit" "$serial" "$role" "$host" "$center" > "$D/etc/unit.conf"
     if [ "$role" = unit ] && [ "$vision" = off ]; then echo "VISION=off" >> "$D/etc/unit.conf"; fi
   elif [ -n "$unit" ] && [ "$unit" != "edge-J-00" ]; then
@@ -104,7 +108,7 @@ case "$ROLE" in unit|district)  # a unit and a district have a key of their own 
     chmod 600 "$KEY"
   fi
   fingerprint=$(sed -n 's/^fingerprint: *\([0-9A-F-]*\).*/\1/p' "$D/etc/enrolment.txt")
-  code=$(grep -o 'URBAN1:[^[:space:]]*' "$D/etc/enrolment.txt")
+  code=$(grep -o 'URBAN1:[^[:space:]]*' "$D/etc/enrolment.txt" || true)
   echo "URBAN-ENROLMENT unit=$UNIT serial=${SERIAL:--} fingerprint=$fingerprint code=$code" ;;
 esac
 /usr/local/bin/urban-console  # the same, on the machine's own screen

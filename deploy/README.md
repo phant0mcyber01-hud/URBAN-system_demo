@@ -136,8 +136,8 @@ SNMP_PRIV_PASS=...
 SNMP_AUTH=sha
 # только если контроллер не умеет SNMPv3 и линия до него изолирована:
 # EXTRA=--snmp-version 1 --community ...
-# пишет камерный конвейер: python -m urban.sensors --calibration /etc/urban/cameras.json --out /run/urban/queues.json
-SENSORS=/run/urban/queues.json
+# пишет камерный конвейер: python -m urban.sensors --calibration /etc/urban/cameras.json --out /run/urban/q/queues.json
+SENSORS=/run/urban/q/queues.json
 # температура в шкафу: датчик DS18B20 (1-Wire); пусто — температура платы вычислителя
 TEMP_SENSOR=/sys/bus/w1/devices/28-0123456789ab/w1_slave
 # концевик двери (файл значения GPIO); пусто — дверь «неизвестно», а не «закрыта»
@@ -149,7 +149,10 @@ DOOR_SENSOR=/sys/class/gpio/gpio17/value
 
 Камеры блока: зависимости `pip install -e "backend[edge,vision]"`, модель в `/opt/urban/models/yolox_nano.onnx`,
 калибровка на странице блока (`python -m urban.vision setup`), служба `urban-vision@edge-J-21` пишет
-`/run/urban/queues.json`. Подробно — [docs/vision.md](../docs/vision.md).
+`/run/urban/q/queues.json`. Служба зрения работает от своего пользователя (`urban-vision`, группа `urban`), чтобы
+взломанное распознавание не дотянулось до ключа блока: `sudo useradd --system --gid urban --no-create-home
+--shell /usr/sbin/nologin urban-vision`, папка — `sudo install -d -m 755 -o urban-vision -g urban /run/urban/q`
+(на URBAN OS это делается само). Подробно — [docs/vision.md](../docs/vision.md).
 
 ```bash
 sudo systemctl enable --now urban-edge@edge-J-21

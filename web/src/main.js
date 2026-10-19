@@ -154,11 +154,12 @@ async function openEnrol(junction = '') {
       <small class="err" data-err></small>
     </form>`;
   const form = $('enrol-body').querySelector('form');
-  const kind = () => (DISTRICT_CODE.test(form.code.value) ? 'district' : 'unit');
+  const code = () => form.code.value.replace(/\s+/g, '');  // a code wrapped by a messenger still reads the same
+  const kind = () => (DISTRICT_CODE.test(code()) ? 'district' : 'unit');
   form.code.oninput = () => {  // the code names its device: a unit names its junction, a district asks for its address
     const k = kind();
     for (const l of form.querySelectorAll('label[data-for]')) l.hidden = l.dataset.for !== k;
-    const m = UNIT_CODE.exec(form.code.value);
+    const m = UNIT_CODE.exec(code());
     if (m && [...form.junction.options].some((o) => o.value === m[1])) form.junction.value = m[1];
   };
   form.onsubmit = async (e) => {
@@ -166,8 +167,8 @@ async function openEnrol(junction = '') {
     form.querySelector('[data-err]').textContent = '';
     try {
       const body = kind() === 'district'
-        ? { code: form.code.value, address: form.address.value.trim() }
-        : { code: form.code.value, junction: form.junction.value, district: form.district.value || null };
+        ? { code: code(), address: form.address.value.trim() }
+        : { code: code(), junction: form.junction.value, district: form.district.value || null };
       const r = await api.post('/api/devices/enroll-code', body);
       enrolDone(r);
     } catch (err) { form.querySelector('[data-err]').textContent = err.message; }

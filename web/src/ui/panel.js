@@ -65,10 +65,13 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
   // URBAN Edge units: the registry with live health, one row per junction; district servers have rows of their own
   const waiting = (d) => !d.o && !d.f && d.s !== 'revoked';  // enrolled, never connected with this key
   const isDistrict = (d) => d.k === 'district';
+  // junction units and district servers are counted apart: a district is not a «блок» of any junction
+  const split = (list) => ({ units: list.filter((d) => !isDistrict(d)), districts: list.filter(isDistrict) });
+  const onlineOf = (list) => list.filter((d) => d.o).length;
   const districtRow = (d) => `<div class="item dev">
         <div class="row"><span>${tag('районный сервер')} <b>${esc(d.id)}</b> <small>${esc(d.addr ?? '')}${d.serial ? ` · ${esc(d.serial)}` : ''}</small></span>${devState(d)}</div>
         <div class="row meta">
-          <span title="блоков на связи через него">${d.r ? `${esc(d.r.units)} ${plural(d.r.units, 'блок', 'блока', 'блоков')} через него` : 'ретранслятор: нет данных'}</span>
+          <span title="блоков на связи через него">${d.r && d.r.units != null ? `${esc(d.r.units)} ${plural(Number(d.r.units) || 0, 'блок', 'блока', 'блоков')} через него` : 'ретранслятор: нет данных'}</span>
           <span title="отчётов, накопленных без связи с центром">${d.b ? `${esc(d.b)} отчётов ждут` : 'буфер пуст'}</span>
           <span title="температура в шкафу">${d.t == null ? '—' : `${esc(d.t)} °C`}</span>
           <span title="версия ПО">${esc(d.v ?? '—')}</span>
@@ -89,9 +92,11 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
   const deviceSummary = () => {
     const all = Object.values(S.dev);
     if (!all.length) return empty('ожидание устройств');
-    const online = all.filter((d) => d.o).length;
+    const { units, districts } = split(all);
     const bad = all.filter((d) => (!d.o && !waiting(d)) || d.lock || d.al.length || d.s === 'revoked');
-    return `<div class="item">${chip(online === all.length && !bad.length ? 'ok' : 'warn', `${online} из ${all.length} на связи`)}
+    const part = (list, what) => (list.length ? chip(onlineOf(list) === list.length && !bad.length ? 'ok' : 'warn',
+      `${onlineOf(list)} из ${list.length} ${what} на связи`) : '');
+    return `<div class="item">${part(units, 'блоков')} ${part(districts, plural(districts.length, 'районный сервер', 'районных сервера', 'районных серверов'))}
         ${bad.length ? `${bad.length} с замечаниями, подробности во вкладке «Устройства».` : 'Замечаний нет.'}</div>`;
   };
   const enrolButton = (junction = '') => (S.mode === 'field' && S.can('admin')
@@ -111,7 +116,8 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
           ${enrolButton() || '<p class="muted">Подключать блоки может администратор.</p>'}`
         : empty('ожидание устройств');
     }
-    const online = all.filter(([, d]) => d.o).length;
+    const { units, districts } = split(all.map(([, d]) => d));
+    const online = onlineOf(units);
     const pendingUnits = all.filter(([, d]) => waiting(d)).length;
     const alerts = all.filter(([, d]) => d.al.some((a) => a[0] === 'alert') || d.lock || d.s === 'revoked').length;
     const warns = all.filter(([, d]) => d.al.length && !d.al.some((a) => a[0] === 'alert') && !d.lock && d.s !== 'revoked').length;
@@ -133,7 +139,8 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
       </div>`)).join('');
     const recent = [...S.devAlerts].reverse().slice(0, 6);
     return `<div class="grid">
-        ${kpi('на связи', `${online} / ${all.length}`, online === all.length ? 'ok' : 'warn')}
+        ${kpi('блоков на связи', `${online} / ${units.length}`, online === units.length ? 'ok' : 'warn')}
+        ${districts.length ? kpi('районных серверов на связи', `${onlineOf(districts)} / ${districts.length}`, onlineOf(districts) === districts.length ? 'ok' : 'warn') : ''}
         ${kpi('тревог', alerts, alerts ? 'bad' : 'ok')}${kpi('предупреждений', warns, warns ? 'warn' : '')}
         ${kpi('макс. температура, °C', hot.length ? Math.max(...hot) : '—')}
       </div>
@@ -281,14 +288,15 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
         ...S.devAlerts.map((a) => ({ t: a.t, html: `${tag('устройство')} ${esc(a.device)}: ${esc(a.text)}` })),
       ].sort((a, b) => b.t - a.t).slice(0, 8);
       const field = S.mode === 'field';
-      const units = Object.values(S.dev), online = units.filter((d) => d.o).length;
+      const { units, districts } = split(Object.values(S.dev)), online = onlineOf(units);
       const ready = (S.junctions ?? []).filter((j) => j.passport.status === 'approved').length;
       const running = S.cmd.filter((c) => ['approved', 'active', 'revoking'].includes(c.status)).length;
       return `<div class="grid">
           ${kpi('проблем ждут решения', wait, wait ? 'warn' : '')}${field
             ? `${kpi('команд действует', running)}
                ${kpi('паспортов утверждено', S.junctions ? `${ready} / ${S.junctions.length}` : '—', S.junctions && ready < S.junctions.length ? 'warn' : '')}
-               ${kpi('блоков на связи', units.length ? `${online} / ${units.length}` : '0', units.length && online < units.length ? 'warn' : '')}`
+               ${kpi('блоков на связи', units.length ? `${online} / ${units.length}` : '0', units.length && online < units.length ? 'warn' : '')}
+               ${districts.length ? kpi('районных серверов на связи', `${onlineOf(districts)} / ${districts.length}`, onlineOf(districts) < districts.length ? 'warn' : '') : ''}`
             : `${kpi('активных происшествий', inc, inc ? 'bad' : '')}
                ${kpi('авто в районе', S.stats?.cars ?? '—')}${kpi('ср. скорость, км/ч', S.stats?.mean_speed_kmh ?? '—')}
                ${kpi('сегментов с затором', jam, jam ? 'warn' : '')}${kpi('объектов с отклонением', bad, bad ? 'warn' : '')}`}

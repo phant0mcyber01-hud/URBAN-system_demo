@@ -45,7 +45,7 @@ python -m urban.survey summary data/survey/survey.csv
 На блоке записывать, что он измеряет:
 
 ```bash
-python -m urban.bench log-queues --sensors /run/urban/queues.json --out queues.csv
+python -m urban.bench log-queues --sensors /run/urban/q/queues.json --out queues.csv
 ```
 
 Наблюдатель в это же время записывает в `observed.csv` столбцы `time, approach, metres` (или `cars` — машины,

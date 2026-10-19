@@ -275,7 +275,7 @@ community-строкой остался только как явный `--snmp-v
 не «нет очереди». Файл пишется атомарно.
 
 ```bash
-python -m urban.sensors --calibration /etc/urban/cameras.json --out /run/urban/queues.json < detections.jsonl
+python -m urban.sensors --calibration /etc/urban/cameras.json --out /run/urban/q/queues.json < detections.jsonl
 ```
 
 Сам детектор объектов (нейросеть на ускорителе блока или аналитика в камере) в конвейер не входит: его выбор

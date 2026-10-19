@@ -1,26 +1,26 @@
 # Camera vision of one URBAN Edge unit:  systemctl enable --now urban-vision@edge-J-21
 # Cameras and their calibration: /etc/urban/cameras.json (python -m urban.vision setup); camera passwords
 # in /etc/urban/edge-<id>.env as CAM1_USER, CAM1_PASS ... The model: /opt/urban/models/yolox_nano.onnx.
-# Writes /run/urban/queues.json, which urban-edge@ reads (SENSORS). Frames stay in memory, nothing is recorded.
+# Writes /run/urban/q/queues.json, which urban-edge@ reads (SENSORS). Frames stay in memory, nothing is recorded.
 [Unit]
 Description=URBAN Edge camera vision %i
 After=network.target
 
 [Service]
-User=urban
+User=urban-vision
 Group=urban
 WorkingDirectory=/opt/urban
 EnvironmentFile=-/etc/urban/edge-%i.env
 ExecStart=/opt/urban/.venv/bin/python -m urban.vision run --cameras /etc/urban/cameras.json \
-    --model /opt/urban/models/yolox_nano.onnx --out /run/urban/queues.json
+    --model /opt/urban/models/yolox_nano.onnx --out /run/urban/q/queues.json
 Restart=always
 RestartSec=3
-RuntimeDirectory=urban
-RuntimeDirectoryPreserve=yes
 # The sandbox: frames come over the network (RTSP) and stay in this process; it writes one file of numbers.
-# A hacked vision process sees no key of any kind and cannot write anywhere but /run/urban.
+# A hacked vision process sees no key of any kind and writes nowhere but /run/urban/q. It runs as its own user
+# (urban-vision), not as the unit's: through /proc it could otherwise reach the unit's key.
 NoNewPrivileges=yes
 ProtectSystem=strict
+ReadWritePaths=/run/urban/q
 InaccessiblePaths=-/var/lib/urban/ssh -/var/lib/urban/etc/pki -/var/lib/urban/update -/var/lib/urban/rauc -/var/lib/urban/platform -/boot
 ProtectHome=yes
 PrivateTmp=yes

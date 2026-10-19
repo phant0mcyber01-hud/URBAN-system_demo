@@ -1,3 +1,4 @@
+import os
 import time
 
 import pytest
@@ -70,3 +71,15 @@ def test_roles_are_ordered():
     assert allows("admin", "viewer") and allows("operator", "operator") and not allows("viewer", "operator")
     assert not allows("nobody", "viewer")
     assert SESSION_HOURS > 0
+
+
+def test_the_first_admin_password_is_also_kept_in_a_private_file(tmp_path):
+    from urban.accounts import keep_first_password
+    a = Accounts(tmp_path / "users.json")
+    pw = a.bootstrap()
+    path = keep_first_password(tmp_path / "state" / "first-admin-password", pw)
+    assert path.read_text(encoding="utf-8") == pw + "\n"
+    if os.name == "posix":
+        assert path.stat().st_mode & 0o077 == 0  # owner only
+    keep_first_password(path, "second-password")  # a new first password (users file wiped) replaces it
+    assert path.read_text(encoding="utf-8") == "second-password\n"

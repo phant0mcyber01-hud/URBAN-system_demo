@@ -1,0 +1,15 @@
+<section id="intruder" data-transition="fade" style="background:repeating-linear-gradient(0deg, rgba(57,255,136,0.045) 0px, rgba(57,255,136,0.045) 2px, transparent 2px, transparent 5px), #07090a;color:#d5e6dc;font-family:'JetBrains Mono', 'Courier New', monospace;padding:128px 128px 160px;display:flex;flex-direction:column;justify-content:start;gap:40px">
+<p style="position:absolute;left:128px;top:56px;width:1200px;font-size:24px;color:#7f9a8b">root@urban-os:~# <span style="color:#39ff88">./intruder.sh</span></p>
+<h2 style="font-size:96px;font-weight:800;line-height:1.1;letter-spacing:-2px;color:#d5e6dc">Если взломают</h2>
+<table style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:32px;color:#d5e6dc">
+<tr style="background:#0d1411"><th style="width:27%;color:#7f9a8b">Что сделали</th><th style="width:29%;color:#7f9a8b">Что получат</th><th style="width:44%;color:#7f9a8b">Почему так</th></tr>
+<tr><td>Украли диск (с TPM)</td><td style="color:#39ff88"><b>ничего из данных</b></td><td>LUKS2, ключ в TPM той машины</td></tr>
+<tr style="background:#0d1411"><td>Взломали службу</td><td style="color:#39ff88"><b>свой ключ и сеть</b></td><td>«клетка»: без ключей и прав</td></tr>
+<tr><td>Root на блоке</td><td style="color:#ff2e63"><b>ключ этого блока, пока не отзовут</b></td><td>команду не подписать: подписывает центр</td></tr>
+<tr style="background:#0d1411"><td>Взломали район</td><td style="color:#39ff88"><b>шифртекст</b></td><td>пересылает ядро, подписи у района нет</td></tr>
+<tr><td>Взломали центр</td><td style="color:#ff2e63"><b>утверждённые планы</b></td><td>аренда 3 мин, только паспорт</td></tr>
+</table>
+<p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#7f9a8b">Блок и диск: «взломщик» в QEMU; район: цепочка; центр: устройство блоков</p>
+<p style="position:absolute;right:128px;bottom:64px;width:300px;text-align:right;font-size:24px;color:#7f9a8b">05 / 12</p>
+<aside>Цель: если взломали, получить как можно меньше. Таблица честная, красным — два тяжёлых случая. Root на работающем блоке может прочитать файл ключа этого блока и выдавать себя за него, пока его не отзовут в «Устройствах»; командовать он не может: подписывает только центр. Закроется это подписью внутри чипа TPM. Взломанный центр может только выбирать планы, которые инженер утвердил в паспорте перекрёстка, и только на три минуты аренды. Взломанный район видит шифртекст и может врать о своих очередях, но не командовать. SSH: только ключи, современная криптография, снаружи по TCP слушает только SSH. Украденный диск без TPM не зашифрован, и экран машины об этом пишет.</aside>
+</section>

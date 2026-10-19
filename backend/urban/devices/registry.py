@@ -9,6 +9,7 @@ platform runs.
 import datetime
 import ipaddress
 import json
+import os
 import secrets
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from . import crypto, trust
+from .enrolment import DEVICE, check_address
 
 ACTIVE, REVOKED = "active", "revoked"
 UNIT, DISTRICT = "unit", "district"  # kinds of record: a junction's unit, or a district server units connect through
@@ -37,6 +39,7 @@ class Registry:
         self.devices: dict[str, dict] = {}
         self._by_tls: dict[str, dict] = {}
         self._stamp = None
+        self._changed: set[str] = set()  # changes picked up inside a write, still to be reported by refresh()
         self.refresh()
 
     def _load(self):
@@ -46,27 +49,45 @@ class Registry:
     def refresh(self) -> set[str]:
         """Re-read the file if another process changed it. Returns the ids whose key or status changed,
         or that appeared or disappeared: their open sessions must not continue on the old trust."""
+        self._reload()
+        changed, self._changed = self._changed, set()
+        return changed
+
+    def _reload(self):
         try:
             st = self.path.stat()
             stamp = (st.st_mtime_ns, st.st_size)
         except OSError:
-            return set()
+            return
         if stamp == self._stamp:
-            return set()
+            return
         before = {i: (d["public_key"], d["status"]) for i, d in self.devices.items()}
         try:
             self._load()
         except (OSError, ValueError):
-            return set()  # half-written: next time
+            return  # half-written: next time
         self._stamp = stamp
         after = {i: (d["public_key"], d["status"]) for i, d in self.devices.items()}
-        return {i for i in before.keys() | after.keys() if before.get(i) != after.get(i)}
+        self._changed |= {i for i in before.keys() | after.keys() if before.get(i) != after.get(i)}
 
     def _save(self):
         save(self.path, self.devices)
         st = self.path.stat()
         self._stamp = (st.st_mtime_ns, st.st_size)
         self._by_tls = {d["tls"]: d for d in self.devices.values() if d.get("tls")}
+
+    def _usable_district(self, district: str) -> None:
+        rec = self.devices.get(district, {})
+        if kind_of(rec) != DISTRICT:
+            raise ValueError(f"{district} is not an enrolled district server")
+        if rec["status"] == REVOKED:
+            raise ValueError(f"{district} is revoked: restore it first, or route the unit directly")
+
+    def _check_key(self, device: str, public: str):
+        """One key, one device: the same key under two ids would let one box act as two."""
+        for other in self.devices.values():
+            if other["id"] != device and other["public_key"] == public.strip().lower():
+                raise ValueError(f"this key is already enrolled as {other['id']}")
 
     def by_tls(self, tls: str) -> dict | None:
         return self._by_tls.get(tls)
@@ -78,11 +99,11 @@ class Registry:
         """Enrol a district server: its public key and the address its junction units connect to (host or
         host:port). A known district gets the new key or address."""
         crypto.load_public(public)
-        if not device.startswith("district-") or len(device) > 60:
-            raise ValueError("district id must look like district-<name>")
-        address = str(address).strip()
-        if not address or any(ch.isspace() for ch in address):
-            raise ValueError("the district's address is the host name or IP its units connect to, e.g. district-1.city or 10.1.0.2")
+        if not device.startswith("district-") or not DEVICE.fullmatch(device):
+            raise ValueError("district id must look like district-<name> (letters, digits, . _ -)")
+        address = check_address(address)
+        self._reload()  # another process (the CLI) may have written since we read the file
+        self._check_key(device, public)
         rec = self.devices.get(device, {})
         if rec.get("public_key") != public.strip().lower():
             rec.pop("first_seen", None)
@@ -96,11 +117,12 @@ class Registry:
 
     def assign(self, device: str, district: str | None) -> dict | None:
         """Route a unit through a district server (its next kit points there), or directly to the centre (None)."""
+        self._reload()
         rec = self.devices.get(device)
         if rec is None or kind_of(rec) != UNIT:
             return None
-        if district is not None and kind_of(self.devices.get(district, {})) != DISTRICT:
-            raise ValueError(f"{district} is not an enrolled district server")
+        if district is not None:
+            self._usable_district(district)
         if district is None:
             rec.pop("district", None)
         else:
@@ -112,10 +134,12 @@ class Registry:
         """Enrol a unit's public key for a junction ({id, tls, name}); a known unit gets the new key (replaced box).
         The private key never comes here. district: the district server it connects through, if any."""
         crypto.load_public(public)  # raises ValueError if it is not an Ed25519 public key
-        if not device.startswith("edge-") or len(device) > 60:
-            raise ValueError("device id must look like edge-<junction>")
-        if district is not None and kind_of(self.devices.get(district, {})) != DISTRICT:
-            raise ValueError(f"{district} is not an enrolled district server")
+        if not device.startswith("edge-") or not DEVICE.fullmatch(device):
+            raise ValueError("device id must look like edge-<junction> (letters, digits, . _ -)")
+        self._reload()
+        if district is not None:
+            self._usable_district(district)
+        self._check_key(device, public)
         other = self._by_tls.get(junction["tls"])
         if other is not None and other["id"] != device:
             raise ValueError(f"junction {junction['id']} already has unit {other['id']}; revoke and remove it first")
@@ -126,7 +150,9 @@ class Registry:
                     "name": junction.get("name", ""), "public_key": public.strip().lower(), "status": ACTIVE,
                     "serial": serial or rec.get("serial") or f"URB-{secrets.token_hex(3).upper()}",
                     "enrolled": datetime.date.today().isoformat()})
-        if district is not None:
+        if district is None:  # routing is set exactly as given: a replaced box may go direct
+            rec.pop("district", None)
+        else:
             rec["district"] = district
         self.devices[device] = rec
         self._save()
@@ -142,6 +168,7 @@ class Registry:
 
     def mark_seen(self, device: str):
         """The first session of a unit with its current key: installed and talking. Written once per key."""
+        self._reload()
         rec = self.devices.get(device)
         if rec is not None and not rec.get("first_seen"):
             rec["first_seen"] = datetime.datetime.now().isoformat(timespec="seconds")
@@ -149,6 +176,7 @@ class Registry:
 
     def remove(self, device: str) -> dict | None:
         """Forget a unit for good. Only a revoked one: removing must never be the first step."""
+        self._reload()
         rec = self.devices.get(device)
         if rec is None:
             return None
@@ -163,6 +191,7 @@ class Registry:
         return rec
 
     def set_status(self, device: str, status: str) -> dict | None:
+        self._reload()
         rec = self.devices.get(device)
         if rec is not None and status in (ACTIVE, REVOKED):
             rec["status"] = status
@@ -171,7 +200,10 @@ class Registry:
 
 
 def save(path: Path, devices: dict[str, dict]):
-    path.write_text(json.dumps(list(devices.values()), ensure_ascii=False, indent=1), encoding="utf-8")
+    """Whole file or nothing: a reader (the CLI, a second process) never sees a half-written registry."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(list(devices.values()), ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 # ---------------------------------------------------------------- demo provisioning

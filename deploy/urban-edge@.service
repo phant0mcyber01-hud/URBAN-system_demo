@@ -16,8 +16,6 @@ ExecStart=/opt/urban/.venv/bin/python -m urban.edge --unit %i --platform ${PLATF
     --pki /etc/urban/pki $EXTRA
 Restart=always
 RestartSec=2
-RuntimeDirectory=urban
-RuntimeDirectoryPreserve=yes
 # The sandbox: a hacked unit service reaches its own key folder, the network and the controller's port, nothing
 # else. No maintenance keys, no update bundles, no boot files, no other process, no privilege, no new code in memory.
 NoNewPrivileges=yes

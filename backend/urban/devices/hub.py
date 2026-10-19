@@ -15,7 +15,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from . import crypto
 from .health import clean
-from .registry import REVOKED, Registry, kind_of
+from .registry import ACTIVE, REVOKED, Registry, kind_of
 
 HELLO_TIMEOUT = 10  # seconds a connection may stay unauthenticated
 
@@ -102,7 +102,8 @@ class DeviceHub:
                         self.epochs[device] = report["epoch"]  # the gateway key epoch the unit obeys now
                     if kind_of(rec) == "district":  # which junctions it is trusted for, from the registry as it is now
                         rec = {**rec, "junctions": [d["junction"] for d in self.registry.devices.values()
-                                                    if d.get("district") == rec["id"] and d.get("junction")]}
+                                                    if d.get("district") == rec["id"] and d.get("junction")
+                                                    and d["status"] == ACTIVE]}  # a revoked unit is no one's junction
                     self.on_report(rec, report)
         except (WebSocketDisconnect, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError):
             pass  # the usual ends of a session: gone, silent, or talking nonsense
@@ -158,7 +159,7 @@ class DeviceHub:
         else:
             self.plans.pop(tls, None)
         for rec in self.registry.devices.values():
-            if rec.get("tls") == tls and (ws := self.sessions.pop(rec["id"], None)) is not None:
+            if tls and rec.get("tls") == tls and (ws := self.sessions.pop(rec["id"], None)) is not None:
                 await _close(ws, CLOSED_PLANS)
 
     async def remove(self, device: str) -> dict | None:

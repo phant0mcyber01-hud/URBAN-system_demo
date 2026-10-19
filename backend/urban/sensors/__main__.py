@@ -1,6 +1,6 @@
 """Runs the camera pipeline on an URBAN Edge unit.
 
-    python -m urban.sensors --calibration /etc/urban/cameras.json --out /run/urban/queues.json < detections.jsonl
+    python -m urban.sensors --calibration /etc/urban/cameras.json --out /run/urban/q/queues.json < detections.jsonl
 
 Reads detections as JSON lines from stdin (or --input), one line per camera frame:
     {"t": 1712.5, "approach": "140393120#29", "boxes": [[u, v, w, h], ...]}

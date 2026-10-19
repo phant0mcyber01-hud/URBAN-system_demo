@@ -116,6 +116,8 @@ cp "$OUT/keys/ca.pem" "$ROOT/etc/rauc/keyring.pem"
 chmod 644 "$ROOT"/etc/systemd/system/urban-*.service "$ROOT/etc/rauc/keyring.pem"
 chmod 755 "$ROOT"/usr/local/bin/urban-*
 chroot "$ROOT" useradd --system --uid 990 --home-dir /var/lib/urban --no-create-home --shell /usr/sbin/nologin urban
+# the camera vision has its own user: same group (it shares its queue file), different uid (no reach into the unit)
+chroot "$ROOT" useradd --system --uid 991 --gid urban --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin urban-vision
 rm -rf "$ROOT/etc/urban"; ln -s /var/lib/urban/etc "$ROOT/etc/urban"
 mkdir -p "$ROOT/var/lib/urban" "$ROOT/boot/efi"
 rm -f "$ROOT"/etc/ssh/ssh_host_*                       # every unit makes its own at first boot
@@ -176,8 +178,17 @@ if [ "$IMAGE" = 1 ]; then
   E=/tmp/esp; rm -rf "$E"; mkdir -p "$E/EFI/BOOT"
   grub-mkimage -O x86_64-efi -o "$E/EFI/BOOT/BOOTX64.EFI" -p /EFI/BOOT \
     part_gpt fat squash4 normal linux echo test loadenv configfile regexp search all_video efi_gop gzio \
-    boot cat sleep reboot halt
-  cp /work/os/build/grub.cfg "$E/EFI/BOOT/grub.cfg"
+    boot cat sleep reboot halt password_pbkdf2 pbkdf2 gcry_sha512
+  # the GRUB maintenance password: made once, kept with the other keys (data/os/keys, never in git); only its
+  # PBKDF2 hash goes into the image
+  if [ ! -f "$OUT/keys/grub-password" ]; then
+    ( umask 077; head -c 18 /dev/urandom | base64 > "$OUT/keys/grub-password" )
+  fi
+  pw=$(cat "$OUT/keys/grub-password")
+  hash=$(printf '%s\n%s\n' "$pw" "$pw" | grub-mkpasswd-pbkdf2 | sed -n 's/.*is \(grub\.pbkdf2\..*\)$/\1/p')
+  [ -n "$hash" ] || { echo "grub-mkpasswd-pbkdf2 gave no hash" >&2; exit 1; }
+  sed "s|^# URBAN-GRUB-PASSWORD\$|set superusers=\"urban\"\npassword_pbkdf2 urban $hash|" /work/os/build/grub.cfg > "$E/EFI/BOOT/grub.cfg"
+  grep -q '^password_pbkdf2 urban grub.pbkdf2' "$E/EFI/BOOT/grub.cfg" || { echo "grub.cfg has no password" >&2; exit 1; }
   grub-editenv "$E/EFI/BOOT/grubenv" create
   grub-editenv "$E/EFI/BOOT/grubenv" set ORDER="A B" A_OK=1 A_TRY=0 B_OK=0 B_TRY=0
   cp /work/os/build/urban-unit.txt "$E/urban-unit.txt"

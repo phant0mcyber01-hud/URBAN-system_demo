@@ -1,7 +1,7 @@
 """Camera vision of an URBAN Edge unit: video in, queue metres per approach out.
 
     python -m urban.vision run --cameras /etc/urban/cameras.json --model /opt/urban/models/yolox_nano.onnx \\
-                               --out /run/urban/queues.json
+                               --out /run/urban/q/queues.json
         on the unit, as a service next to urban-edge: every calibrated camera, a few frames a second,
         queues.json rewritten once a second (the unit reads it with --sensors)
     python -m urban.vision check --video approach.mp4 --camera cam-1 --cameras cameras.json --model yolox_nano.onnx \\

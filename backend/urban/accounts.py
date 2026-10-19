@@ -19,6 +19,7 @@ import datetime
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import struct
 import time
@@ -33,6 +34,20 @@ MAX_FAILURES, FAILURE_WINDOW = 5, 60  # per account and per address
 
 STEP, DIGITS = 30, 6
 ISSUER = "URBAN"
+
+
+def keep_first_password(path: Path, password: str) -> Path:
+    """The first admin password also goes to a file only the service's user can read: on URBAN OS the journal it
+    is printed to is volatile, and a password lost on reboot would leave nobody able to sign in."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(password + "\n")
+    try:
+        path.chmod(0o600)  # an older file keeps its mode when it is overwritten
+    except OSError:
+        pass
+    return path
 
 
 def _hash(password: str, salt: bytes) -> str:

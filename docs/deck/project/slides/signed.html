@@ -1,0 +1,29 @@
+<section id="signed" data-transition="fade" style="background:repeating-linear-gradient(0deg, rgba(57,255,136,0.045) 0px, rgba(57,255,136,0.045) 2px, transparent 2px, transparent 5px), #07090a;color:#d5e6dc;font-family:'JetBrains Mono', 'Courier New', monospace;padding:128px 128px 160px;display:flex;flex-direction:column;justify-content:start;gap:40px">
+<p style="position:absolute;left:128px;top:56px;width:1200px;font-size:24px;color:#7f9a8b">root@urban-os:~# <span style="color:#39ff88">cat signed.md</span></p>
+<h2 style="font-size:96px;font-weight:800;line-height:1.1;letter-spacing:-2px;color:#d5e6dc">Командует только центр</h2>
+<div style="display:flex;align-items:stretch;gap:24px">
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;background:#0d1411;border:2px solid #39ff88;padding:36px">
+<h3 style="font-size:44px;font-weight:800;color:#39ff88">ЦЕНТР</h3>
+<p style="font-size:32px;line-height:1.4">подписывает каждую команду</p>
+</div>
+<x-shape kind="arrow-right" style="align-self:center;width:96px;height:48px;background:#7f9a8b"></x-shape>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;background:#0d1411;border:2px dashed #ff2e63;padding:36px">
+<h3 style="font-size:44px;font-weight:800;color:#ff2e63">РАЙОН</h3>
+<p style="font-size:32px;line-height:1.4">видит только шифртекст</p>
+</div>
+<x-shape kind="arrow-right" style="align-self:center;width:96px;height:48px;background:#7f9a8b"></x-shape>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;background:#0d1411;border:2px solid #39ff88;padding:36px">
+<h3 style="font-size:44px;font-weight:800;color:#39ff88">БЛОК</h3>
+<p style="font-size:32px;line-height:1.4">проверяет подпись и срок</p>
+</div>
+</div>
+<div style="display:flex;gap:40px">
+<div style="flex:1;border-top:2px solid #1c3328;padding:16px 0px 0px 0px"><p style="font-size:32px;line-height:1.4">Команда живёт 3 минуты и продлевается.</p></div>
+<div style="flex:1;border-top:2px solid #1c3328;padding:16px 0px 0px 0px"><p style="font-size:32px;line-height:1.4">Только планы, которые утвердил инженер.</p></div>
+<div style="flex:1;border-top:2px solid #1c3328;padding:16px 0px 0px 0px"><p style="font-size:32px;line-height:1.4">Нет связи: блок сам возвращается к базовому плану.</p></div>
+</div>
+<p style="font-size:44px;font-weight:800;line-height:1.2;color:#ff2e63">Взломали район: он может молчать, но не командовать.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#7f9a8b">TLS идёт от блока до центра: районный сервер его не расшифровывает</p>
+<p style="position:absolute;right:128px;bottom:64px;width:300px;text-align:right;font-size:24px;color:#7f9a8b">04 / 12</p>
+<aside>Ключевая идея защиты. Блок подключается к адресу районного сервера, но проверяет сертификат центра. Районный сервер пересылает соединение ядром, ни одна программа на нём не держит байты. Поэтому его взлом не даёт ни прочитать отчёт блока, ни подделать команду: ключ подписи есть только у центра. Свои собственные отчёты об очередях взломанный районный сервер подделать может — центр принимает их только для его перекрёстков.</aside>
+</section>

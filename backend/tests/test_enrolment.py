@@ -167,3 +167,121 @@ def test_a_unit_is_removed_only_after_it_was_revoked(field_pki):
     assert reg.remove("edge-J-01")["id"] == "edge-J-01"
     assert reg.by_tls("T1") is None and Registry(field_pki / "devices.json").devices == {}
     reg.enroll("edge-J-01b", JUNCTIONS[0], crypto.public_hex(crypto.new_key()))  # the junction is free again
+
+
+# ---------------------------------------------------------------- review fixes: routing, validation, registry writes
+
+def pub():
+    return crypto.public_hex(crypto.new_key())
+
+
+def test_enrolling_without_a_district_clears_the_routing(field_pki):
+    reg = Registry(field_pki / "devices.json")
+    reg.enroll_district("district-1", "10.1.0.2", pub())
+    reg.enroll("edge-J-01", JUNCTIONS[0], pub(), district="district-1")
+    assert reg.devices["edge-J-01"]["district"] == "district-1"
+    rec = reg.enroll("edge-J-01", JUNCTIONS[0], pub())  # the box was replaced and now goes straight to the centre
+    assert "district" not in rec and "district" not in Registry(field_pki / "devices.json").devices["edge-J-01"]
+
+
+def test_district_addresses_are_checked_and_ipv6_gets_the_default_port(field_pki):
+    from urban.devices.enrolment import check_address
+    for good in ("10.1.0.2", "district-1.city", "10.1.0.2:8443", "a.b:1", "[fd00::2]", "[fd00::2]:65535"):
+        assert check_address(good) == good
+    for bad in ("", " ", "a b", "10.1.0.2:0", "10.1.0.2:65536", "host:123456", "fd00::2", "[fd00::2", "[zz::1]:80",
+                "[fd00::2]:", "host\nPLATFORM=evil", "host:80:90", "http://x", "x/y", "[]"):
+        with pytest.raises(ValueError):
+            check_address(bad)
+    reg = Registry(field_pki / "devices.json")
+    for bad in ("fd00::2", "10.1.0.2:99999", "x y"):
+        with pytest.raises(ValueError):
+            reg.enroll_district("district-1", bad, pub())
+    d6 = reg.enroll_district("district-6", "[fd00::2]", pub())
+    d6p = reg.enroll_district("district-7", "[fd00::3]:18443", pub())
+    rec = reg.enroll("edge-J-01", JUNCTIONS[0], pub())
+    assert make_kit(rec, field_pki, "urban-center", 8443, via=d6)["platform"] == "[fd00::2]:8443"
+    assert make_kit(rec, field_pki, "urban-center", 8443, via=d6p)["platform"] == "[fd00::3]:18443"
+
+
+def test_device_ids_are_validated_by_the_registry_too(field_pki):
+    reg = Registry(field_pki / "devices.json")  # the CLI path never goes through parse_code
+    for bad in ("edge-", "edge-a b", "edge-x\n", "edge-a/b", "edge-" + "x" * 60, "edge-ü"):
+        with pytest.raises(ValueError):
+            reg.enroll(bad, JUNCTIONS[0], pub())
+    for bad in ("district-", "district-a b", "district-x\n", "district-../x"):
+        with pytest.raises(ValueError):
+            reg.enroll_district(bad, "10.1.0.2", pub())
+    assert reg.devices == {}
+
+
+def kit_for(field_pki, tmp_path, **changes):
+    unit_pki = tmp_path / "unit" / "pki"
+    keygen(SimpleNamespace(unit="edge-J-01", key=None, pki=str(unit_pki), serial=""))
+    key = crypto.load_private((unit_pki / "edge" / "edge-J-01.key").read_text())
+    rec = Registry(field_pki / "devices.json").enroll("edge-J-01", JUNCTIONS[0], crypto.public_hex(key))
+    kit = make_kit(rec, field_pki, "city.example", 8443, [])
+    return {**kit, **changes}, unit_pki
+
+
+def test_a_kit_cannot_put_extra_lines_into_the_env_file(tmp_path, field_pki):
+    for field in ("platform", "server_name", "unit", "junction"):
+        kit, unit_pki = kit_for(field_pki, tmp_path / field, **{field: "x\nADAPTER=ntcip"})
+        env = tmp_path / field / "unit" / "edge.env"
+        with pytest.raises(ValueError):
+            install_kit(kit, "edge-J-01", unit_pki / "edge" / "edge-J-01.key", unit_pki, env)
+        assert not env.exists() and not (unit_pki / "ca.pem").exists()  # refused before anything was written
+    kit, unit_pki = kit_for(field_pki, tmp_path / "ok", name="Main\nADAPTER=ntcip\r\x00 & Side")  # free text: cleaned
+    env = tmp_path / "ok" / "unit" / "edge.env"
+    install_kit(kit, "edge-J-01", unit_pki / "edge" / "edge-J-01.key", unit_pki, env)
+    lines = env.read_text(encoding="utf-8").splitlines()
+    assert "ADAPTER=ntcip" not in lines and lines.count("ADAPTER=none") == 1 and "PLATFORM=city.example:8443" in lines
+    assert json.loads((env.parent / "edge-J-01.junction.json").read_text())["name"] == "MainADAPTER=ntcip & Side"
+
+
+def test_the_registry_never_overwrites_what_another_process_wrote(field_pki):
+    mine = Registry(field_pki / "devices.json")      # the running platform
+    cli = Registry(field_pki / "devices.json")       # python -m urban.provision enroll ...
+    cli.enroll("edge-J-01", JUNCTIONS[0], pub())
+    mine.enroll("edge-J-02", JUNCTIONS[1], pub())    # the platform writes next
+    assert set(Registry(field_pki / "devices.json").devices) == {"edge-J-01", "edge-J-02"}
+    cli.set_status("edge-J-01", REVOKED)
+    mine.mark_seen("edge-J-02")
+    on_disk = Registry(field_pki / "devices.json").devices
+    assert on_disk["edge-J-01"]["status"] == REVOKED and on_disk["edge-J-02"].get("first_seen")
+    cli.set_status("edge-J-02", REVOKED)
+    mine.set_status("edge-J-01", ACTIVE)
+    assert mine.devices["edge-J-02"]["status"] == REVOKED and mine.devices["edge-J-01"]["status"] == ACTIVE
+
+
+def test_a_change_noticed_during_a_write_is_still_reported_to_the_hub(field_pki):
+    mine = Registry(field_pki / "devices.json")
+    mine.enroll("edge-J-01", JUNCTIONS[0], pub())
+    Registry(field_pki / "devices.json").set_status("edge-J-01", REVOKED)
+    mine.enroll("edge-J-02", JUNCTIONS[1], pub())  # reloads first, sees the revocation
+    assert mine.refresh() >= {"edge-J-01"}  # so the hub can still close that session
+
+
+def test_the_registry_file_is_replaced_atomically(field_pki, monkeypatch):
+    import os
+    reg = Registry(field_pki / "devices.json")
+    reg.enroll("edge-J-01", JUNCTIONS[0], pub())
+    good = (field_pki / "devices.json").read_text(encoding="utf-8")
+    assert not list(field_pki.glob("devices.json.tmp"))
+    monkeypatch.setattr(os, "replace", lambda *a: (_ for _ in ()).throw(OSError("disk full")))
+    with pytest.raises(OSError):
+        reg.enroll("edge-J-02", JUNCTIONS[1], pub())
+    assert (field_pki / "devices.json").read_text(encoding="utf-8") == good  # never half a file
+
+
+def test_one_key_cannot_be_enrolled_under_two_ids(field_pki):
+    reg = Registry(field_pki / "devices.json")
+    key = pub()
+    reg.enroll("edge-J-01", JUNCTIONS[0], key)
+    with pytest.raises(ValueError, match="already enrolled"):
+        reg.enroll("edge-J-02", JUNCTIONS[1], key.upper())
+    with pytest.raises(ValueError, match="already enrolled"):
+        reg.enroll_district("district-1", "10.1.0.2", key)
+    reg.enroll("edge-J-01", JUNCTIONS[0], key)  # the same box again is fine
+    reg.enroll_district("district-1", "10.1.0.2", pub())
+    with pytest.raises(ValueError, match="already enrolled"):
+        reg.enroll_district("district-2", "10.1.0.3", reg.devices["district-1"]["public_key"])

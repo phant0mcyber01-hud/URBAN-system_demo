@@ -4,6 +4,7 @@ The platform detects problems and proposes actions. It never applies anything by
 actions go through the Command Gateway, which needs an operator's decision.
 """
 import math
+from collections import deque
 
 from .analytics import traffic
 from .corridor import Corridors
@@ -18,6 +19,11 @@ STALE = 5            # seconds without a report before a junction counts as "no 
 SAMPLE = 60          # seconds between history samples of queues and device health
 LATE = 5  # seconds: a report older than this was kept through an outage; it is history, not the live reading
 SPILL = 0.8          # a downstream approach queued over this share of its sensor zone counts as full
+BUFFER = 900         # seconds a district keeps its reports through an outage; equal to node/district.py BUFFER
+HISTORY = BUFFER + 60  # a replayed report may reach this far back; older ones would be forged history
+MAX_EVENTS = 10      # events taken from one report; a device cannot flood the audit log
+REASON = 80          # characters of a device's own words that go into the audit log
+ZONE_FACTOR, ZONE_MAX = 10, 2000.0  # a queue cannot be longer than this many sensor zones (no zone: this many metres)
 
 M_LAT = 111320.0
 
@@ -44,7 +50,10 @@ class Platform:
         self._downstream = {(c["tls"], ph["index"]): ph.get("downstream", [])
                             for c in self.cameras for ph in c.get("phases", [])}
         self._by_tls = {c["tls"]: c for c in self.cameras}
-        self.sensors: dict[str, tuple[int, dict]] = {}  # junction id -> (report time, queues) from its Edge unit
+        # junction id -> approach id -> (when it arrived here, metres): each approach keeps its own latest reading,
+        # so a unit and a district reporting different approaches of one junction both count
+        self.sensors: dict[str, dict[str, tuple[int, float]]] = {}
+        self._late = deque(maxlen=20000)  # (time, {junction: {approach: metres}}) replayed by a district, not yet written
         self.dev: dict[str, dict] = {}        # junction id -> brief of its Edge unit, for the UI
         self.dev_alerts: list[dict] = []      # health alerts as they appeared, for the feed and the audit log
         self._dev_state: dict[str, set] = {}  # device id -> alert kinds currently raised
@@ -95,11 +104,12 @@ class Platform:
         else:                # separate Edge units: use what they reported, and only while it is fresh
             readings, missing = {}, set()
             for cam in self.cameras:
-                at, reported = self.sensors.get(cam["id"], (None, None))
-                if at is None or abs(t - at) > STALE:  # a report may run a second ahead of the frame
-                    missing.add(cam["id"])
+                # a reading may run a second ahead of the frame
+                fresh = {a: v for a, (at, v) in self.sensors.get(cam["id"], {}).items() if abs(t - at) <= STALE}
+                if fresh:
+                    readings.update(fresh)
                 else:
-                    readings.update(reported)
+                    missing.add(cam["id"])
         queues, problems = self.monitor.update(t, readings, missing)
         self.queues = queues
         counts = (traffic.camera_counts(points, self.camera_xy) if observed
@@ -185,6 +195,9 @@ class Platform:
         """Write what changed to the history: commands on every change, queues once a minute."""
         if self.store is None:
             return
+        if self._late:  # a replayed outage arrives as a burst: one transaction for all of it
+            items = [self._late.popleft() for _ in range(len(self._late))]
+            self.store.add_queues_many(items)
         if self.gateway.version != self._saved_version:
             self._saved_version = self.gateway.version
             for p in self.gateway.unsettled():
@@ -275,71 +288,77 @@ class Platform:
         cam = self._by_tls.get(tls)
         if cam is None:
             return
-        # a device is trusted for its own approaches only, and only for numbers
+        # a unit without cameras (a light unit) reports no queues: that changes nothing, it must not wipe out
+        # what its district's cameras measured for this junction a moment ago
+        self._take(cam["id"], self._read_queues(cam, report.get("queues")))
+        self._events(rec, report.get("events"), tls)
+
+    def _read_queues(self, cam: dict, raw) -> dict[str, float]:
+        """The numbers a device may report for the approaches of this junction. Anything that is not a finite
+        number is dropped; a value is clamped to what the sensor zone can hold."""
         queues = {}
-        raw_queues = report.get("queues")
-        if isinstance(raw_queues, dict):
-            for a in cam["approaches"]:
-                try:
-                    queues[a["id"]] = max(0.0, float(raw_queues[a["id"]]))
-                except (KeyError, TypeError, ValueError):
-                    pass
+        if not isinstance(raw, dict):
+            return queues
+        for a in cam["approaches"]:
+            try:
+                v = float(raw[a["id"]])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+            if not math.isfinite(v):
+                continue  # 1e999 and NaN: a number a queue can never be, and round() would crash the platform
+            zone = a.get("zone")
+            top = ZONE_FACTOR * zone if isinstance(zone, (int, float)) and zone > 0 else ZONE_MAX
+            queues[a["id"]] = min(max(0.0, v), top)
+        return queues
+
+    def _take(self, junction: str, queues: dict[str, float]):
+        """Live readings are dated by their arrival here, not by the device's clock."""
+        if queues:
+            mine = self.sensors.setdefault(junction, {})
+            for a, v in queues.items():
+                mine[a] = (self.t, v)
+
+    def _report_time(self, report: dict) -> int:
         try:
-            at = int(report.get("t", self.t))
-        except (TypeError, ValueError):
-            at = self.t
-        before = self.sensors.get(cam["id"])
-        # a unit without cameras (a light unit) reports no queues: it must not wipe out what its district's
-        # cameras measured for this junction a moment ago
-        if queues or before is None or not before[1] or abs(at - before[0]) > STALE:
-            self.sensors[cam["id"]] = (at, queues)
-        events = report.get("events")
-        for ev in events if isinstance(events, list) else []:
+            return int(report.get("t", self.t))
+        except (TypeError, ValueError, OverflowError):  # "soon", NaN, Infinity: no time worth believing
+            return self.t
+
+    def _events(self, rec: dict, events, tls: str | None = None):
+        """What the device says happened. It is named in the audit log by its authenticated id, never by what
+        the report claims, and its words are clipped."""
+        who = str(rec.get("id") or rec.get("tls") or "-")[:60]
+        for ev in events[:MAX_EVENTS] if isinstance(events, list) else []:
             if not isinstance(ev, dict):
                 continue
-            if ev.get("type") == "tls":
+            if ev.get("type") == "tls" and tls is not None:
                 self.gateway.on_equipment(ev, self.t, tls)
             elif ev.get("type") == "edge":
-                self.gateway.audit.append(self.t, "device-refused", "-", "-", str(ev.get("device")),
-                                          str(ev.get("reason")), actor="equipment", mode="approval")
+                reason = " ".join(str(ev.get("reason") or "").split())[:REASON]
+                self.gateway.audit.append(self.t, "device-refused", "-", "-", who, reason,
+                                          actor="equipment", mode="approval")
 
     def routed_through(self, district: str) -> set[str]:
         """Junction ids whose unit connects through this district server: the junctions it is trusted for."""
-        return {j for j, d in self.dev.items() if d.get("k", "unit") == "unit" and d.get("via") == district}
+        return {j for j, d in self.dev.items()
+                if d.get("k", "unit") == "unit" and d.get("via") == district and d.get("s", "active") == "active"}
 
     def _district_report(self, rec: dict, report: dict):
         """A district is trusted for numbers only, and only for the junctions routed through it. A report that
-        arrives late (kept through an outage) goes to history at its own time and leaves the live reading alone."""
-        raw = report.get("queues")
+        arrives late (kept through an outage) goes to history at its own time and leaves the live reading alone;
+        one older than the outage buffer can hold is not history, it is dropped."""
         mine = set(rec["junctions"]) if isinstance(rec.get("junctions"), list) else self.routed_through(rec["id"])
-        try:
-            at = int(report.get("t", self.t))
-        except (TypeError, ValueError):
-            at = self.t
-        per = {}
-        if isinstance(raw, dict):
-            for cam in self.cameras:
-                if cam["id"] not in mine:
-                    continue
-                queues = {}
-                for a in cam["approaches"]:
-                    try:
-                        queues[a["id"]] = max(0.0, float(raw[a["id"]]))
-                    except (KeyError, TypeError, ValueError):
-                        pass
-                if queues:
-                    per[cam["id"]] = queues
+        at = self._report_time(report)
+        per = {cam["id"]: q for cam in self.cameras if cam["id"] in mine
+               if (q := self._read_queues(cam, report.get("queues")))}
         if per:
-            if at < self.t - LATE and self.store is not None:
-                self.store.add_queues(per, at=at)
+            if at < self.t - LATE:
+                if self.store is not None and self.t - HISTORY <= at:
+                    self._late.append((at, per))
             else:
-                for j, queues in per.items():
-                    self.sensors[j] = (at, queues)
-        events = report.get("events")
-        for ev in events if isinstance(events, list) else []:
-            if isinstance(ev, dict) and ev.get("type") == "edge":
-                self.gateway.audit.append(self.t, "device-refused", "-", "-", str(ev.get("device")),
-                                          str(ev.get("reason")), actor="equipment", mode="approval")
+                for j, q in per.items():
+                    self._take(j, q)
+        self._events(rec, report.get("events"))
 
     def _respond(self, ev: dict) -> list[dict]:
         return []  # city events answered by a record only; the green corridor is a real proposal now (corridor.py)

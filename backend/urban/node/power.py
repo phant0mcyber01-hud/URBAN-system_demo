@@ -186,8 +186,8 @@ def cores(root: Path) -> int:
 def camera_load(run: Path, etc: Path) -> tuple[int, float | None]:
     """How many cameras vision serves and how long a frame takes, as vision reports it; before vision runs,
     the cameras configured."""
-    try:
-        stats = json.loads((run / "vision.json").read_text())
+    try:  # vision writes its stats next to its queue file, in its own directory
+        stats = json.loads((run / "q" / "vision.json").read_text())
         return int(stats.get("cameras", 0)), stats.get("ms_per_frame")
     except (OSError, ValueError):
         pass

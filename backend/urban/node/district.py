@@ -1,7 +1,7 @@
 """The district server as a device of the control centre.
 
     python -m urban.node.district --unit district-1 --platform urban-center:8443 --server-name urban-center \\
-        --pki /etc/urban/pki --sensors /run/urban/queues.json --relay /run/urban/relay.json
+        --pki /etc/urban/pki --sensors /run/urban/q/queues.json --relay /run/urban/relay.json
 
 A district has its own key, enrols with a code like a junction unit (python -m urban.edge --keygen --unit
 district-1) and talks to the centre over the same channel: the centre's challenge, a signed hello, then a
@@ -95,6 +95,11 @@ class DistrictDevice:
         out.append(report)
         return out
 
+    def keep(self, unsent: list[dict]):
+        """The link broke while sending: these reports (the failed one and everything after it) go back in
+        front of whatever was kept meanwhile, in order. If that is more than the buffer holds, the oldest go."""
+        self.buffer = deque([*unsent, *self.buffer], maxlen=self.buffer.maxlen)
+
 
 def _relay_reader(path: Path | None):
     if path is None:
@@ -129,17 +134,21 @@ class District:
         self.tls_context = ssl.create_default_context(cafile=str(args.ca or pki / "ca.pem"))
         self.ws = None
 
+    async def flush(self, ws, reports: list[dict]):
+        """Send in order. When one fails, it and all that follow it are kept for the next session."""
+        for i, report in enumerate(reports):
+            try:
+                await ws.send(json.dumps(report))
+            except Exception:
+                self.ws = None
+                self.dev.keep(reports[i:])
+                return
+
     async def ticker(self):
         while True:
             now = int(time.time())
             ws = self.ws
-            for report in self.dev.tick(now, read_sensors(self.sensors), ws is not None):
-                try:
-                    await ws.send(json.dumps(report))
-                except Exception:
-                    self.ws = None
-                    self.dev.buffer.appendleft(report)  # not delivered: back to the front of the queue
-                    break
+            await self.flush(ws, self.dev.tick(now, read_sensors(self.sensors), ws is not None))
             await asyncio.sleep(max(0.0, (now + 1) - time.time()))
 
     async def session(self):

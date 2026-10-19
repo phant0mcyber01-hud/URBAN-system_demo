@@ -1,6 +1,6 @@
 """Bench acceptance tests from docs/hardware.md, section 11, as commands a person can follow.
 
-    python -m urban.bench log-queues --sensors /run/urban/queues.json --out queues.csv
+    python -m urban.bench log-queues --sensors /run/urban/q/queues.json --out queues.csv
         on the unit: records what it measures, every few seconds, for test A
     python -m urban.bench accuracy --log queues.csv --observed observed.csv
         test A: the unit's queue against an observer's (time, approach, metres or cars); threshold 15 % or two cars

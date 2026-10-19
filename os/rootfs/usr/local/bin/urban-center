@@ -1,0 +1,14 @@
+#!/bin/bash
+# The control centre's own commands on URBAN OS, run the way its service runs them: as the urban user, with the
+# centre's settings, so the files they write stay the centre's (run as root they would lock the service out).
+#   urban-center provision list | enroll-district ... | enroll ... | assign ... | kit <device>
+#   urban-center users password admin        a new password for an account
+#   urban-center city create                 load the city map (stop the service first: systemctl stop urban-platform)
+set -eu
+[ $# -ge 1 ] || { sed -n '2,7p' "$0"; exit 2; }
+case "$1" in provision|users|city) ;; *) echo "urban-center: provision, users or city" >&2; exit 2 ;; esac
+cd /opt/urban
+set -a; . /var/lib/urban/etc/platform.env; set +a
+exec runuser -u urban -- env URBAN_SOURCE="$URBAN_SOURCE" HOST="$HOST" PORT="$PORT" UI_TLS="$UI_TLS" \
+  DEVICE_HOST="$DEVICE_HOST" DEVICE_PORT="$DEVICE_PORT" DEVICE_NAME="$DEVICE_NAME" \
+  /opt/urban/.venv/bin/python -m "urban.$1" "${@:2}"

@@ -30,7 +30,9 @@ function stop() {
   docker(["rm", "-f", NAME], { capture: true });
 }
 
-function start(pilot) {
+function start(pilot, { cleanup = false } = {}) {
+  // cleanup: on a failure the machines are switched off before the gate fails (the smoke test must not leave them running)
+  const giveUp = (message) => { if (cleanup) stop(); fail(message); };
   stop();
   if (!existsSync(join(NOVNC, "core", "rfb.js"))) fail("os/demo/novnc is missing (noVNC core and vendor folders)");
   build("1", { image: true });
@@ -47,14 +49,15 @@ function start(pilot) {
     ...screens.flatMap((p) => ["-p", `127.0.0.1:${p}:${p}`]), "-p", `127.0.0.1:${CENTRE}:2443`,
     "-v", `${ROOT}:/work`, "-v", "urban-os:/out", "-v", `${join(OUT, "keys")}:/out/keys`, "-v", `${join(OUT, "logs")}:/out/logs`,
     "urban-os-builder:bookworm", "bash", "-c", inside], { capture: true });
-  if (r.status !== 0) fail("could not start: " + r.stderr);
+  if (r.status !== 0) giveUp("could not start: " + r.stderr);
   console.log(`>> URBAN OS is booting ${pilot ? "the pilot's machine" : "three machines"} (several minutes without KVM)`);
   const end = Date.now() + 30 * 60 * 1000;
   for (;;) {
     const text = logs();
     if (text.includes("DEMO READY")) break;
-    if (text.includes("FAILED") || !running()) fail("the machines did not come up:\n" + text.slice(-3000));
-    if (Date.now() > end) fail("timed out:\n" + text.slice(-3000));
+    // only the harness's own verdict line: systemd's console prints "[FAILED] Failed to start ..." for harmless units too
+    if (/^FAILED:/m.test(text) || !running()) giveUp("the machines did not come up:\n" + text.slice(-3000));
+    if (Date.now() > end) giveUp("timed out:\n" + text.slice(-3000));
     sleep(5000);
   }
   const codes = [...logs().matchAll(/^ {3}(demo-\S+): (URBAN1:\S+)$/gm)].map((m) => `  ${m[1].padEnd(16)} ${m[2]}`).join("\n");
@@ -75,20 +78,35 @@ function exec(args) {
 }
 
 function smoke() {
-  start(false);
-  const page = (port) => spawnSync("curl", ["-s", "-o", "/dev/null", "-w", "%{http_code}", `http://127.0.0.1:${port}/`],
-    { encoding: "utf8" }).stdout.trim();
-  for (const p of SCREENS) if (page(p) !== "200") fail(`screen on ${p} does not answer (${page(p)})`);
-  // the screen itself: through the WebSocket the browser must get QEMU's VNC greeting
-  const banner = spawnSync(process.execPath, ["-e", `
-    const ws = new WebSocket("ws://127.0.0.1:${SCREENS[2]}/websockify", ["binary"]); ws.binaryType = "arraybuffer";
-    const t = setTimeout(() => { console.log("timeout"); process.exit(1); }, 15000);
-    ws.onmessage = (m) => { console.log(new TextDecoder().decode(new Uint8Array(m.data).slice(0, 11))); clearTimeout(t); ws.close(); process.exit(0); };
-    ws.onerror = (e) => { console.log("error " + (e.message || "")); process.exit(1); };`], { encoding: "utf8" });
-  if (!(banner.stdout || "").startsWith("RFB 003")) fail("the centre's screen does not carry VNC: " + (banner.stdout || banner.stderr));
-  const h = spawnSync("curl", ["-sk", `https://127.0.0.1:${CENTRE}/api/health`], { encoding: "utf8" }).stdout;
-  if (!h.includes('"ok":true')) fail("the centre does not answer over HTTPS: " + h);
-  console.log(`   three screens answer (VNC ${banner.stdout.trim()} through the centre's); centre: ${h.trim()}`);
+  start(false, { cleanup: true });
+  const bad = (message) => { stop(); fail(message); };  // fail() exits the process: switch the machines off first
+  const sink = process.platform === "win32" ? "NUL" : "/dev/null";  // curl on Windows exits 23 writing to /dev/null
+  const curl = (args) => spawnSync("curl", args, { encoding: "utf8" });
+  const page = (port) => {
+    const r = curl(["-s", "-o", sink, "-w", "%{http_code}", `http://127.0.0.1:${port}/`]);
+    return r.status === 0 ? (r.stdout || "").trim() : `curl exit ${r.status}: ${(r.stderr || "").trim()}`;
+  };
+  for (const p of SCREENS) if (page(p) !== "200") bad(`screen on ${p} (${TITLE[p]}) does not answer (${page(p)})`);
+  // each screen itself: through the WebSocket the browser must get QEMU's VNC greeting
+  const banners = [];
+  for (const p of SCREENS) {
+    const banner = spawnSync(process.execPath, ["-e", `
+      const ws = new WebSocket("ws://127.0.0.1:${p}/websockify", ["binary"]); ws.binaryType = "arraybuffer";
+      const t = setTimeout(() => { console.log("timeout"); process.exit(1); }, 15000);
+      ws.onmessage = (m) => { console.log(new TextDecoder().decode(new Uint8Array(m.data).slice(0, 11))); clearTimeout(t); ws.close(); process.exit(0); };
+      ws.onerror = (e) => { console.log("error " + (e.message || "")); process.exit(1); };`], { encoding: "utf8" });
+    const said = (banner.stdout || "").trim();
+    if (!said.startsWith("RFB 003")) bad(`the ${TITLE[p]}'s screen (port ${p}) does not carry VNC: ` + (said || banner.stderr));
+    banners.push(said);
+  }
+  const hr = curl(["-sk", `https://127.0.0.1:${CENTRE}/api/health`]);
+  if (hr.status !== 0) bad(`curl could not reach the centre over HTTPS (exit ${hr.status}): ${(hr.stderr || "").trim()}`);
+  const h = hr.stdout || "";
+  if (!/"ok":\s*true/.test(h)) bad("the centre does not answer over HTTPS: " + h);
+  const ir = curl(["-sk", `https://127.0.0.1:${CENTRE}/`]);
+  if (ir.status !== 0) bad(`curl could not fetch the centre's interface (exit ${ir.status}): ${(ir.stderr || "").trim()}`);
+  if (!/<html/i.test(ir.stdout || "")) bad("the centre's interface page is not served: " + (ir.stdout || "").slice(0, 200));
+  console.log(`   three screens answer and carry VNC (${banners.map((b) => b.replace(/\s+$/, "")).join(" / ")}); centre: ${h.trim()}; its interface page is served`);
   stop();
   if (running()) fail("stop left the demo running");
   console.log("DEMO SMOKE PASSED");

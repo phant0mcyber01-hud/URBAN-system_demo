@@ -13,6 +13,7 @@ On the unit:
         that was made for another key. Nothing in the kit is secret; nothing secret leaves the unit.
 """
 import hashlib
+import ipaddress
 import json
 import re
 from pathlib import Path
@@ -24,10 +25,33 @@ KIT_VERSION = 1
 SERIAL = re.compile(r"^[A-Za-z0-9._-]{0,40}$")
 DEVICE = re.compile(r"^(edge|district)-[A-Za-z0-9._-]{1,54}$")  # a junction unit, or a district server
 DEFAULT_PORT = 8443
+HOST_PORT = re.compile(r"[A-Za-z0-9.-]+(:\d{1,5})?")      # name or IPv4, optional port
+IPV6_PORT = re.compile(r"\[([0-9A-Fa-f:]+)\](:\d{1,5})?")  # [address], optional port
 
 
 def is_district(device: str) -> bool:
     return device.startswith("district-")
+
+
+def check_address(address) -> str:
+    """The host name or IP (host, host:port or [ipv6]:port) a district's units connect to, trimmed; ValueError if not."""
+    address = str(address).strip()
+    m = HOST_PORT.fullmatch(address)
+    port = m and m.group(1)
+    if m is None and (m := IPV6_PORT.fullmatch(address)):
+        try:
+            ipaddress.IPv6Address(m.group(1))
+        except ValueError:
+            m = None
+        port = m and m.group(2)
+    if m is None or (port and not 1 <= int(port[1:]) <= 65535):
+        raise ValueError("the district's address is the host name or IP its units connect to, "
+                         "e.g. district-1.city, 10.1.0.2:8443 or [fd00::2]:8443")
+    return address
+
+
+def has_port(address: str) -> bool:
+    return address.rpartition("]")[2].startswith(":") if address.startswith("[") else ":" in address
 
 
 def _check(body: str) -> str:
@@ -35,7 +59,7 @@ def _check(body: str) -> str:
 
 
 def make_code(device: str, serial: str, public: str) -> str:
-    if not DEVICE.match(device) or not SERIAL.match(serial):
+    if not DEVICE.fullmatch(device) or not SERIAL.fullmatch(serial):
         raise ValueError("device id is edge-<junction> or district-<name>, serial: letters, digits, . _ - (up to 40)")
     body = f"{PREFIX}:{device}:{serial}:{public.lower()}"
     return f"{body}:{_check(body)}"
@@ -51,7 +75,7 @@ def parse_code(code: str) -> dict:
     if _check(body) != parts[4].upper():
         raise ValueError("код повреждён при копировании: не сходится контрольная сумма")
     device, serial, public = parts[1], parts[2], parts[3].lower()
-    if not DEVICE.match(device) or not SERIAL.match(serial):
+    if not DEVICE.fullmatch(device) or not SERIAL.fullmatch(serial):
         raise ValueError("в коде неверный номер блока или серийный номер")
     try:
         crypto.load_public(public)
@@ -71,7 +95,7 @@ def make_kit(rec: dict, pki: Path, server_name: str, port: int, approaches: list
     platform = f"{server_name}:{port}"
     if via is not None:
         address = str(via.get("address", "")).strip()
-        platform = address if ":" in address else f"{address}:{DEFAULT_PORT}"
+        platform = address if has_port(address) else f"{address}:{DEFAULT_PORT}"
     return {
         "urban_kit": KIT_VERSION, "unit": rec["id"], "kind": rec.get("kind", "unit"), "junction": rec.get("junction"),
         "name": rec.get("name", ""), "via": via["id"] if via is not None else None,
@@ -89,7 +113,7 @@ DISTRICT_ENV_TEMPLATE = """# URBAN district server {unit}: its own link to the c
 PLATFORM={platform}
 SERVER_NAME={server_name}
 # queue lengths of the district's cameras (python -m urban.vision run), keyed by approach id
-SENSORS=/run/urban/queues.json
+SENSORS=/run/urban/q/queues.json
 # cabinet temperature sensor; empty: the computer's own board
 TEMP_SENSOR=
 """
@@ -107,7 +131,7 @@ CONTROLLER=
 # contacts and profile options go here, e.g. --bus gpio --gpio-lines 17,27,22,23 --enable-contact 3 --feedback-input 0
 EXTRA=
 # queue lengths written by the camera pipeline
-SENSORS=/run/urban/queues.json
+SENSORS=/run/urban/q/queues.json
 # cabinet temperature (DS18B20: /sys/bus/w1/devices/28-.../w1_slave); empty: the computer's own board
 TEMP_SENSOR=
 # door switch (a GPIO value file); empty: no switch wired, the door shows as unknown
@@ -130,6 +154,11 @@ def install_kit(kit: dict, unit: str, key_path: Path, pki: Path, env_path: Path)
                          "enrol this unit's code again and download a new kit")
     if not str(kit.get("ca_pem", "")).startswith("-----BEGIN CERTIFICATE-----"):
         raise ValueError("the kit has no platform certificate")
+    for field in ("platform", "server_name", "unit", "junction"):  # these land in the env file: one line each
+        value = kit.get(field)
+        if value is not None and (not isinstance(value, str) or any(ord(ch) < 32 or ord(ch) == 127 for ch in value)):
+            raise ValueError(f"the kit's {field} has a control character or a line break: not a kit this platform made")
+    title = "".join(ch for ch in str(kit.get("name") or "") if ch.isprintable())  # free text: cleaned, not refused
     pki.mkdir(parents=True, exist_ok=True)
     written = []
     (pki / "ca.pem").write_text(kit["ca_pem"])
@@ -148,8 +177,8 @@ def install_kit(kit: dict, unit: str, key_path: Path, pki: Path, env_path: Path)
     else:
         env_path.parent.mkdir(parents=True, exist_ok=True)
         template = DISTRICT_ENV_TEMPLATE if kit.get("kind") == "district" else ENV_TEMPLATE
-        env_path.write_text(template.format(**{k: kit.get(k) or "" for k in
-                                               ("unit", "junction", "name", "platform", "server_name")}),
+        env_path.write_text(template.format(**{**{k: kit.get(k) or "" for k in
+                                                  ("unit", "junction", "platform", "server_name")}, "name": title}),
                             encoding="utf-8")
     try:
         env_path.chmod(0o600)
@@ -159,7 +188,7 @@ def install_kit(kit: dict, unit: str, key_path: Path, pki: Path, env_path: Path)
     if kit.get("kind") == "district":
         return written  # a district has no junction of its own
     junction = env_path.parent / f"{unit}.junction.json"  # for the camera calibration page
-    junction.write_text(json.dumps({"junction": kit.get("junction"), "name": kit.get("name", ""),
+    junction.write_text(json.dumps({"junction": kit.get("junction"), "name": title,
                                     "approaches": kit.get("approaches") or []}, ensure_ascii=False, indent=1),
                         encoding="utf-8")
     written.append(str(junction))

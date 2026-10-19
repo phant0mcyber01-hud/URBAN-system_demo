@@ -10,7 +10,7 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/bin/urban-grow
 StandardOutput=journal+console
-TimeoutStartSec=300
+TimeoutStartSec=900
 
 [Install]
 WantedBy=local-fs-pre.target

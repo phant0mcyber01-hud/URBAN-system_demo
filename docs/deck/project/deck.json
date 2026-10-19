@@ -1,0 +1,52 @@
+{
+  "v": 4,
+  "createdOnFiles": {
+    "v": 1,
+    "at": "2026-10-17T12:00:00Z"
+  },
+  "lists": "css",
+  "title": "URBAN OS",
+  "order": [
+    "cover",
+    "whoami",
+    "why",
+    "signed",
+    "intruder",
+    "disk",
+    "speed",
+    "demo",
+    "status",
+    "gaps",
+    "asks",
+    "exit"
+  ],
+  "sections": {
+    "s1": {
+      "description": "Что это: одна ОС для блока, района и центра.",
+      "start": "cover"
+    },
+    "s2": {
+      "description": "Как устроено: три уровня и кто подписывает команды.",
+      "start": "why"
+    },
+    "s3": {
+      "description": "Защита: что получит взломщик на каждом уровне.",
+      "start": "intruder"
+    },
+    "s4": {
+      "description": "Скорость и как это выглядит.",
+      "start": "speed"
+    },
+    "s5": {
+      "description": "Что проверено, чего нет и что нужно от команды.",
+      "start": "status"
+    }
+  },
+  "faces": {
+    "jetbrains-mono": {
+      "family": "JetBrains Mono",
+      "href": "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;800&display=swap"
+    }
+  },
+  "designSystems": []
+}

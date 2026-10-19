@@ -43,7 +43,7 @@ esac
     printf "  relay         units -> %s; %s\n" "${center:-NO CENTER SET (CENTER= in urban-unit.txt)}" "${relay:-no unit yet}"
   elif [ -n "$unit" ]; then
     case ",$role," in *,center,*)
-      printf "  interface     https://%s/   (the first admin password: journalctl -u urban-platform)\n" "${host:-$unit}" ;;
+      printf "  interface     https://%s/   (first admin password: /var/lib/urban/platform/first-admin-password)\n" "${host:-$unit}" ;;
     esac
   else
     echo "  name          NOT SET: write UNIT=, SERIAL= and ROLE= into urban-unit.txt"

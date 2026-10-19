@@ -25,3 +25,40 @@ def test_the_district_client_buffers_offline_and_replays_in_order():
                               "reason": "a district server takes no commands"}]
     dev.relay_stats = lambda: {"units": 3, "sessions": 5, "bytes_up": 10, "bytes_down": 20, "refused": 0}
     assert dev.health()["relay"]["units"] == 3
+
+
+def test_a_failed_send_keeps_the_failed_report_and_everything_after_it_in_order():
+    """The link broke on the Nth send of a replay: that report, the rest of the batch and the ones kept meanwhile
+    must all still be in the buffer, oldest first (only the failed one used to be put back)."""
+    import asyncio
+    import json
+
+    from urban.node.district import District
+
+    class Ws:
+        def __init__(self, fail_at):
+            self.sent, self.fail_at = [], fail_at
+
+        async def send(self, text):
+            if len(self.sent) == self.fail_at:
+                raise ConnectionError("link down")
+            self.sent.append(json.loads(text)["t"])
+
+    dev = DistrictDevice("district-1", crypto.new_key(), gateway_public=crypto.load_public(crypto.public_hex(crypto.new_key())), buffer=6)
+    district = District.__new__(District)
+    district.dev = dev
+    for t in range(1, 5):
+        dev.tick(t, {}, online=False)
+    batch = dev.tick(5, {}, online=True)  # four kept reports and the current one
+    assert [r["t"] for r in batch] == [1, 2, 3, 4, 5]
+    ws = Ws(fail_at=2)
+    district.ws = ws
+    asyncio.run(district.flush(ws, batch))
+    assert ws.sent == [1, 2] and district.ws is None
+    assert [r["t"] for r in dev.buffer] == [3, 4, 5]
+    dev.tick(6, {}, online=False)  # the next second, still offline
+    assert [r["t"] for r in dev.buffer] == [3, 4, 5, 6]
+    # more than the buffer holds: the oldest go, the newest stay, and the bound is kept
+    dev.buffer.clear()
+    asyncio.run(district.flush(Ws(fail_at=0), [dev.make_report({}, t) for t in range(10, 18)]))
+    assert [r["t"] for r in dev.buffer] == [12, 13, 14, 15, 16, 17] and dev.buffer.maxlen == 6

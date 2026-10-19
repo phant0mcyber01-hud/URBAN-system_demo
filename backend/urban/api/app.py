@@ -34,7 +34,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .. import config as c
-from ..accounts import Accounts, CodeRequired, allows
+from ..accounts import Accounts, CodeRequired, allows, keep_first_password
 from ..core.bus import PLATFORM_FRAME, SOURCE_FRAME, Bus
 from ..devices import crypto
 from ..devices.hub import DeviceHub
@@ -61,6 +61,8 @@ FIELD_TOKEN = secrets.token_urlsafe(24)  # new on every start; the Edge process 
 
 accounts = Accounts(c.USERS, mfa_roles=c.MFA_ROLES)
 FIRST_PASSWORD = accounts.bootstrap()
+# written only when a new first password is created, so it survives a reboot of a unit whose journal is volatile
+FIRST_PASSWORD_FILE = keep_first_password(c.STATE / "first-admin-password", FIRST_PASSWORD) if FIRST_PASSWORD else None
 
 bus = Bus()
 field = FieldEmulator(FIELD_TOKEN)
@@ -132,6 +134,7 @@ def source_thread(loop: asyncio.AbstractEventLoop, stop: threading.Event):
 async def lifespan(_):
     if FIRST_PASSWORD:
         print(f"\n  First start: account 'admin' created, password: {FIRST_PASSWORD}\n"
+              f"  Also kept in {FIRST_PASSWORD_FILE} (delete it once the password is changed).\n"
               f"  Change it after signing in. More accounts: python -m urban.users add <name> --role operator\n", flush=True)
     else:
         print(f"\n  Accounts: {len(accounts.users)} (manage with python -m urban.users)", flush=True)

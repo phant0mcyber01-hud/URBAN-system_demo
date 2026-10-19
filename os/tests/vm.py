@@ -21,10 +21,13 @@ as a real mini-PC has one. The serial console is kept in /out/logs/;
 only the lines that matter are printed. The last line is the verdict the gate looks for.
 """
 import hashlib
+import ipaddress
 import json
 import os
 import re
+import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -103,19 +106,33 @@ class VM:
         if grow_mb:  # a disk bigger than the image, as every real one is
             sh(["truncate", "-s", f"+{grow_mb}M", self.disk])
         self.lines, self.mark, self.proc = [], 0, None
+        self._stopping = self._cycling = False  # set while the harness itself switches the machine off
         self.log = open(f"{LOGS}/{name}.log", "w", encoding="utf-8", errors="replace")
 
     def _tpm(self) -> list[str]:
-        """A software TPM 2.0 of this machine's own (its state survives reboots of the VM, as a chip's would)."""
+        """A software TPM 2.0 of this machine's own (its state survives reboots of the VM, as a chip's would).
+        A socket left by an earlier swtpm is removed first, and QEMU is handed the socket only once swtpm accepts
+        a connection on it (a file that merely exists could be the stale one)."""
         d = f"/tmp/{self.name}-tpm"
+        sock = f"{d}/sock"
         os.makedirs(d, exist_ok=True)
-        self.swtpm = subprocess.Popen(["swtpm", "socket", "--tpmstate", f"dir={d}", "--ctrl", f"type=unixio,path={d}/sock",
+        if os.path.exists(sock):
+            os.remove(sock)
+        self.swtpm = subprocess.Popen(["swtpm", "socket", "--tpmstate", f"dir={d}", "--ctrl", f"type=unixio,path={sock}",
                                        "--tpm2", "--log", "level=0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        for _ in range(50):
-            if os.path.exists(f"{d}/sock"):
+        for _ in range(100):
+            if self.swtpm.poll() is not None:
+                raise Fail(f"swtpm of {self.name} exited ({self.swtpm.returncode}) before it was ready")
+            try:
+                with socket.socket(socket.AF_UNIX) as probe:
+                    probe.settimeout(2)
+                    probe.connect(sock)
                 break
-            time.sleep(0.1)
-        return ["-chardev", f"socket,id=chrtpm,path={d}/sock", "-tpmdev", "emulator,id=tpm0,chardev=chrtpm",
+            except OSError:
+                time.sleep(0.1)
+        else:
+            raise Fail(f"swtpm of {self.name} does not accept connections on {sock}")
+        return ["-chardev", f"socket,id=chrtpm,path={sock}", "-tpmdev", "emulator,id=tpm0,chardev=chrtpm",
                 "-device", "tpm-tis,tpmdev=tpm0"]
 
     def start(self):
@@ -131,7 +148,7 @@ class VM:
              *(self._tpm() if self.tpm else []),
              "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{self.ssh_port}-:22"
              + "".join(f",hostfwd=tcp:{self.listen}:{h}-:{g}" for h, g in self.forward), "-device", f"{self.nic},netdev=n0",
-             "-device", "i6300esb", "-watchdog-action", "reset",
+             "-device", "i6300esb", "-watchdog-action", "reset", "-no-reboot",
              *(["-vnc", f"127.0.0.1:{self.vnc}"] if self.vnc is not None else ["-display", "none"]),
              "-serial", "stdio", "-monitor", f"unix:/tmp/{self.name}.mon,server,nowait",
              "-name", self.name],
@@ -139,13 +156,24 @@ class VM:
         threading.Thread(target=self._read, daemon=True).start()
 
     def _read(self):
-        for raw in iter(self.proc.stdout.readline, b""):
+        proc = self.proc
+        for raw in iter(proc.stdout.readline, b""):
             line = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", raw.decode("utf-8", "replace")).rstrip()
             self.lines.append(line)
             self.log.write(line + "\n")
             self.log.flush()
             if SHOW.search(line):
                 print(f"   vm| {line[:200]}", flush=True)
+        proc.wait()
+        # Every reboot of the guest (systemctl reboot, the watchdog, a rollback) ends QEMU (-no-reboot) and is turned
+        # into a cold start of the same machine here, as a cabinet's power coming back. A warm reset of OVMF with a
+        # software TPM under emulation sometimes hangs before the boot loader; a cold start never did.
+        if not (self._stopping or self._cycling) and self.proc is proc:
+            if self.swtpm and self.swtpm.poll() is None:
+                self.swtpm.kill()
+                self.swtpm.wait()
+            self.log.write("--- (harness) the guest rebooted: cold start of the same machine ---\n")
+            self.start()
 
     def wait(self, pattern, timeout=BOOT_TIMEOUT):
         """The first line matching `pattern` after the mark; the mark moves past it."""
@@ -208,6 +236,7 @@ class VM:
     def power_cycle(self):
         """Switched off and on again, as a cabinet after a power cut: a clean poweroff, then a new start of the same
         machine (its disk, firmware variables and TPM state are kept)."""
+        self._cycling = True
         self.ssh("systemctl poweroff", check=False)
         try:
             self.proc.wait(timeout=300)
@@ -218,8 +247,10 @@ class VM:
             self.swtpm.kill()
             self.swtpm.wait()
         self.start()
+        self._cycling = False  # the old QEMU's reader restarts nothing: it is no longer self.proc
 
     def stop(self):
+        self._stopping = True
         if self.proc and self.proc.poll() is None:
             self.proc.kill()
             self.proc.wait()
@@ -417,6 +448,11 @@ def check_code(code, fingerprint, unit="edge-J-07", serial="URB-TEST"):
         raise Fail("the printed fingerprint is not the fingerprint of the key in the code")
 
 
+# how many private keys the unit holds; the same command runs on the unprovisioned machine (must say 0) and on the
+# named one (must say 1: the control that proves the command can see a key at all)
+KEY_COUNT = "find /var/lib/urban/etc/pki -name '*.key' | wc -l"
+
+
 def firstboot():
     bare = VM("firstboot-noid", unit=None)  # control: without an identity there is no key and the unit says why
     try:
@@ -425,8 +461,10 @@ def firstboot():
         line = bare.wait(r"URBAN-OS-CHECK (OK|FAIL)").group(0)
         if "OK" not in line:
             raise Fail(f"an unprovisioned unit should still boot healthy: {line}")
-        if bare.ssh("ls /var/lib/urban/etc/pki/edge/", check=False).stdout.strip():
-            raise Fail("a key appeared without an identity")
+        bare.wait_ssh()  # without SSH the probe below would see nothing and "pass"
+        n = bare.ssh(KEY_COUNT).stdout.strip()
+        if n != "0":
+            raise Fail(f"a key appeared without an identity ({n} *.key under /var/lib/urban/etc/pki)")
     finally:
         bare.stop()
 
@@ -437,6 +475,9 @@ def firstboot():
         unit, fp, code = m.group(1), m.group(3), m.group(4)
         check_code(code, fp)
         vm.booted("1", "A")
+        n = vm.ssh(KEY_COUNT).stdout.strip()
+        if n != "1":
+            raise Fail(f"control failed: the named unit should hold exactly one key, the probe counts {n}")
         mode = vm.ssh(f"stat -c '%a %U' /var/lib/urban/etc/pki/edge/{unit}.key").stdout.split()
         if mode != ["600", "urban"]:
             raise Fail(f"the unit key is not private to the unit's service: {mode}")
@@ -495,6 +536,45 @@ PY
 
 def running(vm, unit):
     return vm.ssh(f"systemctl show -p ActiveState --value urban-edge@{unit}").stdout.strip() in ("active", "activating")
+
+
+def service_clean(vm, service, what=None):
+    """The service is active and has never been restarted since boot (a crash loop that ends up 'active' between
+    two crashes still counts restarts)."""
+    what = what or vm.name
+    state = vm.ssh(f"systemctl is-active {service}", check=False).stdout.strip()
+    restarts = vm.ssh(f"systemctl show -p NRestarts --value {service}", check=False).stdout.strip()
+    if state != "active" or restarts != "0":
+        log = vm.ssh(f"journalctl -u {service} --no-pager -n 8 -o cat", check=False).stdout
+        raise Fail(f"{what}: {service} is {state!r} with {restarts or '?'} restart(s), want active and 0:\n{log}")
+
+
+def files_fresh(vm, paths, max_age=30, what=None):
+    """Each file exists and was written within max_age seconds (a writer that cannot write leaves none, or a stale one)."""
+    what = what or vm.name
+    out = vm.ssh("now=$(date +%s); for f in " + " ".join(paths) + "; do "
+                 "if [ -e $f ]; then echo \"$f $((now - $(stat -c %Y $f)))\"; else echo \"$f missing\"; fi; done",
+                 check=False).stdout
+    ages = dict(line.split() for line in out.splitlines() if line.strip())
+    for path in paths:
+        age = ages.get(path, "missing")
+        if age == "missing" or int(age) > max_age:
+            raise Fail(f"{what}: {path} is {'missing' if age == 'missing' else f'{age} s old'} (want written within {max_age} s)")
+
+
+def power_alive(vm, what=None):
+    """The power manager (root, no capabilities) writes its plan: running, never restarted, files fresh."""
+    service_clean(vm, "urban-power", what)
+    files_fresh(vm, ["/run/urban/power.json", "/run/urban/power.txt"], what=what)
+
+
+def run_dir_shared(vm, what=None):
+    """/run/urban is root's alone (no service can plant a link there for a root script to write through); vision,
+    under its own user, writes only /run/urban/q."""
+    got = vm.ssh("stat -c '%U:%G %a' /run/urban /run/urban/q").stdout.split(chr(10))
+    got = [g.strip() for g in got if g.strip()]
+    if got != ["root:root 755", "urban-vision:urban 755"]:
+        raise Fail(f"{what or vm.name}: /run/urban and /run/urban/q are {got!r}, want root:root 755 and urban-vision:urban 755")
 
 
 def unitimage(xz, sums, key, unit, serial):
@@ -578,10 +658,11 @@ def roles():
             raise Fail(f"the data partition did not take the disk: {m.group(0)}")
         vm.wait(r"URBAN-ROLE role=district,center name=center")
         line = vm.booted("1", "A")
-        power = vm.wait(r"URBAN-POWER roles=district,center level=\S+.*", 300).group(0)
+        # (not a wait for the URBAN-POWER console line: it can come before the self-check and is not printed again)
         plan = json.loads(vm.ssh("cat /run/urban/power.json").stdout)
         if plan["roles"] != ["district", "center"] or plan["vision"]["threads"] != max(1, plan["cores"] - 2):
             raise Fail(f"power plan for the role: {plan}")
+        power_alive(vm, "pilot machine")
         rules = vm.ssh("nft list chain inet urban input").stdout
         if not re.search(r"tcp dport \{ 443, 8443 \} accept", rules) or "policy drop" not in rules:
             raise Fail(f"the firewall does not open exactly the centre's ports:\n{rules}")
@@ -613,7 +694,7 @@ def roles():
         if "<html" not in page.lower():
             raise Fail("the interface itself is not served")
         print(f"   {line[line.index('URBAN-OS-CHECK'):][:90]}")
-        print(f"   {power[:160]}")
+        print(f"   power plan (/run/urban/power.json): {json.dumps(plan, sort_keys=True)[:300]}")
         print(f"   https://urban-center/ answers (mode {body.get('mode')}), interface served; data partition {m.group(1)} MiB",
               flush=True)
         time.sleep(3)
@@ -646,6 +727,7 @@ def admin_password(vm, path):
     with open(path, "w") as f:
         note = f"password {password}" if password else "password: not in the journal - journalctl -u urban-platform"
         f.write("URBAN control centre: user admin" + chr(10) + note + chr(10))
+    return password
 
 
 def centre_ca(vm, path="/tmp/center-ca.pem", timeout=900):
@@ -712,8 +794,9 @@ def encrypted():
         status = vm.ssh("cryptsetup status urban-data; cryptsetup luksDump /dev/disk/by-partlabel/urban-data").stdout
         if not re.search(r"type:\s+LUKS2", status) or "systemd-tpm2" not in status:
             raise Fail(f"not a LUKS2 volume with a TPM2 token:\n{status[:600]}")
-        if "Keyslots:" in status and status.count("luks2") > 1:
-            raise Fail("more than one key slot: a passphrase was left behind")
+        slots_used = re.findall(r"^\s+\d+: luks2\s*$", status, re.M)  # the 'Keyslots:' list of luksDump
+        if len(slots_used) != 1:
+            raise Fail(f"{len(slots_used)} key slot(s), want exactly the TPM's (a passphrase left behind, or no key at all)")
         src = vm.ssh("findmnt -n -o SOURCE /var/lib/urban").stdout.strip()
         if src != "/dev/mapper/urban-data":
             raise Fail(f"the data is mounted from {src}, not the opened volume")
@@ -794,6 +877,21 @@ def busy_pct(vm, seconds=30):
     return round(100.0 * (sum(d) - idle) / max(1, sum(d)), 1)
 
 
+def image_identity(version="1"):
+    """Which system was measured: the build stamp of the volume (the digest of everything the build is made of, written
+    by os/tests/lib.mjs build()) and the SHA-256 of the slot image itself. Two measurements of the same image are
+    not a before and an after."""
+    h = hashlib.sha256()
+    with open(f"{OUT}/build/rootfs-{version}.img", "rb") as f:
+        for chunk in iter(lambda: f.read(8 << 20), b""):
+            h.update(chunk)
+    try:
+        stamp = open(f"{OUT}/stamp-{version}").read().strip()
+    except OSError:
+        stamp = ""
+    return {"version": version, "stamp": stamp, "rootfs_sha256": h.hexdigest()}
+
+
 def measure(label="now"):
     """How fast a junction unit is, as numbers: boot to its control service running (a normal boot, not the
     first), the same with the network cable pulled, CPU used by each URBAN service at boot, CPU in use while it
@@ -801,7 +899,7 @@ def measure(label="now"):
     compare like with like."""
     unit = "edge-J-07"
     vm = VM(f"measure-{label}", unit=unit, serial="URB-M")
-    out = {"label": label, "kvm": os.environ.get("URBAN_KVM") == "1"}
+    out = {"label": label, "kvm": os.environ.get("URBAN_KVM") == "1", "image": image_identity()}
     try:
         vm.start()
         vm.booted("1", "A")
@@ -846,6 +944,11 @@ def measure(label="now"):
             if run == "cabled":
                 m["busy_pct_idle"] = busy_pct(vm)
                 m["mem_used_mb"] = int(vm.ssh("free -m | awk '/Mem:/{print $3}'").stdout.strip())
+            if not (m.get("edge_active_s", 0) > m.get("prepare_done_s", 0) > 0):  # 0 = "never became active"
+                raise Fail(f"{run}: the unit's control service did not start after urban-prepare "
+                           f"(edge_active_s {m.get('edge_active_s')}, prepare_done_s {m.get('prepare_done_s')})")
+            if not m["cpu_s"]:
+                raise Fail(f"{run}: no CPU figures of the URBAN services were read")
             out[run] = m
             print(f"   {run}: unit control running at {m.get('edge_active_s')} s after the kernel started "
                   f"(prepare done {m.get('prepare_done_s')} s, self-check {m.get('check_done_s')} s); "
@@ -855,6 +958,7 @@ def measure(label="now"):
               f"by service: {json.dumps(c['cpu_s'])}", flush=True)
         with open(f"{LOGS}/measure-{label}.json", "w") as f:
             json.dump(out, f, indent=1)
+        print(f"   image {out['image']['rootfs_sha256'][:16]} (build {out['image']['stamp'] or 'unstamped'})", flush=True)
         print("MEASURED", flush=True)
         return out
     finally:
@@ -901,19 +1005,29 @@ done
 inside() { nsenter -t "$pid" -m -- setpriv --reuid=urban --regid=urban --clear-groups --inh-caps=-all --bounding-set=-all -- "$@"; }
 say jail_reads_ssh_keys "$(try inside cat /var/lib/urban/ssh/authorized_keys)"
 say root_reads_ssh_keys_control "$(try cat /var/lib/urban/ssh/authorized_keys)"
+say root_reads_boot_control "$(try sh -c 'ls /boot/efi | grep -q .')"
 say jail_reads_boot "$(try inside ls /boot/efi)"
 say jail_writes_system "$(try inside touch /opt/urban/intruder)"
 say jail_writes_etc "$(try inside touch /var/lib/urban/etc/intruder)"
+say jail_writes_update "$(try inside touch /var/lib/urban/update/intruder)"
 say jail_writes_own_keys_control "$(try inside touch /var/lib/urban/etc/pki/edge/.probe)"
-rm -f /var/lib/urban/etc/pki/edge/.probe
+say jail_writes_run "$(try inside touch /run/urban/.probe)"
+rm -f /var/lib/urban/etc/pki/edge/.probe /run/urban/.probe /var/lib/urban/update/intruder /var/lib/urban/etc/intruder /opt/urban/intruder
+# KNOWN LIMIT, not a defence: root on a running unit can read the unit's own private key (the service needs it
+# to prove who it is; the TPM seals the disk at rest, not a running system). Printed so the gate does not imply more.
+say root_reads_unit_key_known_limit "$(try cat /var/lib/urban/etc/pki/edge/$unit.key)"
 say jail_sees_pid1 "$(try inside test -e /proc/1/status)"
 say jail_sees_itself_control "$(try inside test -e /proc/$pid/status)"
-say listening "$(ss -Hltn | awk '{print $4}' | grep -v '^127\.' | sort -u | tr '\n' ' ')"
+say listening "$(ss -Hltun | awk '{print $1 "/" $5}' | sort -u | tr '\n' ' ')"
 echo exposure
 for u in urban-edge@$unit urban-vision@$unit urban-district@district-x urban-platform urban-power urban-relay ssh; do
   systemd-analyze security --no-pager "$u.service" 2>/dev/null | sed -n "s/.*Overall exposure level for \(\S*\): \([0-9.]*\).*/\1 \2/p"
 done
 """
+
+# the directives of urban-vision@.service that the detector probe replays (read from the unit at run time)
+VISION_SANDBOX = ("MemoryDenyWriteExecute", "NoNewPrivileges", "PrivateDevices", "ProtectSystem", "LockPersonality",
+                  "RestrictNamespaces", "SystemCallArchitectures", "SystemCallFilter", "SystemCallErrorNumber")
 
 EXPOSURE_MAX = 3.0  # systemd's scale 0-10; 3.0 or less is what it calls "OK" and better
 
@@ -938,6 +1052,10 @@ def hardened():
         if not running(vm, unit):
             raise Fail(f"urban-edge@{unit} does not run in its sandbox: "
                        + vm.ssh(f"journalctl -u urban-edge@{unit} --no-pager -n 15 -o cat", check=False).stdout)
+        # the hardened services share /run/urban (root's, group urban): a root service without capabilities must still
+        # write its files there, so the power manager runs, was never restarted, and its files are fresh
+        run_dir_shared(vm)
+        power_alive(vm)
         out = vm.ssh(ATTACK, check=False).stdout
         seen, exposure, section = {}, {}, None
         for line in out.splitlines():
@@ -953,7 +1071,8 @@ def hardened():
             "sysctl:kernel.kexec_load_disabled": "1", "sysctl:kernel.core_pattern": "|/bin/false",
             "sysctl:fs.suid_dumpable": "0", "sysctl:kernel.sysrq": "0", "sysctl:net.ipv4.ip_forward": "0",
             "jail_reads_ssh_keys": "no", "root_reads_ssh_keys_control": "yes", "jail_reads_boot": "no",
-            "jail_writes_system": "no", "jail_writes_etc": "no", "jail_writes_own_keys_control": "yes",
+            "root_reads_boot_control": "yes", "jail_writes_system": "no", "jail_writes_etc": "no",
+            "jail_writes_update": "no", "jail_writes_own_keys_control": "yes", "jail_writes_run": "no",
             "jail_sees_pid1": "no", "jail_sees_itself_control": "yes",
         }
         wrong = {k: (seen.get(k), v) for k, v in want.items() if seen.get(k) != v}
@@ -961,8 +1080,23 @@ def hardened():
             wrong["lockdown"] = (seen.get("lockdown"), "[confidentiality]")
         if seen.get("sysctl:kernel.unprivileged_bpf_disabled") not in ("1", "2"):
             wrong["unprivileged_bpf_disabled"] = (seen.get("sysctl:kernel.unprivileged_bpf_disabled"), "1 or 2")
-        if seen.get("listening", "").split() not in (["0.0.0.0:22", "[::]:22"], ["0.0.0.0:22"], ["[::]:22"], ["*:22"]):
-            wrong["listening"] = (seen.get("listening"), "SSH only")
+        # every TCP and UDP socket that is not loopback-only: SSH on TCP 22 and the DHCP client on UDP 68 are
+        # the only ones allowed; the control is that SSH really shows up in the list (the probe sees sockets)
+        sockets = [e.partition("/")[::2] for e in seen.get("listening", "").split()]
+        extra, ssh_seen = [], False
+        for netid, local in sockets:
+            host, _, port = local.rpartition(":")
+            host = host.partition("%")[0].strip("[]")
+            if host.startswith("127.") or host == "::1":
+                continue
+            if netid == "tcp" and port == "22":
+                ssh_seen = True
+            elif not (netid == "udp" and port == "68"):
+                extra.append(f"{netid}/{local}")
+        if not ssh_seen:
+            wrong["listening_control"] = (seen.get("listening"), "SSH on TCP 22 in the list (else the probe is blind)")
+        if extra:
+            wrong["listening"] = (extra, "only SSH (tcp 22) and the DHCP client (udp 68)")
         if wrong:
             raise Fail("an intruder gets more than nothing: " + "; ".join(f"{k}: got {g!r}, want {w!r}" for k, (g, w) in wrong.items()))
         urban = {k: float(v) for k, v in exposure.items() if k.startswith("urban-")}
@@ -973,15 +1107,29 @@ def hardened():
             raise Fail(f"services exposed above {EXPOSURE_MAX}: {loose}")
         # the detector runs inside vision's own sandbox (no executable memory, its system call filter, no devices):
         # the hardening must not break the work it protects
-        props = vm.ssh("systemctl show urban-vision@x.service -p MemoryDenyWriteExecute -p NoNewPrivileges "
-                       "-p PrivateDevices -p RestrictNamespaces -p LockPersonality --value").stdout.split()
-        if props[:3] != ["yes", "yes", "yes"]:
+        # `systemctl show` prints the values in its own order, so they are read by name
+        shown = dict(line.split("=", 1) for line in vm.ssh(
+            "systemctl show urban-vision@x.service -p MemoryDenyWriteExecute -p NoNewPrivileges -p PrivateDevices "
+            "-p RestrictNamespaces -p LockPersonality").stdout.splitlines() if "=" in line)
+        props = {k: shown.get(k) for k in ("MemoryDenyWriteExecute", "NoNewPrivileges", "PrivateDevices",
+                                           "RestrictNamespaces", "LockPersonality")}
+        if set(props.values()) != {"yes"}:
             raise Fail(f"vision's sandbox is not what the unit file says: {props}")
+        # the probe replays the sandbox exactly as the unit file (and its drop-ins) states it, so it cannot drift
+        # from the real unit; a directive the unit lost makes the probe fail instead of quietly running looser
+        vision_unit = vm.ssh("systemctl cat urban-vision@x.service").stdout
+        replay, found = [], {}
+        for line in vision_unit.splitlines():
+            line = line.strip()
+            m = None if line.startswith(("#", ";")) else re.match(r"^(\w+)=(.*)$", line)
+            if m and (m.group(1) in VISION_SANDBOX or m.group(1) == "WorkingDirectory"):
+                replay += ["-p", shlex.quote(f"{m.group(1)}={m.group(2)}")]
+                found.setdefault(m.group(1), []).append(m.group(2))
+        lost = [k for k in (*VISION_SANDBOX, "WorkingDirectory") if k not in found]
+        if lost:
+            raise Fail(f"vision's unit no longer states {lost}: the sandbox probe would not be the unit's")
         infer = vm.ssh(
-            "systemd-run --wait --pipe --collect --quiet --uid=urban --gid=urban -p WorkingDirectory=/opt/urban "
-            "-p MemoryDenyWriteExecute=yes -p NoNewPrivileges=yes -p PrivateDevices=yes -p ProtectSystem=strict "
-            "-p LockPersonality=yes -p RestrictNamespaces=yes -p SystemCallArchitectures=native "
-            "-p SystemCallFilter=@system-service -p SystemCallFilter=~@privileged -p SystemCallErrorNumber=EPERM "
+            "systemd-run --wait --pipe --collect --quiet --uid=urban --gid=urban " + " ".join(replay) + " "
             "/opt/urban/.venv/bin/python -c \"import numpy as np, time; from pathlib import Path; "
             "from urban.vision.detector import YoloxDetector; d = YoloxDetector(Path('/opt/urban/models/yolox_nano.onnx'), threads=1); "
             "f = np.zeros((480, 640, 3), np.uint8); d.detect(f); t = time.perf_counter(); d.detect(f); "
@@ -1000,20 +1148,36 @@ def hardened():
         conf = vm.ssh("sshd -T | grep -E '^(ciphers|macs|kexalgorithms|hostkeyalgorithms) '").stdout
         if re.search(r"sha1|cbc|group1[46]|group-exchange|-ctr", conf, re.I):
             raise Fail("SSH still configures weak algorithms: " + conf.replace(chr(10), "; "))
+        # the refusal must be the server's ("Unable to negotiate ... no matching ... found"), not a client that
+        # could not start; and the client must know the algorithm it was asked to offer
+        offered = {q: sh(["ssh", "-Q", q]).stdout.split() for q in ("cipher", "kex", "key")}
         for what, opt in weak.items():
-            if sh([*base, *opt, "root@127.0.0.1", "true"], check=False).returncode == 0:
+            name = opt[1].partition("=")[2]
+            kind = {"Ciphers": "cipher", "KexAlgorithms": "kex", "HostKeyAlgorithms": "key"}[opt[1].partition("=")[0]]
+            if name not in offered[kind]:
+                raise Fail(f"control failed: this ssh client has no {kind} {name}, so the probe for {what} proves nothing")
+            r = sh([*base, *opt, "root@127.0.0.1", "true"], check=False)
+            if r.returncode == 0:
                 raise Fail(f"SSH accepted {what}")
+            if "no matching" not in r.stderr:
+                raise Fail(f"SSH refused {what}, but not as a failed negotiation: {r.stderr.strip()[-300:]}")
         if sh([*base, "root@127.0.0.1", "true"], check=False).returncode != 0:
             raise Fail("control failed: SSH with the default modern algorithms was refused")
         print("   root: no /dev/mem, no /proc/kcore, no memory of the unit's process (its own: yes); lockdown "
               "confidentiality; ptrace off for all", flush=True)
-        print("   hijacked unit service: no SSH keys, no boot files, no writes outside its key folder (inside: yes), "
-              "no other process", flush=True)
+        print("   hijacked unit service: no SSH keys, no boot files, no writes outside its key folder and /run/urban "
+              "(inside: yes), no other process", flush=True)
+        key_known = {"yes": "root CAN read the unit's private key on a running unit",
+                     "no": "root could not read the unit's key (better than expected)"}.get(seen.get("root_reads_unit_key_known_limit"),
+                                                                                           "the key probe gave no answer")
+        print(f"   KNOWN LIMIT (documented, not a failure): {key_known}; the TPM protects the disk at rest, "
+              "not a root shell on a running unit", flush=True)
         print("   exposure (systemd, 0 best - 10 worst): " + ", ".join(f"{k.split('@')[0]} {v}" for k, v in sorted(urban.items()))
               + f"; ssh {exposure.get('ssh.service', '?')}", flush=True)
-        print(f"   the detector runs inside vision's sandbox ({infer_ms} ms a frame, emulated CPU)", flush=True)
+        print(f"   the detector runs inside vision's sandbox, replayed from its unit file ({', '.join(sorted(found))}): "
+              f"{infer_ms} ms a frame, emulated CPU", flush=True)
         print("   SSH refuses CBC and non-AEAD ciphers, SHA-1 key exchange and RSA host keys; no SHA-1 MAC configured; "
-              "only SSH listens", flush=True)
+              "only SSH (tcp 22) and the DHCP client (udp 68) listen", flush=True)
         print("HARDENING CHECK PASSED", flush=True)
     finally:
         vm.stop()
@@ -1061,6 +1225,7 @@ def light():
         time.sleep(5)
         if not running(vm, unit):
             raise Fail(f"urban-edge@{unit} is not running after setup")
+        service_clean(vm, "urban-power", "light unit")
         procs = vm.ssh("pgrep -fc '[u]rban.vision' || true").stdout.strip()
         if procs not in ("", "0"):
             raise Fail(f"a vision process is running on a light unit ({procs})")
@@ -1071,6 +1236,7 @@ def light():
         vm.reboot()
         vm.wait(rf"URBAN-UNIT starting urban-edge@{unit} \(light: no vision\)")
         vm.booted("1", "A")
+        service_clean(vm, "urban-power", "light unit after the reboot")
         time.sleep(3)
         vm.screendump(f"{LOGS}/light-screen.ppm")
         print(f"   {unit}: {used} MB of {total} MB in use, no vision process, urban-edge@ runs; "
@@ -1133,6 +1299,81 @@ def wait_online(vm, service, who, timeout=240):
     raise Fail(f"{service} never came online:\n{vm.ssh(f'journalctl -u {service} --no-pager -n 15 -o cat', check=False).stdout}")
 
 
+def relay_stats(district, timeout=90):
+    """What the district's kernel relay has carried, once it has carried something of the unit's (the counters are
+    written every few seconds). Read before any probe of ours goes through the district."""
+    end, last = time.time() + timeout, None
+    while time.time() < end:
+        r = district.ssh("cat /run/urban/relay.json", check=False)
+        try:
+            last = json.loads(r.stdout)
+        except ValueError:
+            last = None
+        if last and last.get("kernel") and last.get("units", 0) >= 1 and last.get("bytes_up", 0) > 0:
+            return last
+        time.sleep(3)
+    raise Fail(f"the kernel relay carries nothing of the unit's: {last}")
+
+
+def pem_sha256(text):
+    """SHA-256 of the first certificate in a PEM text (the leaf, as a server sends it), as hex."""
+    import ssl
+    m = re.search(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", text, re.S)
+    if not m:
+        raise Fail(f"no certificate in: {text[:200]!r}")
+    return hashlib.sha256(ssl.PEM_cert_to_DER_cert(m.group(0))).hexdigest()
+
+
+def centre_devices(centre, ctx, port=2443, timeout=90):
+    """'The district shows up in Devices with its address and health', as the interface gets it: signed in to the
+    centre's API as admin (the one-time password from the platform's journal), GET /api/devices. Without a
+    session (the admin has a second factor) only the registry file is read, and the result says so."""
+    import urllib.error
+    import urllib.request
+
+    def call(path, body=None, token=None):
+        headers = {"Content-Type": "application/json", **({"Authorization": f"Bearer {token}"} if token else {})}
+        req = urllib.request.Request(f"https://127.0.0.1:{port}{path}", headers=headers,
+                                     data=json.dumps(body).encode() if body is not None else None)
+        with urllib.request.urlopen(req, context=ctx, timeout=20) as r:
+            return json.loads(r.read())
+
+    password = admin_password(centre, "/tmp/chain-admin.txt")
+    if not password:
+        raise Fail("the centre's first admin password is not in its journal")
+    try:
+        token = call("/api/login", {"name": "admin", "password": password})["token"]
+    except urllib.error.HTTPError as err:
+        detail = err.read().decode("utf-8", "replace")
+        if err.code != 401 or "code required" not in detail:
+            raise Fail(f"signing in to the centre failed: {err.code} {detail[:200]}")
+        reg = {d["id"]: d for d in json.loads(centre.ssh("cat /var/lib/urban/platform/pki/devices.json").stdout)}
+        row = reg.get("district-1", {})
+        if row.get("kind") != "district" or row.get("address") != "10.0.2.2" or row.get("status") != "active":
+            raise Fail(f"the centre's registry has district-1 as {row}")
+        return ("district-1 in the centre's registry file: kind district, address 10.0.2.2, active "
+                "(the admin has a second factor: /api/devices and the health row were NOT read)")
+    end, row, unit_row = time.time() + timeout, {}, {}
+    while time.time() < end:
+        rows = {d["id"]: d for d in call("/api/devices", token=token)}
+        row, unit_row = rows.get("district-1", {}), rows.get("edge-J-01", {})
+        if row.get("online") and row.get("health"):
+            break
+        time.sleep(5)
+    if row.get("kind") != "district" or row.get("address") != "10.0.2.2":
+        raise Fail(f"Devices shows district-1 as kind {row.get('kind')!r}, address {row.get('address')!r}: {row}")
+    if not row.get("online"):
+        raise Fail(f"Devices shows district-1 offline: {row}")
+    if not row.get("health"):
+        raise Fail(f"Devices shows no health for district-1: {row}")
+    if not unit_row.get("online") or unit_row.get("district") != "district-1":
+        raise Fail(f"Devices does not show edge-J-01 online through district-1: {unit_row}")
+    relay = row["health"].get("relay")
+    return (f"Devices (/api/devices as admin): district-1 kind {row['kind']}, address {row['address']}, online, health "
+            f"{json.dumps(row['health'], sort_keys=True)}" + ("" if relay else " (no relay counts in it)")
+            + f"; edge-J-01 online via {unit_row['district']}")
+
+
 def chain():
     """unit -> district -> centre, three machines. The unit's TLS session reaches the centre through the district's
     relay (the certificate seen through the relay is the centre's); the district is a device of the centre with its
@@ -1155,31 +1396,71 @@ def chain():
         body = health(ctx)
         if body.get("devices_online") != 2:
             raise Fail(f"the centre sees {body.get('devices_online')} device(s) online, not the district and the unit")
-        seen = sh(["bash", "-c", "openssl s_client -connect 127.0.0.1:8443 -servername urban-center -CAfile /tmp/center-ca.pem "
-                   "</dev/null 2>/dev/null | openssl x509 -noout -subject -ext subjectAltName"]).stdout
-        if "urban-center" not in seen or "URBAN device gateway" not in seen:
-            raise Fail(f"through the relay a client does not see the centre's certificate: {seen}")
+        # services every machine of the chain must run without a restart (they crash-looped once on /run/urban)
+        for vm, what in ((centre, "centre"), (district, "district"), (unit, "unit")):
+            power_alive(vm, what)
+            run_dir_shared(vm, what)
+        service_clean(district, "urban-relay", "district")
+        files_fresh(district, ["/run/urban/relay.json"], what="district")
+        # 1. what the relay carried, read BEFORE anything of ours goes through it (the probe below is itself a
+        #    connection through the district and would inflate the unit and byte counts)
+        stats = relay_stats(district)
+        # the unit really sits behind the district: its own configuration points at the address a VM sees the
+        # district's forwarded port on (10.0.2.2:8443), the district's own link at the centre's port (10.0.2.2:28443)
+        for vm, name, want in ((unit, "edge-edge-J-01", "10.0.2.2:8443"), (district, "edge-district-1", "10.0.2.2:28443")):
+            env = vm.ssh(f"cat /etc/urban/{name}.env").stdout
+            m = re.search(r"^PLATFORM=(\S+)\s*$", env, re.M)
+            if not m or m.group(1) != want:
+                raise Fail(f"/etc/urban/{name}.env says PLATFORM={m.group(1) if m else None}, want {want}")
+        # the certificate a client gets through the district is the centre's own, compared by fingerprint
+        probe = sh(["openssl", "s_client", "-connect", "127.0.0.1:8443", "-servername", "urban-center", "-CAfile", "/tmp/center-ca.pem",
+                    "-verify_hostname", "urban-center", "-verify_return_error"], input="", check=False, timeout=60)
+        if "Verify return code: 0 (ok)" not in probe.stdout:
+            raise Fail(f"through the relay the centre's certificate does not verify against the centre's CA for urban-center:\n"
+                       f"{(probe.stdout + probe.stderr)[-600:]}")
+        seen_fp = pem_sha256(probe.stdout)
+        own_fp = pem_sha256(centre.ssh("cat /var/lib/urban/platform/pki/server.pem").stdout)
+        if seen_fp != own_fp:
+            raise Fail(f"the certificate seen through the district ({seen_fp}) is not the centre's server certificate ({own_fp})")
         relay = district.ssh("nft list table ip urban_relay").stdout
-        if not re.search(r"ip saddr \{[^}]*10\.0\.0\.0/8[^}]*\} tcp dport 8443 dnat (ip )?to 10\.0\.2\.2:28443", relay):
-            raise Fail(f"the district does not forward 8443 from private networks only to the centre:\n{relay}")
+        private = [ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16")]
+        dnat = [l for l in relay.splitlines() if re.search(r"dnat (ip )?to ", l)]  # the rule, not "ct status dnat" matches
+        if len(dnat) != 1:
+            raise Fail(f"expected one DNAT rule in the district's relay table, found {len(dnat)}:\n{relay}")
+        m = re.search(r"ip saddr \{([^}]*)\} tcp dport 8443 dnat (?:ip )?to 10\.0\.2\.2:28443\s*$", dnat[0])
+        if not m:
+            raise Fail(f"the DNAT rule does not read 'from a set of sources, port 8443, to the centre':\n{dnat[0]}")
+        elements = [e.strip() for e in m.group(1).split(",") if e.strip()]
+        if not elements:
+            raise Fail("the DNAT rule's source set is empty")
+        for e in elements:
+            try:
+                net = ipaddress.ip_network(e, strict=False)
+            except ValueError:
+                raise Fail(f"the DNAT source {e!r} is not a network")
+            if not any(net.version == p.version and net.subnet_of(p) for p in private):
+                raise Fail(f"the district forwards 8443 from {e}, which is not a private network")
         if "policy drop" not in district.ssh("nft list chain inet urban input").stdout:
             raise Fail("the district's input chain does not drop by default")
-        listening = district.ssh("ss -Hltn 'sport = :8443'").stdout.strip()
+        listening = district.ssh("ss -Hltunp 'sport = :8443'").stdout.strip()
         if listening:
             raise Fail(f"a program on the district listens on 8443 (the relay should be the kernel's): {listening}")
-        stats = json.loads(district.ssh("cat /run/urban/relay.json").stdout)
-        if stats["units"] < 1 or stats["bytes_up"] <= 0 or not stats.get("kernel"):
-            raise Fail(f"the kernel relay carries nothing: {stats}")
-        print(f"   unit edge-J-01 online through district-1 (relay: {stats['units']} unit, {stats['bytes_up']} B up); "
-              f"the centre sees both; the relay shows the centre's certificate", flush=True)
+        control = district.ssh("ss -Hltunp 'sport = :22'").stdout
+        if "sshd" not in control:
+            raise Fail(f"control failed: the same query for port 22 does not list sshd, so it cannot see programs: {control!r}")
+        devices = centre_devices(centre, ctx)
+        print(f"   unit edge-J-01 online through district-1 (relay: {stats['units']} unit, {stats['bytes_up']} B up, read before "
+              f"the probe); the centre sees both; through the relay it presents the centre's own certificate ({seen_fp[:16]}); "
+              f"DNAT sources {', '.join(elements)}", flush=True)
+        print(f"   {devices}", flush=True)
         # the district's cameras: a queue for the unit's junction, reported by the district, kept by the centre
-        district.ssh("echo '{\"J-01-E\": 42.0}' > /run/urban/queues.json")
+        district.ssh("echo '{\"J-01-E\": 42.0}' > /run/urban/q/queues.json")
         db = "/var/lib/urban/platform/urban.db"
         count = ("/opt/urban/.venv/bin/python -c \"import sqlite3; c = sqlite3.connect('%s'); "
                  "print(c.execute(\\\"select count(*) from queues where junction = 'J-01' and approach = 'J-01-E' %s\\\").fetchone()[0])\"")
         end = time.time() + 150
         while time.time() < end:
-            if int(centre.ssh(count % (db, "and metres >= 1")).stdout.strip()) > 0:
+            if int(centre.ssh(count % (db, "and metres = 42")).stdout.strip()) > 0:
                 break
             time.sleep(10)
         else:
@@ -1267,16 +1548,24 @@ def slots(vm):
     return st["booted"], {s["bootname"]: s for slot in st["slots"] for s in slot.values()}
 
 
+def encrypted_line(line, what):
+    """The self-check line of a boot must say the data partition is LUKS2 opened by the TPM: an update (or a rollback)
+    that left the unit unable to open its encrypted data would otherwise only show up as a missing file."""
+    if "data=rw,luks2-tpm2" not in line:
+        raise Fail(f"{what}: the data partition is not LUKS2/TPM2 in the self-check: {line}")
+
+
 def update(kind):
     vm = VM(f"update-{kind}")
     try:
         vm.start()
-        vm.booted("1", "A")
+        encrypted_line(vm.booted("1", "A"), "slot A before the update")
         if kind == "good":
             vm.put(f"{OUT}/urban-edge-2.raucb", f"{STAGE}/update.raucb")
             vm.install(f"{STAGE}/update.raucb")
             vm.reboot()
             line = vm.booted("2", "B")
+            encrypted_line(line, "slot B after the update")
             booted, by_slot = slots(vm)
             if booted != "B" or by_slot["B"].get("boot_status") != "good":
                 raise Fail(f"after the update: booted {booted}, slot B {by_slot['B'].get('boot_status')}")
@@ -1308,6 +1597,7 @@ def update(kind):
             print(f"   {vm.lines[vm.mark - 1][:200]}")
             vm.wait(r"URBAN-HEALTH bad slot=B", 300)
             line = vm.booted("1", "A")  # back on the previous system without anyone touching the unit
+            encrypted_line(line, "slot A after the rollback")
             booted, by_slot = slots(vm)
             if booted != "A" or by_slot["B"].get("boot_status") != "bad":
                 raise Fail(f"after the rollback: booted {booted}, slot B {by_slot['B'].get('boot_status')}")

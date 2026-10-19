@@ -2,6 +2,7 @@
 # The OS checks its own promises and says so in one line: URBAN-OS-CHECK OK ... or URBAN-OS-CHECK FAIL ...
 # Run at every boot (urban-os-check.service); urban-health decides from it whether this slot is good.
 fail=()
+warn=()
 version=$(sed -n 's/^VERSION=//p' /etc/urban-os-release)
 slot=$(sed -n 's/.*rauc\.slot=\([AB]\).*/\1/p' /proc/cmdline)
 [ -n "$slot" ] || fail+=("no slot on the kernel command line")
@@ -17,7 +18,7 @@ crypt=plain
 if [ "$dsrc" = /dev/mapper/urban-data ] && cryptsetup status urban-data 2>/dev/null | grep -q 'type: *LUKS2'; then
   crypt=luks2-tpm2
 elif [ -c /dev/tpmrm0 ]; then
-  fail+=("this machine has a TPM but its data partition is not encrypted")
+  warn+=("a TPM but the data partition is plain")  # an update cannot fix this; it must not cause a rollback
 fi
 
 if systemctl is-active --quiet nftables && nft list table inet urban >/dev/null 2>&1; then
@@ -52,6 +53,16 @@ stays_up() {  # the unit active now, and the same process five seconds later
   pid=$(systemctl show -p MainPID --value "$1"); sleep 5
   systemctl is-active --quiet "$1" && [ "$pid" != 0 ] && [ "$(systemctl show -p MainPID --value "$1")" = "$pid" ]
 }
+# A service that does not stay up: the image's fault when Python itself breaks (a bad update), not when the unit
+# refuses its controller or its centre (configuration: a rollback would not help and would go on forever).
+service_check() {  # $1 unit, $2 what
+  stays_up "$1" && return 0
+  if journalctl -u "$1" -b --no-pager -o cat 2>/dev/null | grep -qE 'ModuleNotFoundError|ImportError|SyntaxError'; then
+    fail+=("$2 does not start: the software is broken")
+  else
+    warn+=("$2 does not stay up (see journalctl -u $1)")
+  fi
+}
 python_ok urban.edge.__main__ urban.node.power urban.node.district urban.platform || fail+=("URBAN software does not start")
 systemctl cat urban-edge@check.service >/dev/null 2>&1 || fail+=("urban-edge@ service missing")
 systemctl cat urban-relay.service urban-district@check.service >/dev/null 2>&1 || fail+=("district services missing")
@@ -59,18 +70,19 @@ if [ "$role" = district ]; then
   [ -f "/var/lib/urban/etc/pki/edge/$unit.key" ] || fail+=("district $unit has no key")
 fi
 if [ "$role" = unit ] && [ -f "/var/lib/urban/etc/edge-$unit.env" ]; then
-  stays_up "urban-edge@$unit.service" || fail+=("the unit service urban-edge@$unit does not stay up")
+  service_check "urban-edge@$unit.service" "the unit service urban-edge@$unit"
 fi
 case ",$role," in *,center,*)
   python_ok fastapi uvicorn || fail+=("the control centre's software is broken")
-  stays_up urban-platform.service || fail+=("the control centre urban-platform does not stay up")
+  service_check urban-platform.service "the control centre urban-platform"
   [ -f /opt/urban/web/dist/index.html ] || fail+=("the control centre's interface is missing") ;;
 esac
 
 install -d /run/urban
 if [ ${#fail[@]} -eq 0 ]; then
-  echo "URBAN-OS-CHECK OK version=$version slot=$slot root=ro data=rw,$crypt firewall=on watchdog=$wd unit=$unit role=$role"
-  echo "OK - read-only system, data writable, firewall on, watchdog $wd" > /run/urban/os-check
+  note=""; [ ${#warn[@]} -gt 0 ] && note=" warn=$(IFS=';'; echo "${warn[*]}" | tr ' ' '_')"
+  echo "URBAN-OS-CHECK OK version=$version slot=$slot root=ro data=rw,$crypt firewall=on watchdog=$wd unit=$unit role=$role$note"
+  echo "OK - read-only system, data writable, firewall on, watchdog $wd${warn:+; WARNING: $(IFS=';'; echo "${warn[*]}")}" > /run/urban/os-check
   echo "$crypt" > /run/urban/data-crypt
   /usr/local/bin/urban-console
   exit 0

@@ -90,7 +90,7 @@ sudo -u urban /opt/urban/.venv/bin/pip install -e "/opt/urban/backend[edge,visio
 sudo systemctl enable --now urban-vision@edge-J-07     # deploy/urban-vision@.service
 ```
 
-Служба пишет `/run/urban/queues.json`; служба блока `urban-edge@` читает его (`SENSORS` в env-файле).
+Служба пишет `/run/urban/q/queues.json`; служба блока `urban-edge@` читает его (`SENSORS` в env-файле).
 
 ## Проверка на записанном видео
 

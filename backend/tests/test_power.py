@@ -171,3 +171,22 @@ def test_the_service_writes_a_plan_for_its_role(tmp_path):
     assert saved["roles"] == ["district", "center"] and saved["level"] == "cool"
     assert saved["vision"]["cameras"] == 2 and saved["vision"]["threads"] == 2 and saved["cores"] == 4
     assert plan["temp_c"] == 45.0
+
+
+def test_the_service_on_a_light_unit_plans_no_vision_and_never_reads_the_cameras(tmp_path, monkeypatch):
+    conf = tmp_path / "var/lib/urban/etc/unit.conf"
+    write(conf, "UNIT=edge-J-07\nROLE=unit\nVISION=off\n")
+    write(conf.parent / "cameras.json", json.dumps([{"camera": "c1"}, {"camera": "c2"}, {"camera": "c3"}]))
+    write(tmp_path / "sys/class/thermal/thermal_zone0/temp", "45000")
+    for n in range(4):
+        (tmp_path / f"sys/devices/system/cpu/cpu{n}").mkdir(parents=True)
+
+    def never(*args, **kwargs):
+        raise AssertionError("a light unit must not look at cameras.json")
+    monkeypatch.setattr(p, "camera_load", never)
+    plan_path = tmp_path / "run/urban/power.json"
+    plan = p.main(["--root", str(tmp_path), "--conf", str(conf), "--plan", str(plan_path), "--once"])
+    saved = json.loads(plan_path.read_text())
+    assert saved["roles"] == ["unit"] and saved["level"] == "cool" and plan["temp_c"] == 45.0
+    assert saved["vision"]["off"] and saved["vision"]["cameras"] == 0 and saved["vision"]["threads"] == 0
+    assert saved["vision"]["paused"] is False and "no vision" in (plan_path.parent / "power.txt").read_text()

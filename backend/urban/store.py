@@ -179,12 +179,24 @@ class Store:
     def add_queues(self, queues: dict[str, dict | None], at: float | None = None):
         """queues: junction id -> {approach id: mean metres} (None for a junction without data).
         at: the reading's own time, for reports that arrive late (a district's outage buffer)."""
-        at = self.clock() if at is None else at
+        self.add_queues_many([(self.clock() if at is None else at, queues)])
+
+    def add_queues_many(self, items: list[tuple[float, dict]]):
+        """Several readings, each with its own time, in ONE transaction and with one prune: a district that
+        replays 15 minutes of reports must not cost a commit per row (autocommit made that block for seconds)."""
+        rows = [(at, self.run, j, a, round(float(m), 1)) for at, queues in items
+                for j, per in queues.items() if per for a, m in per.items()]
+        if not rows:
+            return
         with self.lock:
-            self.db.executemany("INSERT INTO queues(at, run, junction, approach, metres) VALUES (?, ?, ?, ?, ?)",
-                                [(at, self.run, j, a, round(float(m), 1)) for j, per in queues.items() if per
-                                 for a, m in per.items()])
-        self.prune(at)
+            self.db.execute("BEGIN")
+            try:
+                self.db.executemany("INSERT INTO queues(at, run, junction, approach, metres) VALUES (?, ?, ?, ?, ?)", rows)
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+            self.db.execute("COMMIT")
+        self.prune()  # by the store's own clock: a replayed row's time says nothing about what is old now
 
     def prune(self, now: float | None = None, every: float = 3600.0):
         """Drop samples older than the retention; runs at most once an hour. Audit and commands are kept."""

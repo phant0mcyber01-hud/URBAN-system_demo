@@ -46,7 +46,7 @@ grow() {
 have_tpm() {
   modprobe tpm_tis 2>/dev/null; modprobe tpm_crb 2>/dev/null
   local i
-  for i in 1 2 3 4; do
+  for i in $(seq 1 ${1:-4}); do
     [ -c /dev/tpmrm0 ] && return 0
     sleep 0.5
   done
@@ -54,12 +54,16 @@ have_tpm() {
 }
 
 unlock() {
-  local out
-  if out=$("$CRYPTSETUP" attach urban-data "$part" - tpm2-device=auto,headless=true 2>&1); then
-    udevadm settle
-    say "encrypted (LUKS2), unlocked by this machine's TPM"
-    return 0
-  fi
+  local out i
+  have_tpm 20  # the TPM's device node may come a little after the disk's
+  for i in 1 2 3; do
+    if out=$("$CRYPTSETUP" attach urban-data "$part" - tpm2-device=auto,headless=true 2>&1); then
+      udevadm settle
+      say "encrypted (LUKS2), unlocked by this machine's TPM"
+      return 0
+    fi
+    sleep 2
+  done
   say "LOCKED: the TPM did not release the key ($(echo "$out" | tail -n 1))"  # the mount fails; the self-check says so
   return 1
 }
@@ -68,6 +72,7 @@ undo() {
   # encryption failed after the plain file system was gone: a plain one again, with what was on it
   say "could not encrypt: $*"
   "$CRYPTSETUP" detach urban-data 2>/dev/null
+  wipefs -q -a "$part" 2>/dev/null  # no LUKS header left behind to confuse blkid
   mkfs.ext4 -q -L urban-data "$part" 2>/dev/null
   if [ -s /run/urban-data-keep.tar ] && mount "$part" /run/urban-data-mnt; then
     tar -C /run/urban-data-mnt -xf /run/urban-data-keep.tar; umount /run/urban-data-mnt
@@ -85,7 +90,16 @@ encrypt() {
   done
   mkdir -p /run/urban-data-mnt
   if mount -o ro "$part" /run/urban-data-mnt; then
-    tar -C /run/urban-data-mnt -cf "$keep" .
+    if [ -e /run/urban-data-mnt/etc/unit.conf ]; then  # already in use: never rewritten in place (a power cut
+      umount /run/urban-data-mnt                         # then would lose a working machine's keys and data)
+      say "plain: this machine's data is already in use; to encrypt it, write the image again with the TPM on"
+      return 0
+    fi
+    if ! tar -C /run/urban-data-mnt -cf "$keep" .; then
+      umount /run/urban-data-mnt; rm -f "$keep"
+      say "could not encrypt: the data could not be copied aside; the partition stays plain"
+      return 1
+    fi
     umount /run/urban-data-mnt
   else
     : > "$keep"
@@ -98,17 +112,38 @@ encrypt() {
   unlock || undo "the TPM did not unlock what it had just sealed" || return 1
   out=$(mkfs.ext4 -q -L urban-data "$MAPPED" 2>&1) || undo "mkfs: $out" || return 1
   if [ -s "$keep" ]; then
-    mount "$MAPPED" /run/urban-data-mnt && tar -C /run/urban-data-mnt -xf "$keep" && umount /run/urban-data-mnt
+    if ! { mount "$MAPPED" /run/urban-data-mnt && tar -C /run/urban-data-mnt -xf "$keep"; }; then
+      umount /run/urban-data-mnt 2>/dev/null
+      undo "putting the data back failed" || return 1
+    fi
+    umount /run/urban-data-mnt
   fi
   rm -f "$keep"
   udevadm settle
   say "the partition is now LUKS2 with its key sealed in this machine's TPM"
 }
 
+# A first-boot encryption cut short (power, timeout) leaves a LUKS volume that never held data: finish it rather
+# than leave a unit that cannot mount its data partition. Only a volume without a TPM token, or one that opens
+# but has no file system yet, counts as unfinished; a sealed volume the TPM refuses stays LOCKED (never wiped).
+finish() {
+  if ! cryptsetup luksDump "$part" 2>/dev/null | grep -q 'systemd-tpm2'; then
+    say "unfinished encryption found (no TPM key): starting it again on an empty partition"
+    wipefs -q -a "$part"; mkfs.ext4 -q -L urban-data "$part"; udevadm settle
+    have_tpm && encrypt
+    return
+  fi
+  unlock || return 1
+  if [ -z "$(blkid -o value -s TYPE "$MAPPED" 2>/dev/null)" ]; then
+    say "unfinished encryption found (no file system): making one"
+    mkfs.ext4 -q -L urban-data "$MAPPED"; udevadm settle
+  fi
+}
+
 kind=$(blkid -o value -s TYPE "$part" 2>/dev/null)
 case "$kind" in
   crypto_LUKS)
-    unlock; exit 0 ;;
+    finish; exit 0 ;;
   ext4)
     grow
     if have_tpm; then

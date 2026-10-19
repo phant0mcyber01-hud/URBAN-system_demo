@@ -27,6 +27,16 @@ for (const cmd of ["node os/build.mjs", "urban-unit setup", "urban-unit update",
 }
 if (text.length < 4000) fail("the guide is too short to be followed");
 
+// «Что не проверено»: the section itself (up to the next "## " heading) must say plainly the limits that matter
+const heading = /^##+ .*не проверено.*$/im.exec(text);
+if (!heading) fail("docs/edge-os.md has no «Что не проверено» section");
+const rest = text.slice(heading.index + heading[0].length);
+const nextH2 = /^## /m.exec(rest);
+const unverified = nextH2 ? rest.slice(0, nextH2.index) : rest;
+const word = (t, w) => new RegExp(`(?<![A-Za-z0-9])${w}(?![A-Za-z0-9])`).test(t);  // whole word (JS \b does not know Cyrillic neighbours)
+for (const [what, ok] of [["Secure Boot", unverified.includes("Secure Boot")], ["ARM", word(unverified, "ARM")], ["WireGuard", unverified.includes("WireGuard")]])
+  if (!ok) fail(`the «Что не проверено» section of docs/edge-os.md does not mention ${what}`);
+
 // docs/mini-pc.md: from a box to an enrolled unit, for a person with a Windows laptop
 const guide = join(ROOT, "docs", "mini-pc.md");
 if (!existsSync(guide)) fail("docs/mini-pc.md is missing");
@@ -50,4 +60,9 @@ for (const must of ["## Три уровня", "Решения владельца
   "VISION=off", "node os/demo.mjs", "WireGuard", "без привязки к PCR"]) {
   if (!context.includes(must)) fail(`CONTEXT.md does not record ${JSON.stringify(must)}`);
 }
+// the "Не сделано" paragraph (up to the next blank line) names the two big gaps
+const todo = /\*\*Не сделано[^\n]*(?:\n(?!\n)[^\n]*)*/.exec(context);
+if (!todo) fail("CONTEXT.md has no «Не сделано» paragraph");
+if (!todo[0].includes("WireGuard")) fail("the «Не сделано» paragraph of CONTEXT.md does not mention WireGuard");
+if (!word(todo[0], "ARM")) fail("the «Не сделано» paragraph of CONTEXT.md does not mention ARM");
 console.log("DOCS CHECK PASSED");

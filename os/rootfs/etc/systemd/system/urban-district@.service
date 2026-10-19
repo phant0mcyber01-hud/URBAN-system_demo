@@ -14,8 +14,6 @@ ExecStart=/opt/urban/.venv/bin/python -m urban.node.district --unit %i --platfor
     --pki /etc/urban/pki --sensors "${SENSORS}" --relay /run/urban/relay.json --temp "${TEMP_SENSOR}"
 Restart=always
 RestartSec=2
-RuntimeDirectory=urban
-RuntimeDirectoryPreserve=yes
 # The sandbox: its own key folder and the network, nothing else (as urban-edge@)
 NoNewPrivileges=yes
 ProtectSystem=strict

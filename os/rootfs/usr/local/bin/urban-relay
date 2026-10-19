@@ -77,27 +77,65 @@ def units() -> int:
     return 0
 
 
+TAG = "urban-relay"  # the comment on the relay's rules in the main firewall, so they can be found and replaced
+
+
+def drop_forward_rules():
+    """The relay's own rules in the main firewall's forward chain, removed (by their comment)."""
+    listing = subprocess.run(["nft", "-a", "list", "chain", "inet", "urban", "forward"], capture_output=True, text=True).stdout
+    for line in listing.splitlines():
+        if f'comment "{TAG}' in line and "# handle " in line:
+            handle = line.rsplit("# handle ", 1)[1].strip()
+            subprocess.run(["nft", "delete", "rule", "inet", "urban", "forward", "handle", handle], capture_output=True)
+
+
+def apply(ip: str, port: int):
+    """The relay's table and its two forward rules, exactly once (a restart or a re-resolved centre replaces them)."""
+    r = subprocess.run(["nft", "-f", "-"], input=rules(ip, port), capture_output=True, text=True)
+    if r.returncode != 0:
+        raise SystemExit(f"URBAN-RELAY rules refused: {r.stderr.strip()}")
+    drop_forward_rules()
+    # the main firewall drops forwarded packets by default; these are the relay's and only these
+    subprocess.run(["nft", "-f", "-"], check=True, input=f"""
+add rule inet urban forward ct state established,related accept comment "{TAG}: answers"
+add rule inet urban forward ip daddr {ip} tcp dport {port} ct status dnat accept comment "{TAG}: units to the centre"
+""", capture_output=True, text=True)
+
+
+def cleanup():
+    """urban-relay stop: no forwarding left behind (ExecStopPost)."""
+    subprocess.run(["nft", "delete", "table", "ip", "urban_relay"], capture_output=True)
+    drop_forward_rules()
+    with open("/proc/sys/net/ipv4/ip_forward", "w") as f:
+        f.write("0")
+
+
 def main():
+    if len(sys.argv) == 2 and sys.argv[1] == "--stop":
+        return cleanup()
     if len(sys.argv) != 2 or not sys.argv[1]:
         raise SystemExit("urban-relay CENTER (host[:port] of the centre's device listener)")
     host, _, port = sys.argv[1].rpartition(":")
     if not host:
         host, port = sys.argv[1], str(PORT)
+    port = int(port)
     ip = resolve(host)
     with open("/proc/sys/net/ipv4/ip_forward", "w") as f:  # only a district forwards, and only this
         f.write("1")
-    r = subprocess.run(["nft", "-f", "-"], input=rules(ip, int(port)), capture_output=True, text=True)
-    if r.returncode != 0:
-        raise SystemExit(f"URBAN-RELAY rules refused: {r.stderr.strip()}")
-    # the main firewall drops forwarded packets by default; these are the relay's and only these
-    subprocess.run(["nft", "-f", "-"], check=True, input=f"""
-add rule inet urban forward ct state established,related accept
-add rule inet urban forward ip daddr {ip} tcp dport {port} ct status dnat accept comment "district relay: units to the centre"
-""", capture_output=True, text=True)
+    apply(ip, port)
     print(f"URBAN-RELAY units -> {ip}:{port} in the kernel (no relay process)", flush=True)
-    started = time.monotonic()
+    started = checked = time.monotonic()
     os.makedirs(os.path.dirname(STATS), exist_ok=True)
     while True:
+        # a firewall reload flushes the relay's table, and the centre's address may change: both mended here
+        missing = subprocess.run(["nft", "list", "table", "ip", "urban_relay"], capture_output=True).returncode != 0
+        if missing or time.monotonic() - checked > 300:
+            checked = time.monotonic()
+            now = resolve(host)
+            if missing or now != ip:
+                ip = now
+                apply(ip, port)
+                print(f"URBAN-RELAY rules set again: units -> {ip}:{port}", flush=True)
         s, u, d = counter("sessions"), counter("up"), counter("down")
         stats = {"units": units(), "sessions": s.get("packets", 0), "refused": 0,
                  "bytes_up": u.get("bytes", 0), "bytes_down": d.get("bytes", 0),

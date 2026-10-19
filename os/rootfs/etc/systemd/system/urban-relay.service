@@ -8,6 +8,7 @@ After=network.target nftables.service urban-prepare.service
 [Service]
 EnvironmentFile=/run/urban/relay.env
 ExecStart=/usr/local/bin/urban-relay ${CENTER}
+ExecStopPost=/usr/local/bin/urban-relay --stop
 Restart=always
 RestartSec=5
 StandardOutput=journal+console
