@@ -1,7 +1,7 @@
 """Device registry: which URBAN Edge units exist, where they are installed and whether they are trusted.
 
-In a deployment a unit generates its own key (python -m urban.edge --keygen; later inside its
-secure element) and only the public half is enrolled here (python -m urban.provision enroll).
+In a deployment a unit generates its own key (python -m urban.edge --keygen; inside its TPM when
+it has one: ECDSA P-256, else an Ed25519 file) and only the public half is enrolled here (python -m urban.provision enroll).
 The demo instead generates every unit's key on one machine under data/pki, which is not in git.
 The registry file is re-read when another process changes it, so enrolment works while the
 platform runs.
@@ -100,7 +100,7 @@ class Registry:
     def enroll_district(self, device: str, address: str, public: str, serial: str = "") -> dict:
         """Enrol a district server: its public key and the address its junction units connect to (host or
         host:port). A known district gets the new key or address."""
-        crypto.load_public(public)
+        crypto.check_public(public)  # Ed25519 (64 hex) or a TPM's P-256 (130 hex)
         if not device.startswith("district-") or not DEVICE.fullmatch(device):
             raise ValueError("district id must look like district-<name> (letters, digits, . _ -)")
         address = check_address(address)
@@ -122,7 +122,7 @@ class Registry:
         """Enrol the unit of a street-lighting cabinet: id light-<name>, the cabinet it controls (one active unit per
         cabinet) and optionally where the cabinet stands (the unit's astronomical schedule needs it). A lighting
         record is nobody's junction and goes through no district server. A known device gets the new key."""
-        crypto.load_public(public)
+        crypto.check_public(public)
         if not isinstance(device, str) or not LIGHT_DEVICE.fullmatch(device):
             raise ValueError("lighting unit id must look like light-<cabinet> (letters, digits, . _ -)")
         if not isinstance(cabinet, str) or not CABINET.fullmatch(cabinet):
@@ -172,7 +172,7 @@ class Registry:
     def enroll(self, device: str, junction: dict, public: str, serial: str = "", district: str | None = None) -> dict:
         """Enrol a unit's public key for a junction ({id, tls, name}); a known unit gets the new key (replaced box).
         The private key never comes here. district: the district server it connects through, if any."""
-        crypto.load_public(public)  # raises ValueError if it is not an Ed25519 public key
+        crypto.check_public(public)  # raises ValueError if it is neither an Ed25519 nor a P-256 public key
         if not device.startswith("edge-") or not DEVICE.fullmatch(device):
             raise ValueError("device id must look like edge-<junction> (letters, digits, . _ -)")
         self._reload()
@@ -202,7 +202,7 @@ class Registry:
         rec = self.devices.get(device)
         if rec is None or rec["status"] != ACTIVE:
             return None
-        ok = crypto.verify(crypto.load_public(rec["public_key"]), {"device": device, "nonce": nonce}, signature)
+        ok = crypto.verify_text(rec["public_key"], {"device": device, "nonce": nonce}, signature)  # either kind of key
         return rec if ok else None
 
     def mark_seen(self, device: str):

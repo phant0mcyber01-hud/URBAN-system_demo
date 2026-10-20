@@ -24,7 +24,13 @@ ReadWritePaths=/etc/urban/pki -/var/lib/urban/update-inbox
 InaccessiblePaths=-/var/lib/urban/ssh -/var/lib/urban/update -/var/lib/urban/rauc -/var/lib/urban/platform -/boot
 ProtectHome=yes
 PrivateTmp=yes
-PrivateDevices=yes
+# no devices at all but the TPM's resource manager, through which the district signs with its device key (the key
+# never leaves the chip; group tss owns /dev/tpmrm0, os/rootfs/etc/udev/rules.d/60-urban-tpm.rules). This replaces
+# PrivateDevices=yes, which would hide /dev/tpmrm0: DevicePolicy=closed keeps every other device shut. Without a TPM
+# the line does nothing. tpm2-tools keep their scratch files in the private /tmp above.
+DevicePolicy=closed
+DeviceAllow=/dev/tpmrm0 rw
+SupplementaryGroups=tss
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes

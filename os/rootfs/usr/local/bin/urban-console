@@ -14,6 +14,17 @@ crypt=$(cat /run/urban/data-crypt 2>/dev/null)
 relay=$(cat /run/urban/relay.txt 2>/dev/null)  # written by urban-relay as the screen shows it
 fingerprint=$(sed -n 's/^fingerprint: *\([0-9A-F-]*\).*/\1/p' "$D/etc/enrolment.txt" 2>/dev/null)
 code=$(grep -o 'URBAN1:[^[:space:]]*' "$D/etc/enrolment.txt" 2>/dev/null)
+# where the device key lives: a folder <unit>.tpm of TPM-wrapped blobs, or an Ed25519 file. Read from the files'
+# existence (no Python); the power manager and the cabinet's screen redraw this from sandboxes that cannot see the key
+# folder (InaccessiblePaths), where the line keygen printed in enrolment.txt answers instead
+keyin=""
+if [ -n "$unit" ]; then
+  if [ -d "$D/etc/pki/edge/$unit.tpm" ]; then keyin="in TPM"
+  elif [ -f "$D/etc/pki/edge/$unit.key" ]; then keyin="file"
+  else
+    case "$(sed -n 's/^key: *\([a-z]*\).*/\1/p' "$D/etc/enrolment.txt" 2>/dev/null | head -n 1)" in tpm) keyin="in TPM" ;; file) keyin="file" ;; esac
+  fi
+fi
 check=$(cat /run/urban/os-check 2>/dev/null || echo "running")
 health=$(cat /run/urban/health 2>/dev/null || echo "waiting for the self-check")
 version=$(sed -n 's/^VERSION=//p' /etc/urban-os-release)
@@ -54,7 +65,7 @@ esac
     printf "  role          %s\n" "$what"
   fi
   if [ -n "$unit" ] && [ "$role" = unit ]; then
-    printf "  key           %s\n" "${fingerprint:-making it now...}"
+    printf "  key           %s%s\n" "${fingerprint:-making it now...}" "${keyin:+ ($keyin)}"
     printf "  enrolment     %s\n" "${code:-}"
     if [ "$module" = lighting ]; then
       printf "                (the centre enrols it: urban.provision enroll-lighting %s --cabinet <id> --public <key>)\n" "$unit"
@@ -62,7 +73,7 @@ esac
       printf "                (paste it in the platform: Devices -> Enrol a unit; compare the key above)\n"
     fi
   elif [ -n "$unit" ] && [ "$role" = district ]; then
-    printf "  key           %s\n" "${fingerprint:-making it now...}"
+    printf "  key           %s%s\n" "${fingerprint:-making it now...}" "${keyin:+ ($keyin)}"
     printf "  enrolment     %s\n" "${code:-}"
     printf "                (paste it in the platform: Devices -> Enrol, with this server's address)\n"
     printf "  relay         units -> %s; %s\n" "${center:-NO CENTER SET (CENTER= in urban-unit.txt)}" "${relay:-no unit yet}"

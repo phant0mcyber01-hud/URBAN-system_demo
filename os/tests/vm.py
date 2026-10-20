@@ -12,6 +12,8 @@
     python3 vm.py lighting              a street-lighting cabinet (MODULE=lighting) and its centre: enrol, an operator's
                                         override reaches the cabinet and its screen, a foreign cabinet is refused, the
                                         cabinet returns to its schedule by itself when the centre's listener stops
+    python3 vm.py hardened [lighting]   an intruder on a junction unit (or a lighting cabinet): root, the hijacked service,
+                                        the device key inside the TPM and useless when copied to another machine
     python3 vm.py chain                 unit -> district -> centre: three machines, the relay, the district's reports
     python3 vm.py ota                   over the air: the centre releases version 2, the district and the unit install it
                                         by themselves; the unit's root helper refuses what it must refuse
@@ -398,6 +400,12 @@ def roles_in(slot, listing):
         "systemd-cryptenroll": "usr/bin/systemd-cryptenroll",
         "the TPM2 library systemd loads (esys)": "usr/lib/x86_64-linux-gnu/libtss2-esys.so.0",
         "the TPM2 library systemd loads (device tcti)": "usr/lib/x86_64-linux-gnu/libtss2-tcti-device.so.0",
+        "tpm2-tools: tpm2_createprimary (the device key is made in the TPM)": "usr/bin/tpm2_createprimary",
+        "tpm2-tools: tpm2_create": "usr/bin/tpm2_create",
+        "tpm2-tools: tpm2_load": "usr/bin/tpm2_load",
+        "tpm2-tools: tpm2_sign (the device key signs in the TPM)": "usr/bin/tpm2_sign",
+        "the device signer (file key or TPM key)": "opt/urban/backend/urban/devices/signer.py",
+        "the rule that gives the TPM's resource manager to group tss": "etc/udev/rules.d/60-urban-tpm.rules",
     }
     for what, path in need.items():
         if not re.search(r"(^|/)" + re.escape(path) + r"$", listing, re.M):
@@ -424,7 +432,7 @@ def roles_in(slot, listing):
         if role not in prepare:
             raise Fail(f"urban-prepare does not know the role {role}")
     for need in ("urban-relay.service", "urban-district@$UNIT.service", "VISION", "update-inbox", "urban-update.path",
-                 "MODULE", "urban-lighting@$UNIT.service", "/run/urban/light"):
+                 "MODULE", "urban-lighting@$UNIT.service", "/run/urban/light", "--keygen", "--tpm auto"):
         if need not in prepare:
             raise Fail(f"urban-prepare does not start or open {need}")
     if "<html" not in open("/tmp/sq2/opt/urban/web/dist/index.html").read().lower():
@@ -474,9 +482,10 @@ def check_code(code, fingerprint, unit="edge-J-07", serial="URB-TEST"):
         raise Fail("the printed fingerprint is not the fingerprint of the key in the code")
 
 
-# how many private keys the unit holds; the same command runs on the unprovisioned machine (must say 0) and on the
-# named one (must say 1: the control that proves the command can see a key at all)
-KEY_COUNT = "find /var/lib/urban/etc/pki -name '*.key' | wc -l"
+# how many device keys the unit holds (a file <unit>.key, or a folder <unit>.tpm of TPM-wrapped blobs); the same
+# command runs on the unprovisioned machine (must say 0) and on the named one (must say 1: the control that proves
+# the command can see a key at all)
+KEY_COUNT = "find /var/lib/urban/etc/pki \\( -name '*.key' -o -name '*.tpm' \\) | wc -l"
 
 
 def firstboot():
@@ -490,27 +499,38 @@ def firstboot():
         bare.wait_ssh()  # without SSH the probe below would see nothing and "pass"
         n = bare.ssh(KEY_COUNT).stdout.strip()
         if n != "0":
-            raise Fail(f"a key appeared without an identity ({n} *.key under /var/lib/urban/etc/pki)")
+            raise Fail(f"a key appeared without an identity ({n} *.key / *.tpm under /var/lib/urban/etc/pki)")
     finally:
         bare.stop()
 
     vm = VM("firstboot")
     try:
         vm.start()
-        m = vm.wait(r"URBAN-ENROLMENT unit=(\S+) serial=(\S+) fingerprint=(\S+) code=(\S+)")
+        m = vm.wait(r"URBAN-ENROLMENT unit=(\S+) serial=(\S+) fingerprint=(\S+) code=(\S+) key=(\S+)")
         unit, fp, code = m.group(1), m.group(3), m.group(4)
         check_code(code, fp)
+        if m.group(5) != "tpm":  # this machine has a (software) TPM: the key is made in it
+            raise Fail(f"the unit has a TPM but says its key is {m.group(5)!r}, not 'tpm'")
         vm.booted("1", "A")
         n = vm.ssh(KEY_COUNT).stdout.strip()
         if n != "1":
             raise Fail(f"control failed: the named unit should hold exactly one key, the probe counts {n}")
-        mode = vm.ssh(f"stat -c '%a %U' /var/lib/urban/etc/pki/edge/{unit}.key").stdout.split()
-        if mode != ["600", "urban"]:
-            raise Fail(f"the unit key is not private to the unit's service: {mode}")
+        pki = f"/var/lib/urban/etc/pki/edge/{unit}"
+        mode = vm.ssh(f"stat -c '%a %U' {pki}.tpm").stdout.split()
+        if mode != ["700", "urban"]:
+            raise Fail(f"the unit's key folder is not private to the unit's service: {mode}")
+        files = vm.ssh(f"stat -c '%n %a %U' {pki}.tpm/*").stdout.split(chr(10))
+        if not any(f.startswith(f"{pki}.tpm/key.priv ") for f in files) or any(f.split()[1:] != ["600", "urban"] for f in files if f.strip()):
+            raise Fail(f"the unit's TPM key blobs are not private to the unit's service: {files}")
+        if vm.ssh(f"test -e {pki}.key", check=False).returncode == 0:
+            raise Fail("a TPM unit also has a key file")
+        screen = vm.ssh("cat /run/urban/console.issue").stdout
+        if not re.search(r"^\s*key\s+\S+ \(in TPM\)\s*$", screen, re.M):
+            raise Fail(f"the unit's screen does not say its key is in the TPM:\n{screen}")
         vm.reboot()
-        m2 = vm.wait(r"URBAN-ENROLMENT unit=(\S+) serial=(\S+) fingerprint=(\S+) code=(\S+)")
-        if m2.group(3) != fp:
-            raise Fail(f"the key changed across a reboot: {fp} -> {m2.group(3)}")
+        m2 = vm.wait(r"URBAN-ENROLMENT unit=(\S+) serial=(\S+) fingerprint=(\S+) code=(\S+) key=(\S+)")
+        if m2.group(3) != fp or m2.group(5) != "tpm":
+            raise Fail(f"the key changed across a reboot: {fp} -> {m2.group(3)} ({m2.group(5)})")
         vm.booted("1", "A")
         print(f"   unit {unit}, key {fp}, code {code[:28]}...")
         print("FIRSTBOOT CHECK PASSED", flush=True)
@@ -542,22 +562,32 @@ def hardware():
 
 
 # a stand-in for the kit the platform hands out (Устройства -> Комплект): a made-up platform with its own CA,
-# made on the unit for the unit's own key, by the same code the platform uses
+# made on the unit for the unit's own key, by the same code the platform uses. The unit's public key is asked of the
+# device signer (it is a TPM key, whose private half nobody can read, or an Ed25519 file; the signer says which).
+# KIT_REC (environment, JSON) adds to the unit's record: a lighting cabinet is {"kind": "lighting", "cabinet": ...}.
 STAND_KIT = r"""set -e
 mkdir -p /tmp/pki
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout /tmp/pki/ca.key -out /tmp/pki/ca.pem   -days 30 -subj /CN=stand-platform 2>/dev/null
 /opt/urban/.venv/bin/python - <<'PY'
-import json
+import json, os, subprocess, sys
 from pathlib import Path
 from urban.devices import crypto
 from urban.devices.enrolment import make_kit
-key = crypto.load_private(Path("/var/lib/urban/etc/pki/edge/UNIT.key").read_text())
+pub = subprocess.run([sys.executable, "-m", "urban.devices.signer", "--pki", "/var/lib/urban/etc/pki", "--unit", "UNIT", "--public"],
+                     capture_output=True, text=True, check=True).stdout.split()[-1]
 Path("/tmp/pki/root.pub").write_text(crypto.public_hex(crypto.new_key()))
-rec = {"id": "UNIT", "junction": "J-07", "name": "stand", "public_key": crypto.public_hex(key)}
+rec = {"id": "UNIT", "junction": "J-07", "name": "stand", "public_key": pub}
+rec.update(json.loads(os.environ.get("KIT_REC") or "{}"))
 kit = make_kit(rec, Path("/tmp/pki"), "platform.invalid", 8443)
 Path("/var/lib/urban/update/kit.json").write_text(json.dumps(kit))
 PY
 """
+
+
+def stand_kit(unit, **record):
+    """The stand-in kit script for this unit; record: what a lighting cabinet's record adds (kind, cabinet, lon, lat)."""
+    env = f"export KIT_REC={shlex.quote(json.dumps(record))}\n" if record else ""
+    return env + STAND_KIT.replace("UNIT", unit)
 
 
 def running(vm, unit):
@@ -812,8 +842,10 @@ def encrypted():
     try:
         vm.start()
         vm.wait(r"URBAN-DATA the partition is now LUKS2 with its key sealed in this machine's TPM")
-        m = vm.wait(r"URBAN-ENROLMENT unit=(\S+) serial=(\S+) fingerprint=(\S+) code=(\S+)")
+        m = vm.wait(r"URBAN-ENROLMENT unit=(\S+) serial=(\S+) fingerprint=(\S+) code=(\S+) key=(\S+)")
         fp = m.group(3)
+        if m.group(5) != "tpm":
+            raise Fail(f"with a TPM the unit key should be made in it, the unit says key={m.group(5)}")
         line = vm.booted("1", "A")
         if "data=rw,luks2-tpm2" not in line:
             raise Fail(f"the self-check does not say the data is encrypted: {line}")
@@ -846,6 +878,9 @@ def encrypted():
     try:
         plain.start()
         plain.wait(r"URBAN-DATA plain: no TPM on this machine")
+        m = plain.wait(r"URBAN-ENROLMENT unit=(\S+) serial=(\S+) fingerprint=(\S+) code=(\S+) key=(\S+)")
+        if m.group(5) != "file":  # the control: no TPM, the key is the Ed25519 file as before
+            raise Fail(f"without a TPM the unit key should be a file, the unit says key={m.group(5)}")
         line = plain.booted("1", "A")
         if "data=rw,plain" not in line:
             raise Fail(f"without a TPM the self-check should say plain: {line}")
@@ -997,7 +1032,9 @@ def measure(label="now"):
 ATTACK = r"""
 set -u
 unit=$(sed -n 's/^UNIT=//p' /var/lib/urban/etc/unit.conf)
-pid=$(systemctl show -p MainPID --value urban-edge@$unit.service)
+# the jailed service: a junction unit's, or a street-lighting cabinet's program
+if [ "$(sed -n 's/^MODULE=//p' /var/lib/urban/etc/unit.conf)" = lighting ]; then svc=urban-lighting@$unit; else svc=urban-edge@$unit; fi
+pid=$(systemctl show -p MainPID --value $svc.service)
 say() { echo "$1 $2"; }
 try() { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }
 say lockdown "$(cat /sys/kernel/security/lockdown)"
@@ -1041,8 +1078,10 @@ say jail_writes_run "$(try inside touch /run/urban/.probe)"
 say jail_writes_rauc "$(try inside touch /var/lib/urban/rauc/intruder)"
 say jail_writes_data_root "$(try inside touch /var/lib/urban/intruder)"
 say jail_writes_inbox_control "$(try inside touch /var/lib/urban/update-inbox/.probe)"
+# the cabinet's status folder is the lighting program's own (a control there); a junction unit has no business in it
+say jail_writes_status_dir "$(try inside touch /run/urban/light/.probe)"
 rm -f /var/lib/urban/etc/pki/edge/.probe /run/urban/.probe /var/lib/urban/update/intruder /var/lib/urban/etc/intruder /opt/urban/intruder
-rm -f /var/lib/urban/rauc/intruder /var/lib/urban/intruder /var/lib/urban/update-inbox/.probe
+rm -f /var/lib/urban/rauc/intruder /var/lib/urban/intruder /var/lib/urban/update-inbox/.probe /run/urban/light/.probe
 # the update inbox is the jail's own, so it may hand a package to the root helper; it must not be able to install one
 # or to restart the machine itself. Each refusal has a control that proves the tool runs in the jail and reaches the
 # system bus (else "refused" could just mean "could not start"); the package is a genuine, signed one (a root rauc
@@ -1056,14 +1095,24 @@ say jail_rauc_mark_good "$(try inside rauc status mark-good booted)"
 say jail_rauc_mark_bad "$(try inside rauc status mark-bad other)"
 say jail_reboot "$(try inside systemctl --no-ask-password reboot)"
 rm -f /var/lib/urban/update-inbox/probe.raucb
-# KNOWN LIMIT, not a defence: root on a running unit can read the unit's own private key (the service needs it
-# to prove who it is; the TPM seals the disk at rest, not a running system). Printed so the gate does not imply more.
-say root_reads_unit_key_known_limit "$(try cat /var/lib/urban/etc/pki/edge/$unit.key)"
+# The device key is in the TPM: what a root shell finds on disk is a wrapped blob, and no file with the unit's name that
+# a root could read as a key (the control: root reads the SSH host key, the same kind of file the unit used to have).
+# What is left of the old known limit: on THIS unit, root (and the service) can still ask the TPM to sign; see hardened().
+say root_finds_key_file "$(try test -e /var/lib/urban/etc/pki/edge/$unit.key)"
+say root_reads_host_key_control "$(try head -c 16 /var/lib/urban/ssh/ssh_host_ed25519_key)"
+# Only the group tss may use the TPM's resource manager: the service has it (SupplementaryGroups=tss), an urban process
+# without it (a hijacked vision, any other service of that user) has not. The same command in both, so a "no" cannot be
+# a broken command: with the group it signs (control).
+tssgid=$(getent group tss | cut -d: -f3)
+inside_tss() { nsenter -t "$pid" -m -- setpriv --reuid=urban --regid=urban --groups="$tssgid" --inh-caps=-all --bounding-set=-all -- "$@"; }
+signer="/opt/urban/.venv/bin/python -m urban.devices.signer --pki /var/lib/urban/etc/pki --unit $unit --sign x"
+say jail_signs_with_tss_control "$(try inside_tss $signer)"
+say jail_signs_without_tss "$(try inside $signer)"
 say jail_sees_pid1 "$(try inside test -e /proc/1/status)"
 say jail_sees_itself_control "$(try inside test -e /proc/$pid/status)"
 say listening "$(ss -Hltun | awk '{print $1 "/" $5}' | sort -u | tr '\n' ' ')"
 echo exposure
-for u in urban-edge@$unit urban-vision@$unit urban-district@district-x urban-platform urban-power urban-relay ssh; do
+for u in urban-edge@$unit urban-vision@$unit urban-district@district-x urban-lighting@$unit urban-platform urban-power urban-relay ssh; do
   systemd-analyze security --no-pager "$u.service" 2>/dev/null | sed -n "s/.*Overall exposure level for \(\S*\): \([0-9.]*\).*/\1 \2/p"
 done
 """
@@ -1074,20 +1123,272 @@ VISION_SANDBOX = ("MemoryDenyWriteExecute", "NoNewPrivileges", "PrivateDevices",
 
 EXPOSURE_MAX = 3.0  # systemd's scale 0-10; 3.0 or less is what it calls "OK" and better
 
+PKI = "/var/lib/urban/etc/pki"  # the unit's key folder (/etc/urban/pki in the service's own view)
+SIGNER = "/opt/urban/.venv/bin/python -m urban.devices.signer"
 
-def hardened():
-    """An intruder on a junction unit. As root: no kernel memory, no other process's memory (the unit's key lives
-    in its service), no loading another kernel, no core dumps. As the hijacked unit service: no maintenance keys,
-    no boot files, nothing writable but its own key folder, no other process. Every probe has a control that must
-    succeed. Every network-facing URBAN service sandboxed to systemd's 'OK' or better. SSH: modern cryptography
-    only. Nothing listens but SSH."""
-    unit = "edge-J-09"
-    vm = VM("hardened", unit=unit, serial="URB-9")
+# the directives of a unit's service that the sandbox replay copies from its unit file (read at run time, so the
+# replay cannot drift from the real unit); everything else of the unit (what it runs, its restarts) is left out
+SERVICE_SANDBOX = (
+    "User", "Group", "WorkingDirectory", "NoNewPrivileges", "ProtectSystem", "ReadWritePaths", "InaccessiblePaths",
+    "ProtectHome", "PrivateTmp", "PrivateDevices", "DevicePolicy", "DeviceAllow", "SupplementaryGroups",
+    "ProtectKernelTunables", "ProtectKernelModules", "ProtectKernelLogs", "ProtectControlGroups", "ProtectClock",
+    "ProtectHostname", "ProtectProc", "ProcSubset", "RestrictAddressFamilies", "RestrictNamespaces", "RestrictRealtime",
+    "RestrictSUIDSGID", "LockPersonality", "MemoryDenyWriteExecute", "RemoveIPC", "KeyringMode",
+    "SystemCallArchitectures", "SystemCallFilter", "SystemCallErrorNumber", "CapabilityBoundingSet",
+    "AmbientCapabilities", "UMask")
+
+# does `sig` verify as the signature of the message under the public key (either kind)? The clients sign through
+# urban.devices.crypto; a raw ECDSA/SHA-256 check is accepted too, so that the probe does not depend on how the signer
+# frames the text. Prints VERIFIED or BAD.
+VERIFY_SIG = r"""/opt/urban/.venv/bin/python - "$@" <<'PY'
+import sys
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+from urban.devices import crypto
+pub, sig, msg = sys.argv[1:4]
+ok = crypto.verify_text(pub, msg, sig)
+if not ok:
+    try:
+        crypto.load_device_public(pub).verify(bytes.fromhex(sig), msg.encode(), ec.ECDSA(hashes.SHA256()))
+        ok = True
+    except Exception:
+        pass
+print("VERIFIED" if ok else "BAD")
+PY
+"""
+
+# Is there a private key on this machine for the public key `target` (hex)? Every regular file under the given folders
+# (up to 16 MB) is read as: a PEM or DER private key, a raw 32-byte scalar or seed, any 64-hex-digit text token (the
+# way the old key file was written). A scalar or seed counts when it derives `target`. Prints FOUND <path> per hit and
+# SCANNED <n> files. Binary files are searched whole, not by sliding windows: the old key was a file of its own.
+KEY_SCAN = r"""/opt/urban/.venv/bin/python - "$@" <<'PY'
+import os, re, sys
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519
+target = sys.argv[1].lower()
+HEX = re.compile(rb"(?<![0-9a-fA-F])[0-9a-fA-F]{64}(?![0-9a-fA-F])")
+X962 = (serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+RAW = (serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+def derives(raw):
+    try:
+        k = ec.derive_private_key(int.from_bytes(raw, "big"), ec.SECP256R1())
+        if k.public_key().public_bytes(*X962).hex() == target:
+            return True
+    except ValueError:
+        pass
+    try:
+        k = ed25519.Ed25519PrivateKey.from_private_bytes(raw)
+        if k.public_key().public_bytes(*RAW).hex() == target:
+            return True
+    except ValueError:
+        pass
+    return False
+def holds(blob):
+    if len(blob) == 32 and derives(blob):
+        return True
+    for load in (serialization.load_pem_private_key, serialization.load_der_private_key):
+        try:
+            k = load(blob, None)
+            pub = k.public_key()
+            got = pub.public_bytes(*(X962 if isinstance(pub, ec.EllipticCurvePublicKey) else RAW)).hex() if isinstance(
+                pub, (ec.EllipticCurvePublicKey, ed25519.Ed25519PublicKey)) else ""
+            if got == target:
+                return True
+        except Exception:
+            pass
+    return any(derives(bytes.fromhex(t.decode())) for t in HEX.findall(blob))
+n = 0
+for root in sys.argv[2:]:
+    for d, dirs, files in os.walk(root):
+        for name in files:
+            p = os.path.join(d, name)
+            try:
+                if os.path.islink(p) or os.path.getsize(p) > 16 * 2**20:
+                    continue
+                blob = open(p, "rb").read()
+            except OSError:
+                continue
+            n += 1
+            if holds(blob):
+                print("FOUND", p)
+print("SCANNED", n)
+PY
+"""
+
+
+def run_script(vm, script, *args, check=True):
+    """A shell script held in a constant, run on the machine with these arguments ($@ in the script)."""
+    return vm.ssh("bash -c " + shlex.quote(script) + " _ " + " ".join(shlex.quote(a) for a in args), check=check)
+
+
+def service_active(vm, service):
+    return vm.ssh(f"systemctl show -p ActiveState --value {service}").stdout.strip() in ("active", "activating")
+
+
+def replay_args(unit_text, drop=()):
+    """-p arguments for systemd-run that put a command in the same sandbox as the service of this unit file; `drop`:
+    values of directives to leave out (a control: the sandbox without one line). Also: the directives found, by name."""
+    props, found = [], {}
+    in_service = False
+    for line in unit_text.splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            in_service = line == "[Service]"
+            continue
+        m = re.match(r"^(\w+)=(.*)$", line) if in_service and not line.startswith(("#", ";")) else None
+        if m and m.group(1) in SERVICE_SANDBOX:
+            found.setdefault(m.group(1), []).append(m.group(2))
+            if m.group(2) not in drop:
+                props += ["-p", shlex.quote(f"{m.group(1)}={m.group(2)}")]
+    return props, found
+
+
+def key_in_tpm_probes(vm, unit):
+    """The device key is inside the TPM, and what lies on disk is no key. Each 'nothing' has a control that must find
+    something, so that a blind probe cannot pass."""
+    tpm_dir = f"{PKI}/edge/{unit}.tpm"
+    # the console said so, and the screen says so
+    if not any("URBAN-ENROLMENT" in ln and f"unit={unit}" in ln and ln.rstrip().endswith("key=tpm") for ln in vm.lines):
+        raise Fail("the unit's console line URBAN-ENROLMENT does not say key=tpm")
+    screen = vm.ssh("cat /run/urban/console.issue").stdout
+    if not re.search(r"^\s*key\s+\S+ \(in TPM\)\s*$", screen, re.M):
+        raise Fail(f"the unit's screen does not say its key is in the TPM:\n{screen}")
+    # the folder of blobs: private to the service's user; and the only thing in the key folder
+    mode = vm.ssh(f"stat -c '%a %U' {tpm_dir}", check=False).stdout.split()
+    if mode != ["700", "urban"]:
+        raise Fail(f"{tpm_dir} should be a folder (700, urban) of TPM key blobs, stat says {mode or 'nothing'}")
+    entries = vm.ssh(f"stat -c '%n %a %U' {tpm_dir}/*").stdout.split(chr(10))
+    names = {e.split()[0].rsplit('/', 1)[1]: e.split()[1:] for e in entries if e.strip()}
+    if not {"key.pub", "key.priv"} <= set(names) or any(v != ["600", "urban"] for v in names.values()):
+        raise Fail(f"the TPM key folder holds {names}: want key.pub and key.priv (and public.hex), all 600 urban")
+    left = vm.ssh(f"ls -A {PKI}/edge").stdout.split()
+    if left != [f"{unit}.tpm"]:
+        raise Fail(f"the key folder holds {left}, want only {unit}.tpm (a key file left beside the TPM key?)")
+    # no key file of this unit anywhere on the data partition (control: the same search finds a planted one)
+    plant = "/var/lib/urban/.keyprobe"
+    vm.ssh(f"mkdir -p {plant} && echo x > {plant}/{unit}.key")
+    found = vm.ssh(f"find /var/lib/urban -name '{unit}.key'").stdout.split()
+    vm.ssh(f"rm -rf {plant}")
+    if found != [f"{plant}/{unit}.key"]:
+        raise Fail(f"control failed or a key file exists: find for {unit}.key gave {found}, wanted only the planted {plant}/{unit}.key")
+    # no private key in PEM form anywhere on the data partition but the SSH host keys (control: it finds those)
+    pems = vm.ssh("grep -rIl 'PRIVATE KEY' /var/lib/urban 2>/dev/null || true").stdout.split()
+    if not pems:
+        raise Fail("control failed: a search for private keys finds not even the SSH host key")
+    stray = [p for p in pems if not p.startswith("/var/lib/urban/ssh/")]
+    if stray:
+        raise Fail(f"private keys in PEM form on the data partition outside the SSH host keys: {stray}")
+    # nothing on the machine that is the unit's private key in any form (control: the same scan finds a planted
+    # key of a made-up public key, in three forms); the scan covers the data partition and what a service writes
+    pub = vm.ssh(f"{SIGNER} --pki {PKI} --unit {unit} --public").stdout.split()[-1].lower()
+    if not (len(pub) == 130 and pub.startswith("04")):
+        raise Fail(f"the unit's public key is not a P-256 point (TPM key): {pub!r}")
+    folders = ("/var/lib/urban", "/run/urban", "/tmp", "/root", "/etc")
+    control = vm.ssh(
+        "set -e; d=/var/lib/urban/.scanprobe; mkdir -p $d; /opt/urban/.venv/bin/python - $d <<'PY'\n"
+        "import sys\n"
+        "from cryptography.hazmat.primitives import serialization as s\n"
+        "from cryptography.hazmat.primitives.asymmetric import ec\n"
+        "k = ec.generate_private_key(ec.SECP256R1())\n"
+        "d = sys.argv[1]\n"
+        "n = k.private_numbers().private_value.to_bytes(32, 'big')\n"
+        "open(d + '/a.pem', 'wb').write(k.private_bytes(s.Encoding.PEM, s.PrivateFormat.PKCS8, s.NoEncryption()))\n"
+        "open(d + '/b.hex', 'w').write(n.hex() + '\\n')\n"
+        "open(d + '/c.raw', 'wb').write(n)\n"
+        "print(k.public_key().public_bytes(s.Encoding.X962, s.PublicFormat.UncompressedPoint).hex())\n"
+        "PY\n").stdout.split()[-1]
+    seen = run_script(vm, KEY_SCAN, control, "/var/lib/urban/.scanprobe").stdout
+    vm.ssh("rm -rf /var/lib/urban/.scanprobe")
+    hits = sorted(ln.split()[1].rsplit("/", 1)[1] for ln in seen.splitlines() if ln.startswith("FOUND"))
+    if hits != ["a.pem", "b.hex", "c.raw"]:
+        raise Fail(f"control failed: the key scan found {hits} of a planted key's three forms (a.pem, b.hex, c.raw)")
+    seen = run_script(vm, KEY_SCAN, pub, *folders).stdout
+    scanned = int(next((ln.split()[1] for ln in seen.splitlines() if ln.startswith("SCANNED")), "0"))
+    hits = [ln for ln in seen.splitlines() if ln.startswith("FOUND")]
+    if hits or scanned < 50:
+        raise Fail(f"a private key of the unit on the machine: {hits} (scanned {scanned} files; fewer than 50 means a blind scan)")
+    # the blobs are not a key a tool can read (control: the same tool reads a real key)
+    for form in ("PEM", "DER"):
+        r = vm.ssh(f"openssl pkey -inform {form} -in {tpm_dir}/key.priv -noout", check=False)
+        if r.returncode == 0:
+            raise Fail(f"openssl reads {tpm_dir}/key.priv as a {form} private key")
+    if vm.ssh("openssl pkey -in /tmp/pki/ca.key -noout", check=False).returncode != 0:
+        raise Fail("control failed: openssl cannot read an ordinary private key (/tmp/pki/ca.key, made by the stand-in kit)")
+    return pub, scanned
+
+
+def sign_and_verify(vm, pub, command):
+    """`command` (a signer call that prints the signature of 'x') signs, and the signature verifies under `pub` for 'x'
+    and for nothing else (the control that the check can say no)."""
+    r = vm.ssh(command, check=False)
+    sig = r.stdout.split()[-1] if r.returncode == 0 and r.stdout.split() else ""
+    if not sig:
+        raise Fail(f"signing failed: {command}: {(r.stderr or r.stdout).strip()[-300:]}")
+    good = run_script(vm, VERIFY_SIG, pub, sig, "x").stdout.strip()
+    bad = run_script(vm, VERIFY_SIG, pub, sig, "y").stdout.strip()
+    if good != "VERIFIED":
+        raise Fail(f"the signature does not verify under the unit's public key: {good!r} ({command})")
+    if bad != "BAD":
+        raise Fail("control failed: the verifier accepts a signature for another message")
+    return sig
+
+
+def copied_key_is_useless(unit, tar_b64, sums, pub):
+    """The unit's key folder, copied off it, on another machine (its own TPM, its own key): it cannot sign there.
+    Controls: that machine signs with its own key (tools, device and signer work), and the copy arrived intact."""
+    other = VM("hardened-other", unit="edge-J-10", serial="URB-10", ssh_port=2223)
+    try:
+        other.start()
+        other.booted("1", "A")
+        mine = f"{PKI}/edge/edge-J-10.tpm"
+        if other.ssh(f"test -d {mine}", check=False).returncode != 0:
+            raise Fail("the other machine did not make a TPM key of its own")
+        other_pub = other.ssh(f"{SIGNER} --pki {PKI} --unit edge-J-10 --public").stdout.split()[-1].lower()
+        if other_pub == pub:
+            raise Fail("the two machines have the same public key")
+        sign_and_verify(other, other_pub, f"{SIGNER} --pki {PKI} --unit edge-J-10 --sign x")  # control
+        with open("/tmp/stolen.b64", "w") as f:
+            f.write(tar_b64)
+        other.put("/tmp/stolen.b64", "/tmp/stolen.b64")
+        other.ssh("mkdir -p /tmp/stolen && base64 -d /tmp/stolen.b64 | tar -C /tmp/stolen -xf -")
+        got = other.ssh(f"cd /tmp/stolen/edge/{unit}.tpm && sha256sum key.pub key.priv").stdout
+        if got.strip() != sums.strip():
+            raise Fail("control failed: the copied blobs are not the unit's (checksums differ)")
+        r = other.ssh(f"{SIGNER} --pki /tmp/stolen --unit {unit} --sign x", check=False)
+        text = (r.stdout + r.stderr).strip()
+        if r.returncode == 0:
+            raise Fail(f"the unit's key blobs signed on another machine: {text[-200:]}")
+        if not re.search(r"tpm2_\w+ failed", text):  # the signer's words for a TPM command that refused (here: tpm2_load)
+            raise Fail(f"the copy failed to sign for a reason that is not a refusal by the TPM: {text[-300:]}")
+        return text.splitlines()[-1][:160] if text else "(no message)"
+    finally:
+        other.stop()
+        if os.path.exists(other.disk):
+            os.remove(other.disk)
+
+
+def hardened(kind="unit"):
+    """An intruder on a junction unit (kind unit) or on a street-lighting cabinet (kind lighting). As root: no kernel
+    memory, no other process's memory (the service holds the key's session), no loading another kernel, no core dumps,
+    and no key to take away: the device key is made inside the TPM, what lies on disk is a wrapped blob that signs
+    nowhere but on this machine. As the hijacked service: no maintenance keys, no boot files, nothing writable but its
+    own folders, no other process, no rauc install or reboot; it can still sign with the TPM (it is the unit), and no
+    other urban process can. Every probe has a control that must succeed. Every network-facing URBAN service sandboxed
+    to systemd's 'OK' or better. SSH: modern cryptography only. Nothing listens but SSH."""
+    lighting = kind == "lighting"
+    if kind not in ("unit", "lighting"):
+        raise Fail(f"hardened: unknown kind {kind!r} (unit or lighting)")
+    unit = "light-C-09" if lighting else "edge-J-09"
+    service = f"urban-lighting@{unit}" if lighting else f"urban-edge@{unit}"
+    who = "cabinet" if lighting else "unit"
+    vm = (VM("hardened-lighting", unit=unit, serial="URB-L9", module="lighting", mem=1024) if lighting
+          else VM("hardened", unit=unit, serial="URB-9"))
     try:
         vm.start()
         vm.booted("1", "A")
         vm.wait_ssh()
-        vm.ssh(STAND_KIT.replace("UNIT", unit))
+        vm.ssh(stand_kit(unit, kind="lighting", cabinet="C-09", lon=71.78, lat=40.39, junction=None) if lighting
+               else stand_kit(unit))
         r = vm.ssh(f"urban-unit setup {STAGE}/kit.json", check=False)
         if r.returncode != 0:
             raise Fail(f"urban-unit setup: {(r.stderr or r.stdout).strip()[-300:]}")
@@ -1097,13 +1398,20 @@ def hardened():
         vm.put("/tmp/probe.raucb", f"{STAGE}/probe.raucb")
         vm.ssh(f"install -m 600 -o urban -g urban {STAGE}/probe.raucb /var/lib/urban/update-inbox/probe.raucb "
                f"&& rm -f {STAGE}/probe.raucb")
-        if not running(vm, unit):
-            raise Fail(f"urban-edge@{unit} does not run in its sandbox: "
-                       + vm.ssh(f"journalctl -u urban-edge@{unit} --no-pager -n 15 -o cat", check=False).stdout)
+        if not service_active(vm, service):
+            raise Fail(f"{service} does not run in its sandbox: "
+                       + vm.ssh(f"journalctl -u {service} --no-pager -n 15 -o cat", check=False).stdout)
         # the hardened services share /run/urban (root's, group urban): a root service without capabilities must still
         # write its files there, so the power manager runs, was never restarted, and its files are fresh
         run_dir_shared(vm)
         power_alive(vm)
+        if lighting:  # the cabinet's own status folder is its program's (urban:urban); the junction unit's service has none
+            got = vm.ssh("stat -c '%U:%G %a' /run/urban/light").stdout.strip()
+            if got != "urban:urban 755":
+                raise Fail(f"/run/urban/light is {got!r}, want urban:urban 755")
+        # the device key is in the TPM: on disk only a wrapped blob, no key file, no private key of the unit in any
+        # form on the machine (controls beside each); then the hijacked service and root, below
+        pub, scanned = key_in_tpm_probes(vm, unit)
         out = vm.ssh(ATTACK, check=False).stdout
         seen, exposure, section = {}, {}, None
         for line in out.splitlines():
@@ -1126,6 +1434,12 @@ def hardened():
             "jail_systemctl_control": "yes", "jail_rauc_install": "no", "jail_rauc_mark_good": "no",
             "jail_rauc_mark_bad": "no", "jail_reboot": "no",
             "jail_sees_pid1": "no", "jail_sees_itself_control": "yes",
+            # the cabinet's program may write its status folder (control); a junction unit's service may not
+            "jail_writes_status_dir": "yes" if lighting else "no",
+            # the key is in the TPM: no key file for root to read (control: root reads the SSH host key); the service's
+            # own group tss opens the TPM (control), an urban process without it does not
+            "root_finds_key_file": "no", "root_reads_host_key_control": "yes",
+            "jail_signs_with_tss_control": "yes", "jail_signs_without_tss": "no",
         }
         wrong = {k: (seen.get(k), v) for k, v in want.items() if seen.get(k) != v}
         if "[confidentiality]" not in seen.get("lockdown", ""):
@@ -1152,43 +1466,45 @@ def hardened():
         if wrong:
             raise Fail("an intruder gets more than nothing: " + "; ".join(f"{k}: got {g!r}, want {w!r}" for k, (g, w) in wrong.items()))
         urban = {k: float(v) for k, v in exposure.items() if k.startswith("urban-")}
-        if len(urban) < 6:
+        if len(urban) < 7:
             raise Fail(f"systemd did not rate every URBAN service: {exposure}")
         loose = {k: v for k, v in urban.items() if v > EXPOSURE_MAX}
         if loose:
             raise Fail(f"services exposed above {EXPOSURE_MAX}: {loose}")
-        # the detector runs inside vision's own sandbox (no executable memory, its system call filter, no devices):
-        # the hardening must not break the work it protects
-        # `systemctl show` prints the values in its own order, so they are read by name
-        shown = dict(line.split("=", 1) for line in vm.ssh(
-            "systemctl show urban-vision@x.service -p MemoryDenyWriteExecute -p NoNewPrivileges -p PrivateDevices "
-            "-p RestrictNamespaces -p LockPersonality").stdout.splitlines() if "=" in line)
-        props = {k: shown.get(k) for k in ("MemoryDenyWriteExecute", "NoNewPrivileges", "PrivateDevices",
-                                           "RestrictNamespaces", "LockPersonality")}
-        if set(props.values()) != {"yes"}:
-            raise Fail(f"vision's sandbox is not what the unit file says: {props}")
-        # the probe replays the sandbox exactly as the unit file (and its drop-ins) states it, so it cannot drift
-        # from the real unit; a directive the unit lost makes the probe fail instead of quietly running looser
-        vision_unit = vm.ssh("systemctl cat urban-vision@x.service").stdout
-        replay, found = [], {}
-        for line in vision_unit.splitlines():
-            line = line.strip()
-            m = None if line.startswith(("#", ";")) else re.match(r"^(\w+)=(.*)$", line)
-            if m and (m.group(1) in VISION_SANDBOX or m.group(1) == "WorkingDirectory"):
-                replay += ["-p", shlex.quote(f"{m.group(1)}={m.group(2)}")]
-                found.setdefault(m.group(1), []).append(m.group(2))
-        lost = [k for k in (*VISION_SANDBOX, "WorkingDirectory") if k not in found]
-        if lost:
-            raise Fail(f"vision's unit no longer states {lost}: the sandbox probe would not be the unit's")
-        infer = vm.ssh(
-            "systemd-run --wait --pipe --collect --quiet --uid=urban --gid=urban " + " ".join(replay) + " "
-            "/opt/urban/.venv/bin/python -c \"import numpy as np, time; from pathlib import Path; "
-            "from urban.vision.detector import YoloxDetector; d = YoloxDetector(Path('/opt/urban/models/yolox_nano.onnx'), threads=1); "
-            "f = np.zeros((480, 640, 3), np.uint8); d.detect(f); t = time.perf_counter(); d.detect(f); "
-            "print('INFER-OK', round((time.perf_counter() - t) * 1000))\"", check=False)
-        if "INFER-OK" not in infer.stdout:
-            raise Fail(f"the detector does not run in vision's sandbox: {(infer.stdout + infer.stderr)[-400:]}")
-        infer_ms = infer.stdout.split("INFER-OK")[1].split()[0]
+        infer_ms, found = None, {}
+        if not lighting:  # (a cabinet has no cameras: vision's own sandbox is the junction unit's business)
+            # the detector runs inside vision's own sandbox (no executable memory, its system call filter, no devices):
+            # the hardening must not break the work it protects
+            # `systemctl show` prints the values in its own order, so they are read by name
+            shown = dict(line.split("=", 1) for line in vm.ssh(
+                "systemctl show urban-vision@x.service -p MemoryDenyWriteExecute -p NoNewPrivileges -p PrivateDevices "
+                "-p RestrictNamespaces -p LockPersonality").stdout.splitlines() if "=" in line)
+            props = {k: shown.get(k) for k in ("MemoryDenyWriteExecute", "NoNewPrivileges", "PrivateDevices",
+                                               "RestrictNamespaces", "LockPersonality")}
+            if set(props.values()) != {"yes"}:
+                raise Fail(f"vision's sandbox is not what the unit file says: {props}")
+            # the probe replays the sandbox exactly as the unit file (and its drop-ins) states it, so it cannot drift
+            # from the real unit; a directive the unit lost makes the probe fail instead of quietly running looser
+            vision_unit = vm.ssh("systemctl cat urban-vision@x.service").stdout
+            replay, found = [], {}
+            for line in vision_unit.splitlines():
+                line = line.strip()
+                m = None if line.startswith(("#", ";")) else re.match(r"^(\w+)=(.*)$", line)
+                if m and (m.group(1) in VISION_SANDBOX or m.group(1) == "WorkingDirectory"):
+                    replay += ["-p", shlex.quote(f"{m.group(1)}={m.group(2)}")]
+                    found.setdefault(m.group(1), []).append(m.group(2))
+            lost = [k for k in (*VISION_SANDBOX, "WorkingDirectory") if k not in found]
+            if lost:
+                raise Fail(f"vision's unit no longer states {lost}: the sandbox probe would not be the unit's")
+            infer = vm.ssh(
+                "systemd-run --wait --pipe --collect --quiet --uid=urban --gid=urban " + " ".join(replay) + " "
+                "/opt/urban/.venv/bin/python -c \"import numpy as np, time; from pathlib import Path; "
+                "from urban.vision.detector import YoloxDetector; d = YoloxDetector(Path('/opt/urban/models/yolox_nano.onnx'), threads=1); "
+                "f = np.zeros((480, 640, 3), np.uint8); d.detect(f); t = time.perf_counter(); d.detect(f); "
+                "print('INFER-OK', round((time.perf_counter() - t) * 1000))\"", check=False)
+            if "INFER-OK" not in infer.stdout:
+                raise Fail(f"the detector does not run in vision's sandbox: {(infer.stdout + infer.stderr)[-400:]}")
+            infer_ms = infer.stdout.split("INFER-OK")[1].split()[0]
         # SSH: an old cipher or key exchange is refused, the modern default works (the control)
         base = ["ssh", "-i", KEY, "-p", "2222", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
                 "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
@@ -1205,9 +1521,9 @@ def hardened():
         offered = {q: sh(["ssh", "-Q", q]).stdout.split() for q in ("cipher", "kex", "key")}
         for what, opt in weak.items():
             name = opt[1].partition("=")[2]
-            kind = {"Ciphers": "cipher", "KexAlgorithms": "kex", "HostKeyAlgorithms": "key"}[opt[1].partition("=")[0]]
-            if name not in offered[kind]:
-                raise Fail(f"control failed: this ssh client has no {kind} {name}, so the probe for {what} proves nothing")
+            alg = {"Ciphers": "cipher", "KexAlgorithms": "kex", "HostKeyAlgorithms": "key"}[opt[1].partition("=")[0]]
+            if name not in offered[alg]:
+                raise Fail(f"control failed: this ssh client has no {alg} {name}, so the probe for {what} proves nothing")
             r = sh([*base, *opt, "root@127.0.0.1", "true"], check=False)
             if r.returncode == 0:
                 raise Fail(f"SSH accepted {what}")
@@ -1215,26 +1531,81 @@ def hardened():
                 raise Fail(f"SSH refused {what}, but not as a failed negotiation: {r.stderr.strip()[-300:]}")
         if sh([*base, "root@127.0.0.1", "true"], check=False).returncode != 0:
             raise Fail("control failed: SSH with the default modern algorithms was refused")
-        print("   root: no /dev/mem, no /proc/kcore, no memory of the unit's process (its own: yes); lockdown "
+        # ---- the TPM key from the inside: the hijacked service in its WHOLE sandbox (the probes above join its file
+        # view only, not its device policy, system call filter or capabilities), and root on the unit
+        unit_text = vm.ssh(f"systemctl cat {service}.service").stdout
+        props, replayed = replay_args(unit_text)
+        lost = [k for k in ("User", "ProtectSystem", "ReadWritePaths", "InaccessiblePaths", "PrivateTmp", "DevicePolicy",
+                            "DeviceAllow", "SupplementaryGroups", "SystemCallFilter", "MemoryDenyWriteExecute",
+                            "CapabilityBoundingSet", "NoNewPrivileges") if k not in replayed]
+        if lost:
+            raise Fail(f"{service}'s unit no longer states {lost}: the sandbox probe would not be the unit's")
+        if "/dev/tpmrm0 rw" not in replayed["DeviceAllow"] or "tss" not in " ".join(replayed["SupplementaryGroups"]).split():
+            raise Fail(f"{service}'s unit does not let the service use the TPM (DeviceAllow=/dev/tpmrm0 rw, SupplementaryGroups=tss)")
+        sandbox = "systemd-run --wait --pipe --collect --quiet " + " ".join(props) + " "
+        sandbox_cmd = f"{SIGNER} --pki /etc/urban/pki --unit {unit} --sign x"  # the service's own view of its key folder
+        sign_and_verify(vm, pub, sandbox + sandbox_cmd)  # the hijacked service CAN sign: it is the unit (control)
+        no_device = " ".join(replay_args(unit_text, drop={"/dev/tpmrm0 rw"})[0]) + " "  # the device policy without the TPM
+        r = vm.ssh("systemd-run --wait --pipe --collect --quiet " + no_device + sandbox_cmd, check=False)
+        if r.returncode == 0:
+            raise Fail("the sandbox signs without DeviceAllow=/dev/tpmrm0: its device policy does not bite")
+        # the same sandbox sees its own key folder (control) and not the maintenance keys, nor the staged updates
+        for what, command, wanted in (
+                ("its own key folder", f"ls /var/lib/urban/etc/pki/edge/{unit}.tpm", True),
+                ("the SSH keys", "cat /var/lib/urban/ssh/authorized_keys", False),
+                ("the staged updates", f"ls {STAGE}", False)):
+            got = vm.ssh(sandbox + "sh -c " + shlex.quote(command), check=False).returncode == 0
+            if got != wanted:
+                raise Fail(f"in {service}'s whole sandbox, reading {what} {'fails' if wanted else 'works'}, want the opposite")
+        # root on this very unit can ask the TPM to sign too (what is left of the old limit: no key leaves the machine)
+        sign_and_verify(vm, pub, f"{SIGNER} --pki {PKI} --unit {unit} --sign x")
+        # the public key of the key in the TPM is the one the unit enrolled with
+        enrolled = [m.group(1) for ln in vm.lines if "URBAN-ENROLMENT" in ln and f"unit={unit} " in ln
+                    for m in [re.search(r"fingerprint=(\S+)", ln)] if m]
+        fp = hashlib.sha256(bytes.fromhex(pub)).hexdigest()[:16].upper()
+        if not enrolled or enrolled[-1] != "-".join(fp[i:i + 4] for i in range(0, 16, 4)):
+            raise Fail(f"the TPM key's fingerprint is not the one the unit printed ({enrolled} vs {fp})")
+        # the unit's key folder, to be tried on another machine; the unit is switched off first (one machine at a time)
+        tar_b64 = vm.ssh(f"tar -C {PKI} -cf - edge/{unit}.tpm | base64 -w0").stdout.strip()
+        sums = vm.ssh(f"cd {PKI}/edge/{unit}.tpm && sha256sum key.pub key.priv").stdout
+        if not tar_b64 or "key.priv" not in sums:
+            raise Fail("could not read the unit's key folder to copy it")
+        vm.stop()
+        refusal = copied_key_is_useless(unit, tar_b64, sums, pub)
+
+        print(f"   root: no /dev/mem, no /proc/kcore, no memory of the {who}'s process (its own: yes); lockdown "
               "confidentiality; ptrace off for all", flush=True)
-        print("   hijacked unit service: no SSH keys, no boot files, no writes outside its key folder and the update inbox "
-              "(both: yes), no other process; rauc install, rauc status mark-good/mark-bad and systemctl reboot "
-              "refused (their controls run: yes)", flush=True)
-        key_known = {"yes": "root CAN read the unit's private key on a running unit",
-                     "no": "root could not read the unit's key (better than expected)"}.get(seen.get("root_reads_unit_key_known_limit"),
-                                                                                           "the key probe gave no answer")
-        print(f"   KNOWN LIMIT (documented, not a failure): {key_known}; the TPM protects the disk at rest, "
-              "not a root shell on a running unit", flush=True)
+        if lighting:
+            print("   hijacked cabinet service: no SSH keys, no boot files, no writes outside its key folder, the update inbox "
+                  "and /run/urban/light (all three: yes), no other process; rauc install, rauc status mark-good/mark-bad "
+                  "and systemctl reboot refused (their controls run: yes)", flush=True)
+        else:
+            print("   hijacked unit service: no SSH keys, no boot files, no writes outside its key folder and the update inbox "
+                  "(both: yes), none in /run/urban/light, no other process; rauc install, rauc status mark-good/mark-bad and "
+                  "systemctl reboot refused (their controls run: yes)", flush=True)
+        print(f"   KEY IN THE TPM: {PKI}/edge/{unit}.tpm (700, blobs 600, owner urban) and no {unit}.key anywhere on the data "
+              f"partition (the search finds a planted one); no private key outside the SSH host keys in PEM form; a scan of "
+              f"{scanned} files for the unit's private key in PEM/DER/raw/hex finds none (it finds a planted key in three "
+              "forms); openssl cannot read key.priv (it reads an ordinary key); the screen says (in TPM)", flush=True)
+        print("   THE KEY SIGNS ONLY HERE: the unit signs and the signature verifies under its public key (and fails for another "
+              "message); the hijacked service signs in its whole sandbox (group tss + DeviceAllow=/dev/tpmrm0: without the "
+              "device line it cannot); an urban process without group tss cannot (with it: yes); "
+              f"the key folder copied to a second machine does not sign there ({refusal}) while that machine signs with "
+              "its own key", flush=True)
+        print("   KNOWN LIMIT (documented, not a failure): root on the running unit can use the TPM to sign as the unit, "
+              "while it sits on that machine; it can no longer take the key away", flush=True)
         print("   exposure (systemd, 0 best - 10 worst): " + ", ".join(f"{k.split('@')[0]} {v}" for k, v in sorted(urban.items()))
               + f"; ssh {exposure.get('ssh.service', '?')}", flush=True)
-        print(f"   the detector runs inside vision's sandbox, replayed from its unit file ({', '.join(sorted(found))}): "
-              f"{infer_ms} ms a frame, emulated CPU", flush=True)
+        if infer_ms is not None:
+            print(f"   the detector runs inside vision's sandbox, replayed from its unit file ({', '.join(sorted(found))}): "
+                  f"{infer_ms} ms a frame, emulated CPU", flush=True)
         print("   SSH refuses CBC and non-AEAD ciphers, SHA-1 key exchange and RSA host keys; no SHA-1 MAC configured; "
               "only SSH (tcp 22) and the DHCP client (udp 68) listen", flush=True)
         print("HARDENING CHECK PASSED", flush=True)
     finally:
         vm.stop()
-        os.remove(vm.disk)
+        if os.path.exists(vm.disk):
+            os.remove(vm.disk)
 
 
 def reboots(tpm="on"):
@@ -2209,7 +2580,7 @@ if __name__ == "__main__":
         elif what == "reboots":
             reboots(sys.argv[2] if len(sys.argv) > 2 else "on")
         elif what == "hardened":
-            hardened()
+            hardened(sys.argv[2] if len(sys.argv) > 2 else "unit")
         elif what == "measure":
             measure(sys.argv[2] if len(sys.argv) > 2 else "now")
         elif what == "chain":

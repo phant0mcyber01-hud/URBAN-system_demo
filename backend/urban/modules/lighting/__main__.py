@@ -15,6 +15,7 @@ import ssl
 from pathlib import Path
 
 from ... import config as c
+from ...devices.signer import SignerError
 from ...edge.update import make_updater
 from .device import EmulatedAdapter, LightingCabinet, RelayAdapter
 from .session import CabinetSession, build_tls, load_trust
@@ -41,7 +42,7 @@ def build(args) -> CabinetSession:
     pki = Path(args.pki)
     try:
         key, gateway_public, root_public = load_trust(pki, unit, args.key, args.gateway_pub, args.root)
-    except (OSError, ValueError) as err:
+    except (OSError, ValueError, SignerError) as err:
         raise SystemExit(f"{unit}: the device key or the centre's keys cannot be read ({err}); enrol first: "
                          f"python -m urban.edge --keygen --unit {unit}")
     try:

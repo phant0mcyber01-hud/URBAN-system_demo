@@ -63,6 +63,11 @@ const teamAll = Object.values(team).join(" ");
 if (!/lighting/.test(teamAll) || !/Core\.send|ядр/i.test(teamAll) || !/модул/i.test(teamAll))
   problems.push("team deck does not show the module core and the lighting module");
 
+// step 5: root on a unit no longer takes the unit's key away; the team deck says the key is in the chip
+const intruder = team.intruder || "";
+if (/ключ блока, до отзыва/.test(intruder)) problems.push("team intruder slide still says root takes the unit's key");
+if (!/TPM|чип/.test(intruder)) problems.push("team intruder slide does not say the key is in the chip");
+
 if (problems.length) {
   for (const p of problems) console.log(`FAIL ${p}`);
   process.exit(1);

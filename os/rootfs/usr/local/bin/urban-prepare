@@ -19,7 +19,6 @@ install -d -m 750 -o urban -g urban "$D/etc/pki" "$D/etc/pki/edge"
 install -d -m 700 "$D/ssh"
 install -d -m 755 -o root -g root /run/urban  # root's live state (tmpfiles.d/urban.conf says the same)
 install -d -m 755 -o urban-vision -g urban /run/urban/q  # the only place vision writes: its queue lengths
-install -d -m 755 -o urban -g urban /run/urban/light  # the only place the lighting program writes: its state (a screen line)
 install -d -m 700 "$D/update"  # update bundles are staged here: the root is read-only, /tmp is small
 [ -f "$D/ssh/ssh_host_ed25519_key" ] || ssh-keygen -q -t ed25519 -N '' -f "$D/ssh/ssh_host_ed25519_key" -C urban-edge
 
@@ -102,6 +101,9 @@ VISION=$(sed -n 's/^VISION=//p' "$D/etc/unit.conf")
 MODULE=$(sed -n 's/^MODULE=//p' "$D/etc/unit.conf")
 hostname "$UNIT"  # /etc/hostname is read-only; the name is this machine's own
 echo "URBAN-ROLE role=$ROLE name=$UNIT${MODULE:+ module=$MODULE}${VISION:+ vision=$VISION}${CENTER:+ center=$CENTER}"
+# the only place the lighting program writes (its state, a screen line): on a lighting cabinet only, so that no
+# other machine has a folder its unit service could write to
+if [ "$MODULE" = lighting ]; then install -d -m 755 -o urban -g urban /run/urban/light; else rm -rf /run/urban/light; fi
 
 # The inbox for updates the control centre delivers (roles unit and district): the sandboxed client (user urban)
 # downloads the package here and writes request.json; urban-update.service (root) takes the package out of it and
@@ -125,15 +127,31 @@ esac
 # kernel (its own nat table and one forward rule), so no port of this machine answers its units at all
 
 case "$ROLE" in unit|district)  # a unit and a district have a key of their own and enrol with a code (the pilot's centre has neither)
+  # The device key: made inside the TPM when the machine has one (a folder <unit>.tpm of TPM-wrapped blobs that no
+  # other machine can use), else an Ed25519 file <unit>.key (--tpm auto). Never replaced once there.
   KEY="$D/etc/pki/edge/$UNIT.key"
-  if [ ! -f "$KEY" ]; then
-    /opt/urban/.venv/bin/python -m urban.edge --keygen --unit "$UNIT" --serial "$SERIAL" --pki "$D/etc/pki" > "$D/etc/enrolment.txt"
+  TPMKEY="$D/etc/pki/edge/$UNIT.tpm"
+  if [ ! -f "$KEY" ] && [ ! -d "$TPMKEY" ]; then
+    # the TPM's device node can appear a moment after the data partition (the driver loads, then udev names it): wait
+    # for it where the kernel says there is a TPM, so that the key is not made as a file for lack of a few seconds
+    if [ -e /sys/class/tpm/tpm0 ]; then
+      for _ in $(seq 1 50); do [ -c /dev/tpmrm0 ] && break; sleep 0.2; done
+    fi
+    /opt/urban/.venv/bin/python -m urban.edge --keygen --unit "$UNIT" --serial "$SERIAL" --pki "$D/etc/pki" --tpm auto > "$D/etc/enrolment.txt"
+  fi
+  # the key folder / file belongs to the service's user alone (urban); the blobs and the file are private to it
+  if [ -d "$TPMKEY" ]; then
+    chown -R urban:urban "$TPMKEY"
+    chmod 700 "$TPMKEY"
+    find "$TPMKEY" -type f -exec chmod 600 {} +
+  elif [ -f "$KEY" ]; then
     chown urban:urban "$KEY"
     chmod 600 "$KEY"
   fi
+  if [ -d "$TPMKEY" ]; then keyin=tpm; else keyin=file; fi
   fingerprint=$(sed -n 's/^fingerprint: *\([0-9A-F-]*\).*/\1/p' "$D/etc/enrolment.txt")
   code=$(grep -o 'URBAN1:[^[:space:]]*' "$D/etc/enrolment.txt" || true)
-  echo "URBAN-ENROLMENT unit=$UNIT serial=${SERIAL:--} fingerprint=$fingerprint code=$code" ;;
+  echo "URBAN-ENROLMENT unit=$UNIT serial=${SERIAL:--} fingerprint=$fingerprint code=$code key=$keyin" ;;
 esac
 /usr/local/bin/urban-console  # the same, on the machine's own screen
 

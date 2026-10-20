@@ -27,13 +27,17 @@ ReadWritePaths=/etc/urban/pki -/var/lib/urban/update-inbox
 InaccessiblePaths=-/var/lib/urban/ssh -/var/lib/urban/update -/var/lib/urban/rauc -/var/lib/urban/platform -/boot
 ProtectHome=yes
 PrivateTmp=yes
-# controllers on a serial line or a GPIO relay board: those devices only (and the group that owns serial ports)
+# controllers on a serial line or a GPIO relay board: those devices only (and the group that owns serial ports);
+# and the TPM's resource manager, through which the unit signs with its device key (the key never leaves the chip;
+# group tss owns /dev/tpmrm0, os/rootfs/etc/udev/rules.d/60-urban-tpm.rules). A machine without a TPM has no such
+# device and the line does nothing. tpm2-tools keep their scratch files in the private /tmp above.
 DevicePolicy=closed
 DeviceAllow=char-ttyUSB rw
 DeviceAllow=char-ttyACM rw
 DeviceAllow=char-ttyS rw
 DeviceAllow=char-gpiochip rw
-SupplementaryGroups=dialout
+DeviceAllow=/dev/tpmrm0 rw
+SupplementaryGroups=dialout tss
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes

@@ -36,8 +36,8 @@ def test_keygen_on_the_unit_then_enrol_the_public_half(tmp_path, field_pki, caps
     code = parse_code(next(line for line in out.splitlines() if "URBAN1:" in line))
     public = code["public"]
     assert code["device"] == "edge-J-01" and code["serial"] == "URB-0001"
-    with pytest.raises(SystemExit):
-        keygen(args)  # never overwrites
+    keygen(args)  # idempotent: the key that is there is reused, never replaced
+    assert code["public"] in capsys.readouterr().out
     key = crypto.load_private((unit_pki / "edge" / "edge-J-01.key").read_text())
     assert crypto.public_hex(key) == public and crypto.fingerprint(public) in out
 

@@ -26,6 +26,7 @@ from pathlib import Path
 import websockets
 
 from ..devices import crypto
+from ..devices.signer import SignerError, load_signer
 from ..devices.trust import GatewayTrust
 from ..edge.__main__ import read_sensors
 from ..edge.device import VERSION, envelope_refusal
@@ -145,7 +146,10 @@ class District:
     def __init__(self, args):
         pki = Path(args.pki)
         self.id = args.unit
-        key = crypto.load_private(Path(args.key or pki / "edge" / f"{self.id}.key").read_text())
+        try:
+            key = load_signer(pki, self.id, Path(args.key) if args.key else None)  # its TPM key, else its Ed25519 file
+        except (OSError, ValueError, SignerError) as err:
+            raise SystemExit(f"{self.id}: the device key cannot be read ({err}); make it first: python -m urban.edge --keygen --unit {self.id}")
         gw_path = Path(args.gateway_pub or pki / "gateway.pub")
         gateway_public = crypto.load_public(gw_path.read_text()) if gw_path.exists() else None
         root_path = Path(args.root or pki / "root.pub")
@@ -186,7 +190,7 @@ class District:
                     challenge = json.loads(await ws.recv())
                     if not isinstance(challenge, dict):
                         raise ConnectionError("no challenge")
-                    await ws.send(json.dumps(self.dev.hello(challenge["nonce"])))
+                    await ws.send(json.dumps(await asyncio.to_thread(self.dev.hello, challenge["nonce"])))  # a TPM signs in a subprocess
                     welcome = json.loads(await ws.recv())
                     if not isinstance(welcome, dict) or welcome.get("type") != "welcome":
                         raise ConnectionError("not welcome")
@@ -203,6 +207,8 @@ class District:
             except websockets.ConnectionClosed as err:
                 code = err.rcvd.code if err.rcvd is not None else None
                 print(f"district: session closed ({code}), reconnecting", flush=True)
+            except SignerError as err:
+                print(f"district: cannot sign with the device key ({err}), retrying", flush=True)
             except (OSError, websockets.WebSocketException, ConnectionError, json.JSONDecodeError, KeyError,
                     TypeError, AttributeError) as err:
                 print(f"district: centre unreachable ({err.__class__.__name__}), retrying", flush=True)

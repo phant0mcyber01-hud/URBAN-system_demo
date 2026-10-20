@@ -30,8 +30,11 @@ rauc,rauc-service,netbase,grub-common,openssh-server,nftables,python3,python3-ve
 e2fsprogs,dosfstools,util-linux,fdisk,procps,libglib2.0-0,libgomp1,firmware-realtek,intel-microcode,amd64-microcode"
 # packages added later go on top of the cached base (a few MB to fetch, not the whole system again):
 # cryptsetup and the TPM 2.0 libraries - the data partition is LUKS2 with its key sealed in the machine's TPM
-# (systemd-cryptenroll / systemd-cryptsetup load libtss2 at run time)
-EXTRA_PACKAGES="cryptsetup-bin libcryptsetup12 libtss2-esys-3.0.2-0 libtss2-mu0 libtss2-rc0 libtss2-tcti-device0"
+# (systemd-cryptenroll / systemd-cryptsetup load libtss2 at run time); tpm2-tools: the device key of every unit,
+# district and lighting cabinet is made inside the TPM and signs there (urban.devices.signer drives tpm2_createprimary,
+# tpm2_create, tpm2_load, tpm2_sign). Its other libraries (libtss2-sys1, -fapi1, -tctildr0, libcurl4, ...) are Depends
+# of the package and come with it; libtss2-tcti-device0 (the /dev/tpmrm0 transport) is listed above
+EXTRA_PACKAGES="cryptsetup-bin libcryptsetup12 libtss2-esys-3.0.2-0 libtss2-mu0 libtss2-rc0 libtss2-tcti-device0 tpm2-tools"
 # real mini-PCs: Realtek network chips want their firmware, and the CPU its microcode fixes (Debian's
 # non-free-firmware section, redistributable); Intel network chips need nothing
 ESP_MB=128; SLOT_MB=1536; DATA_MB=2048  # data: keys, kit, cameras and room for one update bundle
@@ -92,7 +95,11 @@ chroot "$ROOT" python3 -m venv /opt/urban/.venv
 chroot "$ROOT" /opt/urban/.venv/bin/pip install --quiet --upgrade pip
 chroot "$ROOT" /opt/urban/.venv/bin/pip install --quiet -e "/opt/urban/backend[edge,vision]"
 chroot "$ROOT" /opt/urban/.venv/bin/python -m compileall -q /opt/urban/backend/urban >/dev/null
-chroot "$ROOT" /opt/urban/.venv/bin/python -c "import urban.edge.__main__, urban.vision.__main__, urban.modules.lighting.__main__, cv2, onnxruntime"
+chroot "$ROOT" /opt/urban/.venv/bin/python -c "import urban.edge.__main__, urban.vision.__main__, urban.modules.lighting.__main__, urban.devices.signer, cv2, onnxruntime"
+# the TPM tools the signer drives must be in the image and start (no TPM here: --version never opens a device)
+for t in tpm2_createprimary tpm2_create tpm2_load tpm2_sign; do
+  chroot "$ROOT" "$t" --version >/dev/null || { echo "tpm2-tools: $t does not run in the image" >&2; exit 1; }
+done
 # the control centre's interface (role center): built on the host with `npm run build` in web/
 [ -f /work/web/dist/index.html ] || { echo "web/dist is missing: run npm run build in web/ first" >&2; exit 1; }
 mkdir -p "$ROOT/opt/urban/web"; cp -r /work/web/dist "$ROOT/opt/urban/web/dist"; chmod -R a+rX,go-w "$ROOT/opt/urban/web"
@@ -118,6 +125,11 @@ chmod 755 "$ROOT"/usr/local/bin/urban-*
 chroot "$ROOT" useradd --system --uid 990 --home-dir /var/lib/urban --no-create-home --shell /usr/sbin/nologin urban
 # the camera vision has its own user: same group (it shares its queue file), different uid (no reach into the unit)
 chroot "$ROOT" useradd --system --uid 991 --gid urban --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin urban-vision
+# the group of the TPM's resource manager (/dev/tpmrm0, set by etc/udev/rules.d/60-urban-tpm.rules): the unit, district and
+# cabinet services join it (SupplementaryGroups=tss) to sign with the device key. Whether Debian's TPM packages made it or
+# not, it exists now.
+chroot "$ROOT" getent group tss >/dev/null || chroot "$ROOT" groupadd --system tss
+chroot "$ROOT" getent group tss >/dev/null || { echo "group tss was not made" >&2; exit 1; }
 rm -rf "$ROOT/etc/urban"; ln -s /var/lib/urban/etc "$ROOT/etc/urban"
 mkdir -p "$ROOT/var/lib/urban" "$ROOT/boot/efi"
 rm -f "$ROOT"/etc/ssh/ssh_host_*                       # every unit makes its own at first boot

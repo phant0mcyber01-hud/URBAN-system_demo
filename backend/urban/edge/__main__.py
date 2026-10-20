@@ -15,7 +15,9 @@ Which adapter a controller needs: python -m urban.equipment probe <controller>, 
 Trust: the unit carries the platform's ca.pem (whose TLS it accepts) and root.pub (whose gateway key it
 obeys; the key itself comes in a certificate at session start, and rotations follow, never back).
 Before the first start the unit makes its own key; only the public half leaves it, inside an enrolment code:
-    python -m urban.edge --keygen --unit edge-J-21 --serial URB-0042 [--pki /etc/urban/pki]
+    python -m urban.edge --keygen --unit edge-J-21 --serial URB-0042 [--pki /etc/urban/pki] [--tpm auto|require|off]
+With a TPM 2.0 the key is born inside the chip (ECDSA P-256; only a TPM-wrapped blob lies on disk, see
+devices/signer.py), otherwise it is an Ed25519 file; the code is the same, and the output says `key: tpm` or `key: file`.
 The administrator pastes the code in the UI (Устройства -> Подключить блок) and downloads the unit's kit;
 on the unit it goes in place with one command (writes ca.pem, root.pub and /etc/urban/edge-<unit>.env):
     python -m urban.edge --setup urban-edge-J-21.json --unit edge-J-21 [--pki /etc/urban/pki]
@@ -46,7 +48,9 @@ import websockets
 from .. import config as c
 from ..devices import crypto
 from ..devices.enrolment import install_kit, load_kit, make_code
+from ..devices import signer as signer_mod
 from ..devices.registry import device_id
+from ..devices.signer import SignerError, load_signer
 from ..equipment.adapter import NoController
 from ..equipment.endpoint import parse_endpoint  # noqa: F401  (kept importable from here)
 from ..equipment.modbus import ModbusRelayBoard
@@ -79,7 +83,7 @@ class Fleet:
             scripts[junctions[7]["tls"]] = {"door": (420, 500)}
         for j in junctions:
             ident = device_id(j["id"])
-            key = crypto.load_private((c.PKI / "edge" / f"{ident}.key").read_text())
+            key = load_signer(c.PKI, ident)  # the demo keys are files; a TPM key would be picked up too
             self.devices[j["tls"]] = EdgeDevice(ident, j["tls"], key, gateway_public, adapter,
                                                 state_path=c.PKI / "edge" / f"{ident}.seq",
                                                 script=scripts.get(j["tls"]), root_public=root_public,
@@ -294,7 +298,10 @@ class Unit:
     def __init__(self, args):
         pki = Path(args.pki)
         self.id = args.unit
-        key = crypto.load_private(Path(args.key or pki / "edge" / f"{self.id}.key").read_text())
+        try:
+            key = load_signer(pki, self.id, Path(args.key) if args.key else None)  # its TPM key, else its Ed25519 file
+        except (OSError, ValueError, SignerError) as err:
+            raise SystemExit(f"{self.id}: the device key cannot be read ({err}); make it first: python -m urban.edge --keygen --unit {self.id}")
         gw_path = Path(args.gateway_pub or pki / "gateway.pub")
         gateway_public = crypto.load_public(gw_path.read_text()) if gw_path.exists() else None
         root_path = Path(args.root or pki / "root.pub")
@@ -332,7 +339,8 @@ class Unit:
                     challenge = json.loads(await ws.recv())
                     if not isinstance(challenge, dict):
                         raise ConnectionError("no challenge")
-                    await ws.send(json.dumps(self.dev.hello(challenge["nonce"])))
+                    # a TPM signs in a subprocess: off the event loop, so the unit's clock keeps ticking meanwhile
+                    await ws.send(json.dumps(await asyncio.to_thread(self.dev.hello, challenge["nonce"])))
                     welcome = json.loads(await ws.recv())
                     if not isinstance(welcome, dict) or welcome.get("type") != "welcome":
                         raise ConnectionError("not welcome")
@@ -352,6 +360,8 @@ class Unit:
             except websockets.ConnectionClosed as err:
                 code = err.rcvd.code if err.rcvd is not None else None
                 print(f"edge: {CLOSED.get(code, f'session closed ({code})')}, reconnecting", flush=True)
+            except SignerError as err:  # the TPM did not sign (busy, stuck): the unit stays itself and tries again
+                print(f"edge: cannot sign with the device key ({err}), retrying", flush=True)
             except (OSError, websockets.WebSocketException, ConnectionError, json.JSONDecodeError, KeyError,
                     TypeError, AttributeError) as err:
                 print(f"edge: platform unreachable ({err.__class__.__name__}), retrying", flush=True)
@@ -366,21 +376,56 @@ class Unit:
 
 
 def keygen(args):
-    """Make this unit's key on the unit. Refuses to overwrite one: a new key means re-enrolment."""
+    """Make this unit's key on the unit and print its enrolment code. A machine with a TPM 2.0 makes it inside the TPM
+    (ECDSA P-256, the private half never leaves the chip); any other keeps an Ed25519 file. --tpm: auto (the TPM when
+    there is one; if making the TPM key fails, the file, said in one line), require (fail without a TPM), off (the file).
+    Idempotent: a key that exists, of either kind, is reused and never replaced or doubled; a new key means re-enrolment,
+    so remove the old one on purpose."""
     if not args.unit:
         raise SystemExit("--keygen needs --unit <device id>, e.g. edge-J-21")
-    path = Path(args.key or Path(args.pki) / "edge" / f"{args.unit}.key")
-    if path.exists():
-        raise SystemExit(f"{path} exists; remove it on purpose if this unit really needs a new key")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    key = crypto.new_key()
-    path.write_text(crypto.private_hex(key))
+    mode = getattr(args, "tpm", None) or "auto"
+    pki = Path(args.pki)
+    path = Path(args.key) if args.key else pki / "edge" / f"{args.unit}.key"
+    tpm_dir = pki / "edge" / f"{args.unit}.tpm"
+    if tpm_dir.is_dir():
+        kind, note = "tpm", None
+    elif path.exists():
+        kind, note = "file", None
+    else:
+        kind, note = None, None
+    if kind == "file" and mode == "require":
+        raise SystemExit(f"--tpm require: {path} is an Ed25519 file key, not a TPM key; remove it on purpose and "
+                         "enrol again if this unit should use its TPM")
+    if kind is None:
+        want_tpm = mode != "off" and not args.key  # an explicit --key path is a file key
+        if mode == "require" and not signer_mod.tpm_present():
+            raise SystemExit(f"--tpm require: no TPM here ({signer_mod.TPM_DEVICE} and {signer_mod.TPM_TOOL} are needed)")
+        if want_tpm and signer_mod.tpm_present():
+            try:
+                signer_mod.create_tpm_key(tpm_dir)
+                kind = "tpm"
+            except SignerError as err:
+                reason = " ".join(str(err).split())[:200]
+                if mode == "require":
+                    raise SystemExit(f"--tpm require: the TPM key could not be made: {reason}")
+                note = f"key: file (TPM key failed: {reason})"
+        if kind is None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(crypto.private_hex(crypto.new_key()))
+            try:
+                path.chmod(0o600)
+            except OSError:
+                pass
+            kind = "file"
     try:
-        path.chmod(0o600)
-    except OSError:
-        pass
-    public = crypto.public_hex(key)
-    print(f"private key: {path} (stays on this unit)")
+        public = load_signer(pki, args.unit, path if args.key else None).public()
+    except (OSError, ValueError, SignerError) as err:
+        raise SystemExit(f"the key of {args.unit} cannot be read: {err}")
+    if kind == "tpm":
+        print(f"private key: inside the TPM; {tpm_dir} holds only the TPM-wrapped blob, useless on any other machine")
+    else:
+        print(f"private key: {path} (stays on this unit)")
+    print(note or f"key: {kind}")
     print(f"fingerprint: {crypto.fingerprint(public)}   <- the administrator must see the same one")
     print("enrolment code (paste it in the UI: Устройства -> Подключить блок):")
     print(f"\n    {make_code(args.unit, args.serial, public)}\n")
@@ -407,6 +452,9 @@ def main():
     ap = argparse.ArgumentParser(description="URBAN Edge units")
     ap.add_argument("--keygen", action="store_true", help="make this unit's key and print its enrolment code, then exit")
     ap.add_argument("--serial", default="", help="--keygen: the serial number printed on the box")
+    ap.add_argument("--tpm", choices=("auto", "require", "off"), default="auto",
+                    help="--keygen: where the key lives: auto = in the TPM 2.0 if there is one (ECDSA P-256, never leaves "
+                         "the chip), else an Ed25519 file; require = fail without a TPM; off = the file")
     ap.add_argument("--setup", metavar="KIT", help="put the kit downloaded from the platform in place, then exit")
     ap.add_argument("--env", help="--setup: the unit's env file (default: next to the pki folder, edge-<unit>.env)")
     ap.add_argument("--only", help="demo fleet: run a single unit, by junction id (for example J-21)")

@@ -1,64 +1,60 @@
-# Gates: City OS core and modules; street lighting as the second module
+# Gates: the device key lives inside the TPM; the lighting cabinet faces the intruder check too
 
-OWNS: backend/**, web/src/**, os/**, deploy/**, docs/**, tools/**, GATES.md, CONTEXT.md, README.md
+OWNS: backend/**, os/**, deploy/**, docs/**, tools/**, GATES.md, CONTEXT.md, README.md
 
-Scope: step 4. URBAN is a City OS (the owner's wording): one core and modules for city services. The core gets a
-module interface (backend/urban/modules/base.py) and a module registry (MODULES, GET /api/modules); traffic is
-registered as the first module without rewriting it; street lighting (lighting) is the second, built on the core
-only: lighting cabinets enrol like units, report their state, and obey signed, time-limited commands from operators
-(set a level for 1-720 minutes), returning to their own astronomical schedule when a lease runs out or the link is
-lost. The design is docs/city-os-modules.md. Utilities and emergency modules stay plans. The step-3 ledger is
-archived in docs/gates/2026-10-19-ota-step3.md.
+Scope: step 5. Until now a device's identity key was a file (Ed25519) on its encrypted data partition: root on a
+running unit could copy it and impersonate that unit from anywhere until it was revoked (the red row of the intruder
+table). Now a machine with a TPM 2.0 makes its key inside the TPM (ECDSA P-256; the TPM does not do Ed25519): the
+private key never leaves the chip, what lies on disk is a TPM-wrapped blob that no other machine can use, and root can
+sign as the unit only while sitting on that very unit. A machine without a TPM keeps the Ed25519 file. Both kinds
+enrol with the same code (the public key's length tells them apart: 64 hex Ed25519, 130 hex P-256), the centre
+verifies both, and every client (unit, district, lighting cabinet) signs through one signer. The lighting cabinet
+also goes through the intruder check. The step-4 ledger is archived in docs/gates/2026-10-19-modules-step4.md.
 
 - [x] G0: this ledger states outcomes that can fail
   CHECK: node C:/Users/DilDa/.claude/skills/unlazy/scripts/gate-lint.mjs GATES.md
   EXPECT: LINT OK
-  EVIDENCE: automatic-evidence=v1; definition-sha256=495aef5e665131d49faba79374b9a7b244c9abc642d22fb4f40ac5ea8b723f19; exit=0; EXPECT=matched; output-sha256=c05ea7298e62ec2d13e7423382e035436184366558f6c59966d4c946ec5c9952; output-bytes=404; shell=C:\WINDOWS\system32\cmd.exe; cwd=D:\Claude\URBAN-system; path=88406f20ec23/51 entries
+  EVIDENCE: automatic-evidence=v1; definition-sha256=495aef5e665131d49faba79374b9a7b244c9abc642d22fb4f40ac5ea8b723f19; exit=0; EXPECT=matched; output-sha256=a21b784011640ac96051f109e2e6abec5f3959eb4c5f11937466f6dd49514c42; output-bytes=340; shell=C:\WINDOWS\system32\cmd.exe; cwd=D:\Claude\URBAN-system; path=88406f20ec23/51 entries
 
-- [x] G1: the core loads the modules named in MODULES (traffic and lighting by default, an unknown name refused), GET /api/modules lists them with their summaries, a device report reaches only the module of its device kind, and lighting cabinets enrol, get a kit and are listed like units (provision enroll-lighting)
-  CHECK: node tools/gates/pytest.mjs tests/test_modules.py
+- [x] G1: device keys of both kinds: Ed25519 files and TPM P-256 keys sign and verify, the centre authenticates both and refuses a wrong-kind or forged signature, enrolment codes and kits carry either, every client picks the TPM signer when the unit has one, the TPM signer drives tpm2-tools as specified (checked against a fake runner), and keygen with --tpm auto/require/off behaves as documented
+  CHECK: node tools/gates/pytest.mjs tests/test_device_keys.py
   EXPECT: PYTEST PASSED
-  EVIDENCE: automatic-evidence=v1; definition-sha256=369f0027522087b788e4e43030842017670f62ccdb53ffbb9923141ca561789f; exit=0; EXPECT=matched; output-sha256=a9df4afcfcbb8557d727b8cbb5446f2ae7d003be1e8336b16e4b2a471112dc6b; output-bytes=44; shell=C:\WINDOWS\system32\cmd.exe; cwd=D:\Claude\URBAN-system; path=88406f20ec23/51 entries
+  EVIDENCE: automatic-evidence=v1; definition-sha256=6b8d99f8455153476ec3126cd87d13fec7d14bf724f12ceaefa2f05f1af998ee; exit=0; EXPECT=matched; output-sha256=3f3c8bde2ddf58dba37f9d079abd1d93468bb551d53ab150c33972263be51dce; output-bytes=44; shell=C:\WINDOWS\system32\cmd.exe; cwd=D:\Claude\URBAN-system; path=88406f20ec23/51 entries
 
-- [x] G2: the lighting module at the centre: an operator's override (level, 1-720 minutes, reason) is sent signed to the cabinet and renewed while wanted, then released and audited; a viewer cannot set one; bad input is refused; alerts for failed lamps, an open door, a cabinet offline and a refused command; a cabinet's report is accepted only for its own cabinet and only with sane values
-  CHECK: node tools/gates/pytest.mjs tests/test_lighting.py
-  EXPECT: PYTEST PASSED
-  EVIDENCE: automatic-evidence=v1; definition-sha256=07857d9a56c82f4c2e7ccd58c60b129e8f4c9e79b926853dbba8e545141b8f72; exit=0; EXPECT=matched; output-sha256=4a26941edd903e513f3c81e73e5465565603031849052178eb11aa894e78491e; output-bytes=44; shell=C:\WINDOWS\system32\cmd.exe; cwd=D:\Claude\URBAN-system; path=88406f20ec23/51 entries
-
-- [x] G3: the lighting cabinet's program obeys only a verified command for its own cabinet with a sane level and lease, refuses forged, replayed, stale and foreign ones and says why, returns to its astronomical schedule when the lease runs out or the centre goes silent, and computes sunset and sunrise for Fergana correctly within a few minutes
-  CHECK: node tools/gates/pytest.mjs tests/test_lighting_device.py
-  EXPECT: PYTEST PASSED
-  EVIDENCE: automatic-evidence=v1; definition-sha256=b74761dcd5864fd583008530ad19e7d0901bec95a6eafa9fdf2af99de22eae6d; exit=0; EXPECT=matched; output-sha256=fe8ec3e86c766b7916faf2d26cb77961261f975296df3d66e45ef7a310264119; output-bytes=44; shell=C:\WINDOWS\system32\cmd.exe; cwd=D:\Claude\URBAN-system; path=88406f20ec23/51 entries
-
-- [x] G4: the whole test suite passes, none skipped
+- [x] G2: the whole test suite passes, none skipped
   CHECK: node tools/gates/pytest.mjs
   EXPECT: PYTEST PASSED
-  EVIDENCE: automatic-evidence=v1; definition-sha256=9bfd399191ec244f851e8fc0b2514b369bb16f3d32bef5d5bf99ba40e3f7aad4; exit=0; EXPECT=matched; output-sha256=a663a7a5a07c5bf3bf1d62bd58f93935b97d454fe250806fa576c268c044db70; output-bytes=47; shell=C:\WINDOWS\system32\cmd.exe; cwd=D:\Claude\URBAN-system; path=88406f20ec23/51 entries
+  EVIDENCE: automatic-evidence=v1; definition-sha256=9bfd399191ec244f851e8fc0b2514b369bb16f3d32bef5d5bf99ba40e3f7aad4; exit=0; EXPECT=matched; output-sha256=7fcb2aefa8dfbf24ffeafd9df8c22d5e3b4ffc134505206cc053c5dd1b5ae2d1; output-bytes=47; shell=C:\WINDOWS\system32\cmd.exe; cwd=D:\Claude\URBAN-system; path=88406f20ec23/51 entries
 
-- [x] G5: the interface builds and shows the modules: a module switch, a lighting panel listing cabinets with their state and alerts, and override and release controls for operators only
-  CHECK: node tools/gates/web-modules.mjs
-  EXPECT: WEB MODULES CHECK PASSED
-  EVIDENCE: automatic-evidence=v1; definition-sha256=87fc3849028ece93eedfc6ec1b750406ac0048588116bbf84a455ffbca968a3a; exit=0; EXPECT=matched; output-sha256=0497566382a9ec999c7e4ab73756317b91dedb8c5aca05bd603f03f23ddffffd; output-bytes=25; shell=C:\WINDOWS\system32\cmd.exe; cwd=D:\Claude\URBAN-system; path=88406f20ec23/51 entries
+- [x] G3: in QEMU on a junction unit with a TPM the key is in the TPM: root finds no private key on the machine, the key blobs copied to another machine cannot sign there while the unit itself still signs (the control), and every earlier intruder probe still holds
+  CHECK: node os/tests/check-hardened.mjs
+  EXPECT: HARDENING CHECK PASSED
+  EVIDENCE: automatic-evidence=v1; definition-sha256=534867ad00686c80de4108c8c7cf636e3653fad74d1273380248f3aba24bbec9; exit=0; EXPECT=matched; output-sha256=10019d80f0d28ae2723ebebac7922afcecc71154c27373f8974e2c51fa807815; output-bytes=6327; shell=C:\WINDOWS\system32\cmd.exe; cwd=D:\Claude\URBAN-system; path=88406f20ec23/51 entries
 
-- [x] G6: in QEMU a lighting cabinet (URBAN OS, MODULE=lighting) enrolled at a centre comes online, obeys an operator's override through the centre's API and shows it on its screen, refuses a command meant for another cabinet, and returns to its schedule by itself within 3 minutes after the centre's device listener stops
-  CHECK: node os/tests/check-lighting.mjs
-  EXPECT: LIGHTING CHECK PASSED
-  EVIDENCE: automatic-evidence=v1; definition-sha256=d6a8f8d60e9fad19c73e794c91926382ba13eabf27a9a86d93968a6a2ddaa705; exit=0; EXPECT=matched; output-sha256=fc58590387a86aa7a0fef2c4e5c5b60feef2892bf9ba76fd111c6be0ecf01524; output-bytes=13094; shell=C:\WINDOWS\system32\cmd.exe; cwd=D:\Claude\URBAN-system; path=88406f20ec23/51 entries
+- [x] G4: in QEMU the intruder check also holds on a lighting cabinet: its service jail (no other files, writes only its key folder, the inbox and its status folder, cannot install or reboot), its key in the TPM, nothing listening but SSH
+  CHECK: node os/tests/check-hardened.mjs lighting
+  EXPECT: HARDENING CHECK PASSED
+  EVIDENCE: automatic-evidence=v1; definition-sha256=9e46cb776e9f2e7bed57f6d35a2dbdf7b03f9ec775904b675a95c140d2a5b96d; exit=0; EXPECT=matched; output-sha256=c1271bfb2457bba1d3e816cc14115b1df8a4ad8d03e9756ffa2a32888e7914b5; output-bytes=6166; shell=C:\WINDOWS\system32\cmd.exe; cwd=D:\Claude\URBAN-system; path=88406f20ec23/51 entries
 
-- [x] G7: the chain unit -> district -> centre and updates from the centre still work (traffic as a module changed nothing for them)
+- [x] G5: units and districts with TPM keys enrol by code, come online through the district and update from the centre (the chain and updates end to end)
   CHECK: node os/tests/check-ota.mjs
   EXPECT: OTA CHECK PASSED
-  EVIDENCE: automatic-evidence=v1; definition-sha256=65fadcc4013f3dec2aad4214afa9e14da33aa108667ce997846958fc56075d83; exit=0; EXPECT=matched; output-sha256=95814fe0986d9ea596e3aa00493bd64f4ddbf4e12e66143fb06c32317867ea80; output-bytes=27212; shell=C:\WINDOWS\system32\cmd.exe; cwd=D:\Claude\URBAN-system; path=88406f20ec23/51 entries
+  EVIDENCE: automatic-evidence=v1; definition-sha256=65fadcc4013f3dec2aad4214afa9e14da33aa108667ce997846958fc56075d83; exit=0; EXPECT=matched; output-sha256=1973efa285f27801e32ad84c20f48b2c758f8a66ed629295ded81a886f4faccf; output-bytes=31079; shell=C:\WINDOWS\system32\cmd.exe; cwd=D:\Claude\URBAN-system; path=88406f20ec23/51 entries
 
-- [x] G8: the docs describe the core, the module rules and the lighting module (docs/city-os-modules.md is the guide for writing a module), README and CONTEXT.md record step 4
+- [x] G6: a lighting cabinet with a TPM key enrols, obeys and falls back as in step 4
+  CHECK: node os/tests/check-lighting.mjs
+  EXPECT: LIGHTING CHECK PASSED
+  EVIDENCE: automatic-evidence=v1; definition-sha256=d6a8f8d60e9fad19c73e794c91926382ba13eabf27a9a86d93968a6a2ddaa705; exit=0; EXPECT=matched; output-sha256=682dc0f4ec31811c98e225cbbdd79a4b65fc2d76550c77b4174f6b5e1a9b6c3a; output-bytes=13323; shell=C:\WINDOWS\system32\cmd.exe; cwd=D:\Claude\URBAN-system; path=88406f20ec23/51 entries
+
+- [x] G7: the docs say where the device key lives and what root on a unit can and cannot do now, and CONTEXT.md records step 5
   CHECK: node os/tests/check-docs.mjs
   EXPECT: DOCS CHECK PASSED
   EVIDENCE: automatic-evidence=v1; definition-sha256=7a7eaf5b4aedd293d3eee5e14b8e0be9d4a112f9269b1e8e5579c7c3c552f63e; exit=0; EXPECT=matched; output-sha256=a646cb7131c6775144fa7ec37840cdefac1fd1f1fc2efa0f5726e39a3386d30e; output-bytes=18; shell=C:\WINDOWS\system32\cmd.exe; cwd=D:\Claude\URBAN-system; path=88406f20ec23/51 entries
 
-- [x] G9: the public deck says, in plain words, that street lighting now runs on the same system as the second service; the team deck shows the module core and the lighting module
+- [x] G8: the team deck's intruder table no longer says root takes the unit's key away, and says the key is in the chip; the public deck stays plain
   CHECK: node tools/gates/decks.mjs
   EXPECT: DECKS CHECK PASSED
-  EVIDENCE: automatic-evidence=v1; definition-sha256=52f2c6f03f53d11f16bdf987b5ed61d8a47459962ce35f248b4224940e7fc0e7; exit=0; EXPECT=matched; output-sha256=266a968aa37274d7edc7b004146d73729250097ac90df59ce69a5770115acfd8; output-bytes=138; shell=C:\WINDOWS\system32\cmd.exe; cwd=D:\Claude\URBAN-system; path=88406f20ec23/51 entries
+  EVIDENCE: automatic-evidence=v1; definition-sha256=52f2c6f03f53d11f16bdf987b5ed61d8a47459962ce35f248b4224940e7fc0e7; exit=0; EXPECT=matched; output-sha256=54cc1ca2c17d6d4b70e272f35a161400f6db53ab2b514f881c79da75c5c469b7; output-bytes=138; shell=C:\WINDOWS\system32\cmd.exe; cwd=D:\Claude\URBAN-system; path=88406f20ec23/51 entries
 
-- [x] G10: both decks are right on every slide, rendered at 1920×1080: no text past the 920 px line, nothing clipped or overflowing, every claim matching the repository and its logs
-  EVIDENCE: manual, 2026-10-19. Team deck version 16 (17 slides, docs/deck/project), public deck version 8 (13 slides, docs/deck-public/project). All 30 slides rendered at 1920x1080 and measured in the browser: no text past 920 px (highest flow bottoms: city 913, demo 901, screen 887), nothing clipped or overflowing. Claims checked: «Уличное освещение — работает» / lighting «работает» = G6 passed in QEMU (data/os/logs/gates-step4-b.log) and G2/G3 tests; «Core.send, роли и аудит, обновления из центра» = backend/urban/modules/base.py and docs/city-os-modules.md; water, heat and emergency services are marked as next modules, as in CONTEXT.md.
+- [x] G9: both decks are right on every slide, rendered at 1920×1080, every claim matching the repository and its logs
+  EVIDENCE: manual, 2026-10-20. Team deck version 17 (17 slides), public deck version 8 (13 slides, unchanged in step 5). All 30 slides rendered at 1920x1080 and measured in the browser: no text past 920 px, nothing clipped or overflowing; the changed slide (intruder) ends at 747 px. Claim checked: the row «root на блоке — подпись только здесь, ключ в чипе TPM, его не вынести» = G3 passed in QEMU (data/os/logs/gates-step5-b.log: copied key blobs cannot sign on a second machine, the unit itself signs); the public deck has no technical words (G8).

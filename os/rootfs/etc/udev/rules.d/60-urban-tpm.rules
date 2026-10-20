@@ -1,0 +1,5 @@
+# The TPM's resource manager is for the group tss (root's anyway): the unit, district and cabinet services sign with
+# the device key through it (SupplementaryGroups=tss, DeviceAllow=/dev/tpmrm0 rw). Said here so that it does not depend
+# on which package of the image happens to ship a rule. The raw /dev/tpm0 stays root's: nothing but the system's own
+# disk unlock (systemd-cryptsetup, as root) needs it.
+SUBSYSTEM=="tpmrm", KERNEL=="tpmrm[0-9]*", GROUP="tss", MODE="0660"

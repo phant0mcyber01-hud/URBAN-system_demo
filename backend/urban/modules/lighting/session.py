@@ -19,6 +19,7 @@ from pathlib import Path
 import websockets
 
 from ...devices import crypto
+from ...devices.signer import SignerError, load_signer
 from .device import EmulatedAdapter, LightingCabinet
 
 REPORT_EVERY = 5     # seconds between reports
@@ -86,7 +87,7 @@ class CabinetSession:
                     challenge = json.loads(await ws.recv())
                     if not isinstance(challenge, dict):
                         raise ConnectionError("no challenge")
-                    await ws.send(json.dumps(self.cab.hello(challenge["nonce"])))
+                    await ws.send(json.dumps(await asyncio.to_thread(self.cab.hello, challenge["nonce"])))  # a TPM signs in a subprocess
                     welcome = json.loads(await ws.recv())
                     if not isinstance(welcome, dict) or welcome.get("type") != "welcome":
                         raise ConnectionError("not welcome")
@@ -109,6 +110,8 @@ class CabinetSession:
             except (OSError, websockets.WebSocketException, ConnectionError, json.JSONDecodeError, KeyError,
                     TypeError, AttributeError, ValueError) as err:
                 self.log(f"lighting: centre unreachable ({err.__class__.__name__}), retrying", flush=True)
+            except SignerError as err:  # the TPM did not sign (busy, stuck): try again, the lamps keep their schedule
+                self.log(f"lighting: cannot sign with the device key ({err}), retrying", flush=True)
             except Exception:  # one cabinet's trouble stays its own
                 traceback.print_exc()
             finally:
@@ -126,8 +129,8 @@ def build_tls(pki: Path, ca: Path | None = None) -> ssl.SSLContext:
 
 def load_trust(pki: Path, unit: str, key_path: Path | None = None, gateway_pub: Path | None = None,
                root: Path | None = None):
-    """(device key, gateway public or None, root public or None) from the PKI folder, as a unit does."""
-    key = crypto.load_private(Path(key_path or pki / "edge" / f"{unit}.key").read_text())
+    """(device signer, gateway public or None, root public or None) from the PKI folder, as a unit does."""
+    key = load_signer(pki, unit, Path(key_path) if key_path else None)  # its TPM key, else its Ed25519 file
     gw_path = Path(gateway_pub or pki / "gateway.pub")
     gateway_public = crypto.load_public(gw_path.read_text()) if gw_path.exists() else None
     root_path = Path(root or pki / "root.pub")
@@ -153,7 +156,7 @@ async def run_demo_cabinets(platform_addr: str, server_name: str, ca_path, pki_d
                                   EmulatedAdapter(failed=1 if i == 1 else 0), rec["lon"], rec["lat"],
                                   state_path=pki / "edge" / f"{unit}.seq", root_public=root_public,
                                   gateway_state=pki / "edge" / f"{unit}.gateway.json")
-        except (KeyError, OSError, ValueError, SystemExit) as err:
+        except (KeyError, OSError, ValueError, SystemExit, SignerError) as err:
             print(f"lighting demo: cabinet {rec.get('id')} not started ({err.__class__.__name__}: {err})", flush=True)
             continue
         sessions.append(CabinetSession(cab, f"wss://{platform_addr}/device", context, server_name))

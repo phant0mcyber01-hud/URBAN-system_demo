@@ -19,6 +19,7 @@ import re
 from pathlib import Path
 
 from . import crypto
+from .signer import SignerError, load_signer
 
 PREFIX = "URBAN1"
 KIT_VERSION = 1
@@ -84,7 +85,7 @@ def parse_code(code: str) -> dict:
     if not DEVICE.fullmatch(device) or not SERIAL.fullmatch(serial):
         raise ValueError("в коде неверный номер блока или серийный номер")
     try:
-        crypto.load_public(public)
+        crypto.check_public(public)  # Ed25519 (64 hex) or a TPM's P-256 point (130 hex)
     except ValueError:
         raise ValueError("в коде нет открытого ключа блока")
     return {"device": device, "serial": serial, "public": public}
@@ -185,9 +186,13 @@ def install_kit(kit: dict, unit: str, key_path: Path, pki: Path, env_path: Path)
         raise ValueError("this is not an URBAN unit kit (download it in the UI: Устройства -> the unit -> Комплект)")
     if kit.get("unit") != unit:
         raise ValueError(f"the kit is for {kit.get('unit')}, this unit is {unit}")
-    if not key_path.exists():
-        raise ValueError(f"no key at {key_path}: make it first with --keygen")
-    mine = crypto.fingerprint(crypto.public_hex(crypto.load_private(key_path.read_text())))
+    try:
+        mine = crypto.fingerprint(load_signer(pki, unit, key_path).public())  # a TPM key or the key file
+    except FileNotFoundError:
+        raise ValueError(f"no key for {unit} (looked for {pki / 'edge' / (unit + '.tpm')} and {key_path}): "
+                         "make it first with --keygen")
+    except (SignerError, ValueError, OSError) as err:
+        raise ValueError(f"cannot read the key of {unit}: {err}")
     if mine != kit.get("fingerprint"):
         raise ValueError(f"the kit was made for key {kit.get('fingerprint')}, this unit's key is {mine}: "
                          "enrol this unit's code again and download a new kit")

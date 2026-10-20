@@ -40,7 +40,7 @@ module=$(sed -n 's/^MODULE=//p' /var/lib/urban/etc/unit.conf 2>/dev/null)  # lig
 if [ -z "$unit" ]; then
   unit=none
 elif [ "$role" = unit ]; then
-  [ -f "/var/lib/urban/etc/pki/edge/$unit.key" ] || fail+=("unit $unit has no key")
+  { [ -f "/var/lib/urban/etc/pki/edge/$unit.key" ] || [ -d "/var/lib/urban/etc/pki/edge/$unit.tpm" ]; } || fail+=("unit $unit has no key")
 fi
 # The URBAN software: where its service is meant to run, the proof is that it runs and stays up (a broken update
 # shows here and is rolled back); elsewhere every module must at least be found (no execution, no import cost:
@@ -64,15 +64,19 @@ service_check() {  # $1 unit, $2 what
     warn+=("$2 does not stay up (see journalctl -u $1)")
   fi
 }
-python_ok urban.edge.__main__ urban.node.power urban.node.district urban.platform || fail+=("URBAN software does not start")
+python_ok urban.edge.__main__ urban.node.power urban.node.district urban.platform urban.devices.signer || fail+=("URBAN software does not start")
 systemctl cat urban-edge@check.service >/dev/null 2>&1 || fail+=("urban-edge@ service missing")
 systemctl cat urban-lighting@check.service urban-lighting-screen.timer urban-lighting-screen.service >/dev/null 2>&1 || fail+=("lighting services missing")
 systemctl cat urban-relay.service urban-district@check.service >/dev/null 2>&1 || fail+=("district services missing")
 if [ "$role" = district ]; then
-  [ -f "/var/lib/urban/etc/pki/edge/$unit.key" ] || fail+=("district $unit has no key")
+  { [ -f "/var/lib/urban/etc/pki/edge/$unit.key" ] || [ -d "/var/lib/urban/etc/pki/edge/$unit.tpm" ]; } || fail+=("district $unit has no key")
 fi
 # updates delivered by the control centre: the helper's units are in the image; where a client exists (a unit or a
 # district with an identity) the path unit waits for its request and the inbox is the client's
+# a key made in the TPM is only usable through tpm2-tools: an image without them (a bad update) must not stay
+if [ "$unit" != none ] && [ -d "/var/lib/urban/etc/pki/edge/$unit.tpm" ]; then
+  for t in tpm2_createprimary tpm2_load tpm2_sign; do command -v "$t" >/dev/null || { fail+=("the TPM key of $unit needs $t (tpm2-tools)"); break; }; done
+fi
 systemctl cat urban-update.path urban-update.service >/dev/null 2>&1 || fail+=("update helper units missing")
 case ",$role," in *,unit,*|*,district,*)
   if [ "$unit" != none ]; then

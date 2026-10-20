@@ -92,4 +92,13 @@ if (!/уличное освещение/i.test(readme) || !readme.includes("docs
   fail("README.md does not mention the street lighting module and docs/city-os-modules.md");
 for (const must of ["Ядро и модули", "уличн", "docs/city-os-modules.md"])
   if (!context.includes(must)) fail(`CONTEXT.md does not record ${JSON.stringify(must)} (step 4)`);
+
+// step 5: the device key lives in the TPM; the docs no longer list it as missing
+for (const must of ["ECDSA P-256", "tpm2-tools", "--tpm auto", ".tpm/", "python -m urban.devices.signer"])
+  if (!text.includes(must)) fail(`docs/edge-os.md never says ${JSON.stringify(must)} (device key in the TPM)`);
+if (/Ключ блока не в самом чипе/.test(text)) fail("docs/edge-os.md still says the unit's key is not in the chip");
+const todo5 = /\*\*Не сделано[^\n]*(?:\n(?!\n)[^\n]*)*/.exec(context);
+if (todo5 && /подпись внутри TPM/i.test(todo5[0])) fail("the «Не сделано» paragraph of CONTEXT.md still lists signing inside the TPM");
+for (const must of ["Ключ устройства в TPM", "ECDSA P-256"])
+  if (!context.includes(must)) fail(`CONTEXT.md does not record ${JSON.stringify(must)} (step 5)`);
 console.log("DOCS CHECK PASSED");
