@@ -141,7 +141,7 @@ Linux, а форматирование уничтожит запись.
 ```
       ______
      /  ||  \       U R B A N   O S
-    / --++-- \      city traffic system   edge-J-07
+    / --++-- \      smart city OS         edge-J-07
     \   ||   /      <дата и время>
      \______/
 

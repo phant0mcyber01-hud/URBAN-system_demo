@@ -5,13 +5,14 @@
     "at": "2026-10-19T12:00:00Z"
   },
   "lists": "css",
-  "title": "URBAN — умные светофоры",
+  "title": "URBAN — City OS умного города",
   "order": [
     "cover",
     "problem",
     "idea",
     "screen",
     "benefit",
+    "city",
     "privacy",
     "safety",
     "new",
@@ -22,11 +23,11 @@
   ],
   "sections": {
     "s1": {
-      "description": "Что это и какую проблему решает.",
+      "description": "Что это (City OS умного города) и какую проблему решает.",
       "start": "cover"
     },
     "s2": {
-      "description": "Как работает и что это даёт городу.",
+      "description": "Как работает, что даёт городу и как растёт дальше.",
       "start": "idea"
     },
     "s3": {

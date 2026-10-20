@@ -278,8 +278,8 @@ function renderOperator() {
 }
 function renderMode(city) {
   const field = S.mode === 'field';
-  $('brand').querySelector('span').textContent = field ? `${city || 'город не настроен'} · центр управления` : 'Фергана · демо-двойник';
-  document.title = field ? `URBAN · ${city || 'центр управления'}` : 'URBAN · демо-двойник';
+  $('brand').querySelector('span').textContent = field ? `City OS · ${city || 'город не настроен'}` : 'City OS · Фергана · демо-двойник';
+  document.title = field ? `URBAN City OS · ${city || 'центр управления'}` : 'URBAN City OS · демо-двойник';
   if (field) for (const k of DEMO_LAYERS) show[k] = false;
   base = staticLayers(scene, show);
   camBase = null;

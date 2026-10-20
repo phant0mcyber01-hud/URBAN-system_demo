@@ -110,6 +110,8 @@ class VM:
             sh(["truncate", "-s", f"+{grow_mb}M", self.disk])
         self.lines, self.mark, self.proc = [], 0, None
         self._stopping = self._cycling = False  # set while the harness itself switches the machine off
+        self._restarting = False  # set while a guest reboot is being turned into a cold start (old QEMU gone, new not yet)
+        self._restart_error = None  # why that cold start failed, if it did
         self.log = open(f"{LOGS}/{name}.log", "w", encoding="utf-8", errors="replace")
 
     def _tpm(self) -> list[str]:
@@ -172,11 +174,17 @@ class VM:
         # into a cold start of the same machine here, as a cabinet's power coming back. A warm reset of OVMF with a
         # software TPM under emulation sometimes hangs before the boot loader; a cold start never did.
         if not (self._stopping or self._cycling) and self.proc is proc:
-            if self.swtpm and self.swtpm.poll() is None:
-                self.swtpm.kill()
-                self.swtpm.wait()
-            self.log.write("--- (harness) the guest rebooted: cold start of the same machine ---\n")
-            self.start()
+            self._restarting = True  # until the new QEMU is self.proc, the dead one must not read as "the VM stopped"
+            try:
+                if self.swtpm and self.swtpm.poll() is None:
+                    self.swtpm.kill()
+                    self.swtpm.wait()
+                self.log.write("--- (harness) the guest rebooted: cold start of the same machine ---\n")
+                self.start()
+            except Exception as err:  # e.g. swtpm did not come up: say so instead of dying silently in this thread
+                self._restart_error = f"the cold start after a guest reboot failed: {err}"
+            finally:
+                self._restarting = False
 
     def wait(self, pattern, timeout=BOOT_TIMEOUT):
         """The first line matching `pattern` after the mark; the mark moves past it."""
@@ -187,8 +195,12 @@ class VM:
                 if m:
                     self.mark = i + 1
                     return m
-            if self.proc.poll() is not None:
-                raise Fail(f"the VM stopped while waiting for {pattern!r}")
+            if self._restart_error:
+                raise Fail(f"{self._restart_error} (waiting for {pattern!r})")
+            if self.proc.poll() is not None and not self._restarting:
+                time.sleep(2)  # the reader may be just about to turn a guest reboot into a cold start
+                if self.proc.poll() is not None and not self._restarting and not self._restart_error:
+                    raise Fail(f"the VM stopped while waiting for {pattern!r}")
             time.sleep(1)
         raise Fail(f"no {pattern!r} within {timeout} s (log: {LOGS}/{self.name}.log)")
 

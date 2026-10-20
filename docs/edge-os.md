@@ -423,7 +423,7 @@ URBAN-ENROLMENT unit=edge-J-07 serial=URB-0042 fingerprint=A8F1-1E80-B585-C32C c
 ```
       ______
      /  ||  \       U R B A N   O S
-    / --++-- \      city traffic system   edge-J-07
+    / --++-- \      smart city OS         edge-J-07
     \   ||   /      Sun Oct 18  2026  09:01:51
      \______/
 
