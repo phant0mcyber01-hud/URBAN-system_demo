@@ -69,6 +69,16 @@ systemctl cat urban-relay.service urban-district@check.service >/dev/null 2>&1 |
 if [ "$role" = district ]; then
   [ -f "/var/lib/urban/etc/pki/edge/$unit.key" ] || fail+=("district $unit has no key")
 fi
+# updates delivered by the control centre: the helper's units are in the image; where a client exists (a unit or a
+# district with an identity) the path unit waits for its request and the inbox is the client's
+systemctl cat urban-update.path urban-update.service >/dev/null 2>&1 || fail+=("update helper units missing")
+case ",$role," in *,unit,*|*,district,*)
+  if [ "$unit" != none ]; then
+    for i in $(seq 1 10); do systemctl is-active --quiet urban-update.path && break; sleep 1; done
+    systemctl is-active --quiet urban-update.path || warn+=("the update helper is not waiting for requests")
+    [ "$(stat -c %U:%a /var/lib/urban/update-inbox 2>/dev/null)" = urban:700 ] || warn+=("the update inbox is missing")
+  fi ;;
+esac
 if [ "$role" = unit ] && [ -f "/var/lib/urban/etc/edge-$unit.env" ]; then
   service_check "urban-edge@$unit.service" "the unit service urban-edge@$unit"
 fi

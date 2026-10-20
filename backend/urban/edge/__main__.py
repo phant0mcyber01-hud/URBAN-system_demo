@@ -54,6 +54,7 @@ from ..equipment.ntcip import NtcipAdapter
 from ..equipment.snmp import SnmpClient, SnmpV3Client
 from ..junctions import approved_plans, load_all_junctions
 from .device import EdgeDevice
+from .update import make_updater
 from .probe import Probe
 from ..sources.field import SUPERSEDED
 from .field import FieldAdapter
@@ -302,14 +303,14 @@ class Unit:
             raise SystemExit(f"neither {root_path} nor {gw_path}: the unit would not know whose commands to obey")
         self.adapter = make_adapter(args)
         self.probe = Probe(args.temp, args.door, args.door_open)
+        self.tls_context = ssl.create_default_context(cafile=str(args.ca or pki / "ca.pem"))
         self.dev = EdgeDevice(self.id, args.junction, key, gateway_public, self.adapter,
                               state_path=Path(args.state or pki / "edge" / f"{self.id}.seq"),
                               root_public=root_public, gateway_state=pki / "edge" / f"{self.id}.gateway.json",
-                              probe=self.probe)
+                              probe=self.probe, updater=make_updater(args.platform, args.server_name, self.tls_context))
         self.sensors = Path(args.sensors) if args.sensors else None
         self.url = f"wss://{args.platform}/device"
         self.server_name = args.server_name
-        self.tls_context = ssl.create_default_context(cafile=str(args.ca or pki / "ca.pem"))
         self.ws = None
 
     async def ticker(self):

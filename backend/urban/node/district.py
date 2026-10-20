@@ -8,8 +8,9 @@ district-1) and talks to the centre over the same channel: the centre's challeng
 report every second. The report carries the queues its cameras measure (keyed by approach id; the centre takes
 only those of the junctions routed through this district), its own health, and what its relay is doing.
 
-It takes no commands: only junction units do, and the centre never addresses one to a district. Should one
-arrive anyway it is refused and said so in the next report.
+It takes no junction commands: only units do, and the centre never addresses one to a district. Should one
+arrive anyway it is refused and said so in the next report. The one thing the centre does send it is an OS update
+offer (edge/update.py), checked like a unit checks a command; the district downloads the package by itself.
 
 While the centre is unreachable the reports are kept (the last BUFFER seconds) and sent in order as soon as
 the link is back, each with the time it was made, so the centre's history has no hole for the outage.
@@ -27,8 +28,9 @@ import websockets
 from ..devices import crypto
 from ..devices.trust import GatewayTrust
 from ..edge.__main__ import read_sensors
-from ..edge.device import VERSION
+from ..edge.device import VERSION, envelope_refusal
 from ..edge.probe import Probe
+from ..edge.update import make_updater
 
 BUFFER = 900  # seconds of reports kept through an outage of the link to the centre
 RETRY = 2     # seconds between connection attempts
@@ -38,9 +40,19 @@ class DistrictDevice:
     """Identity, reports and the outage buffer. No networking here (see District below), so it can be tested."""
 
     def __init__(self, device_id: str, key, root_public=None, gateway_public=None, gateway_state: Path | None = None,
-                 probe=None, relay_stats=None, buffer: int = BUFFER):
-        """relay_stats(): what the relay reports about itself (the kernel relay, os urban-relay, writes it), or None."""
+                 probe=None, relay_stats=None, buffer: int = BUFFER, updater=None, state_path: Path | None = None,
+                 wall=time.time):
+        """relay_stats(): what the relay reports about itself (the kernel relay, os urban-relay, writes it), or None;
+        updater: takes the centre's OS update offers and reports the system version (edge/update.py);
+        state_path: where the last accepted sequence number of an offer is kept, as a unit does for its commands."""
         self.id, self.key = device_id, key
+        self.updater, self.state_path, self.wall = updater, state_path, wall
+        self.last_seq = 0
+        if state_path is not None and state_path.exists():
+            try:
+                self.last_seq = int(state_path.read_text())
+            except (OSError, ValueError):
+                pass
         self.trust = GatewayTrust(root_public, gateway_public, gateway_state)
         self.probe = probe
         self.relay_stats = relay_stats
@@ -63,9 +75,22 @@ class DistrictDevice:
         return True
 
     def on_command(self, msg: dict):
-        """A district obeys no command; one that arrives is reported, not executed."""
-        self.outbox.append({"type": "edge", "status": "refused", "device": self.id,
-                            "reason": "a district server takes no commands"})
+        """A district obeys no junction command; one that arrives is reported, not executed. An update offer is
+        not one: it is checked like a unit checks a command (gateway signature, this device, fresh, rising number)."""
+        body = msg.get("body") if isinstance(msg, dict) else None
+        if not (isinstance(body, dict) and "update" in body):
+            self.outbox.append({"type": "edge", "status": "refused", "device": self.id,
+                                "reason": "a district server takes no commands"})
+            return
+        why = envelope_refusal(msg, self.id, self.trust.public, self.last_seq, self.wall)
+        if why:
+            self.outbox.append({"type": "edge", "status": "refused", "device": self.id, "reason": why})
+            return
+        self.last_seq = msg["seq"]
+        if self.state_path is not None:
+            self.state_path.write_text(str(self.last_seq))
+        if self.updater is not None:
+            self.updater.offer(body["update"])
 
     def health(self) -> dict:
         temp = self.probe().get("temp") if self.probe is not None else None
@@ -76,7 +101,8 @@ class DistrictDevice:
             except Exception:
                 relay = None
         return {"version": VERSION, "temp": temp, "uptime": round(time.monotonic() - self.started),
-                "relay": relay, "buffered": len(self.buffer)}
+                "relay": relay, "buffered": len(self.buffer),
+                **(self.updater.health() if self.updater is not None else {})}
 
     def make_report(self, queues: dict, now: int) -> dict:
         events, self.outbox = self.outbox, []
@@ -126,12 +152,14 @@ class District:
         root_public = crypto.load_public(root_path.read_text()) if root_path.exists() else None
         if gateway_public is None and root_public is None:
             raise SystemExit(f"neither {root_path} nor {gw_path}: the district would not know the centre's key")
+        self.tls_context = ssl.create_default_context(cafile=str(args.ca or pki / "ca.pem"))
         self.dev = DistrictDevice(self.id, key, root_public, gateway_public, pki / "edge" / f"{self.id}.gateway.json",
-                                  probe=Probe(args.temp, None), relay_stats=_relay_reader(Path(args.relay) if args.relay else None))
+                                  probe=Probe(args.temp, None), relay_stats=_relay_reader(Path(args.relay) if args.relay else None),
+                                  updater=make_updater(args.platform, args.server_name, self.tls_context),
+                                  state_path=pki / "edge" / f"{self.id}.seq")
         self.sensors = Path(args.sensors) if args.sensors else None
         self.url = f"wss://{args.platform}/device"
         self.server_name = args.server_name
-        self.tls_context = ssl.create_default_context(cafile=str(args.ca or pki / "ca.pem"))
         self.ws = None
 
     async def flush(self, ws, reports: list[dict]):

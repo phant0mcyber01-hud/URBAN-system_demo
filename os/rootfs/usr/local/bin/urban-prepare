@@ -88,6 +88,15 @@ VISION=$(sed -n 's/^VISION=//p' "$D/etc/unit.conf")
 hostname "$UNIT"  # /etc/hostname is read-only; the name is this machine's own
 echo "URBAN-ROLE role=$ROLE name=$UNIT${VISION:+ vision=$VISION}${CENTER:+ center=$CENTER}"
 
+# The inbox for updates the control centre delivers (roles unit and district): the sandboxed client (user urban)
+# downloads the package here and writes request.json; urban-update.service (root) takes the package out of it and
+# never looks at it before. Nothing else of urban's reaches it. A package staged by an install that never finished
+# is removed.
+case ",$ROLE," in *,unit,*|*,district,*)
+  install -d -m 700 -o urban -g urban "$D/update-inbox"
+  rm -f "$D"/update/ota-*.raucb ;;
+esac
+
 # The firewall's role-dependent openings, read by nftables.conf (include /run/urban/nft/*.nft)
 install -d /run/urban/nft
 : > /run/urban/nft/role.nft
@@ -153,3 +162,5 @@ if [ "$ROLE" = unit ] && [ -f "$D/etc/edge-$UNIT.env" ]; then
   if [ -f "$D/etc/cameras.json" ] && [ "$VISION" != off ]; then systemctl start --no-block "urban-vision@$UNIT.service"; fi
   echo "URBAN-UNIT starting urban-edge@$UNIT${VISION:+ (light: no vision)}"
 fi
+# the root helper for those updates waits for the client's request (a path unit: it cannot be "enabled" either)
+case ",$ROLE," in *,unit,*|*,district,*) systemctl start --no-block urban-update.path ;; esac

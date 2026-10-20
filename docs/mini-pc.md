@@ -223,7 +223,8 @@ ssh -i data/os/keys/maintenance_ed25519 root@192.168.1.57
 | `urban-unit code` | код подключения ещё раз |
 | `journalctl -u urban-edge@edge-J-07 -n 50` | что пишет служба блока |
 | `systemctl restart urban-edge@edge-J-07` | перезапуск службы блока |
-| `urban-unit update /var/lib/urban/update/<пакет>.raucb` | обновление системы ([edge-os.md](edge-os.md)) |
+| `urban-unit update /var/lib/urban/update/<пакет>.raucb` | обновление системы вручную ([edge-os.md](edge-os.md)) |
+| `urban-unit status` после выпуска из центра | если центр выпустил новую версию (`urban-center release add …`), блок обновится сам; ход виден на экране блока и в «Устройствах» ([edge-os.md](edge-os.md), «Обновления из центра») |
 
 Если Windows пишет `UNPROTECTED PRIVATE KEY FILE`, значит, у файла ключа слишком широкие права. Исправить в
 PowerShell:

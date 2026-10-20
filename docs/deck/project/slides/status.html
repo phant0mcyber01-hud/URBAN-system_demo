@@ -1,16 +1,16 @@
 <section id="status" data-transition="fade" style="background:repeating-linear-gradient(0deg, rgba(57,255,136,0.045) 0px, rgba(57,255,136,0.045) 2px, transparent 2px, transparent 5px), #07090a;color:#d5e6dc;font-family:'JetBrains Mono', 'Courier New', monospace;padding:128px 128px 160px;display:flex;flex-direction:column;justify-content:start;gap:40px">
 <p style="position:absolute;left:128px;top:56px;width:1200px;font-size:24px;color:#7f9a8b">root@urban-os:~# <span style="color:#39ff88">./verify.sh --all</span></p>
 <h2 style="font-size:96px;font-weight:800;line-height:1.1;letter-spacing:-2px;color:#d5e6dc">Что проверено</h2>
-<p style="font-size:44px;font-weight:800;color:#39ff88;text-shadow:3px 0px #19e3ff">STATUS: 19/19 PASSED <span style="color:#7f9a8b">· все 19 проверок прошли</span></p>
+<p style="font-size:44px;font-weight:800;color:#39ff88;text-shadow:3px 0px #19e3ff">STATUS: 11/11 PASSED <span style="color:#7f9a8b">· шаг 3, все проверки</span></p>
 <div style="display:flex;gap:64px">
 <div style="flex:1;display:flex;flex-direction:column;gap:16px">
 <p style="font-size:32px;font-weight:800;color:#39ff88">ПРОВЕРЕНО НА ВИРТУАЛКАХ</p>
+<div style="display:flex;gap:20px;align-items:start"><x-icon name="Check" style="color:#39ff88;width:40px;height:40px"></x-icon><div style="flex:1"><p style="font-size:32px;line-height:1.4">обновление из центра: 1 → 2 само</p></div></div>
+<div style="display:flex;gap:20px;align-items:start"><x-icon name="Check" style="color:#39ff88;width:40px;height:40px"></x-icon><div style="flex:1"><p style="font-size:32px;line-height:1.4">6 плохих пакетов отклонены</p></div></div>
 <div style="display:flex;gap:20px;align-items:start"><x-icon name="Check" style="color:#39ff88;width:40px;height:40px"></x-icon><div style="flex:1"><p style="font-size:32px;line-height:1.4">цепочка блок → район → центр</p></div></div>
-<div style="display:flex;gap:20px;align-items:start"><x-icon name="Check" style="color:#39ff88;width:40px;height:40px"></x-icon><div style="flex:1"><p style="font-size:32px;line-height:1.4">обновление и откат сами</p></div></div>
-<div style="display:flex;gap:20px;align-items:start"><x-icon name="Check" style="color:#39ff88;width:40px;height:40px"></x-icon><div style="flex:1"><p style="font-size:32px;line-height:1.4">шифрование и атаки на блок</p></div></div>
-<div style="display:flex;gap:20px;align-items:start"><x-icon name="Check" style="color:#39ff88;width:40px;height:40px"></x-icon><div style="flex:1"><p style="font-size:32px;line-height:1.4">загрузка с любого диска</p></div></div>
-<div style="display:flex;gap:20px;align-items:start"><x-icon name="Check" style="color:#39ff88;width:40px;height:40px"></x-icon><div style="flex:1"><p style="font-size:32px;line-height:1.4">скорость, демонстрация</p></div></div>
-<div style="display:flex;gap:20px;align-items:start"><x-icon name="Check" style="color:#39ff88;width:40px;height:40px"></x-icon><div style="flex:1"><p style="font-size:32px;line-height:1.4">258 тестов платформы</p></div></div>
+<div style="display:flex;gap:20px;align-items:start"><x-icon name="Check" style="color:#39ff88;width:40px;height:40px"></x-icon><div style="flex:1"><p style="font-size:32px;line-height:1.4">откат плохой версии сам</p></div></div>
+<div style="display:flex;gap:20px;align-items:start"><x-icon name="Check" style="color:#39ff88;width:40px;height:40px"></x-icon><div style="flex:1"><p style="font-size:32px;line-height:1.4">атаки на блок, шифрование</p></div></div>
+<div style="display:flex;gap:20px;align-items:start"><x-icon name="Check" style="color:#39ff88;width:40px;height:40px"></x-icon><div style="flex:1"><p style="font-size:32px;line-height:1.4">293 теста платформы</p></div></div>
 </div>
 <div style="flex:1;display:flex;flex-direction:column;gap:16px">
 <p style="font-size:32px;font-weight:800;color:#ff2e63">ЕЩЁ НЕ ПРОВЕРЕНО</p>
@@ -21,6 +21,6 @@
 </div>
 </div>
 <p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#7f9a8b">Каждая проверка запускает настоящий образ в виртуальной машине; итог в GATES.md</p>
-<p style="position:absolute;right:128px;bottom:64px;width:300px;text-align:right;font-size:24px;color:#7f9a8b">11 / 14</p>
-<aside>Перед прогоном пять ревьюеров прочитали код ОС, платформы, проверок, документации и этих слайдов. Нашли и исправили настоящие ошибки: одно число «бесконечность» от устройства останавливало платформу; район терял отчёты при сбое отправки; если пропадало питание до того, как свежая система отметит себя рабочей, блок переставал загружаться; служба зрения могла дотянуться до ключа блока; с клавиатурой в шкафу можно было войти в меню загрузчика. Затем полный прогон всех девятнадцати автоматических проверок: все прошли. Каждая проверка в QEMU — настоящий образ, эмуляция без аппаратного ускорения. На настоящем железе система ещё не запускалась — это следующий шаг, стенд.</aside>
+<p style="position:absolute;right:128px;bottom:64px;width:300px;text-align:right;font-size:24px;color:#7f9a8b">13 / 16</p>
+<aside>Итог третьего шага. Одиннадцать автоматических проверок, все прошли. Главная — обновление по воздуху: в трёх виртуальных машинах центр одной командой выпустил версию 2, и районный сервер, и блок за ним сами скачали её, проверили, поставили во второй слот и загрузились в неё; центр показал обоих на версии 2. Потом мы шесть раз пытались подсунуть помощнику блока плохой пакет: с чужой подписью, старый под видом нового, честный старый, с неверным хешем, файл вне папки входящих и ссылку на чужой файл. Все шесть отклонены, работающая система не тронута. Проверка атак на блок нашла настоящую дыру, которая была и раньше: служба блока могла через системную шину попросить RAUC поставить пакет или пометить слоты, то есть сломать откат. Закрыли правилом D-Bus: к RAUC теперь пускают только root. Заново прогнаны и проверки второго шага, которые могли задеть изменения: цепочка через район, ручное обновление, откат сломанной версии и атаки на блок. Отдельно проверена документация и то, что в публичной презентации нет технических слов. Каждая проверка запускает настоящий образ в QEMU без аппаратного ускорения. На настоящем железе система ещё не запускалась — это следующий шаг, стенд.</aside>
 </section>

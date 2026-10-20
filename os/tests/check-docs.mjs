@@ -37,6 +37,15 @@ const word = (t, w) => new RegExp(`(?<![A-Za-z0-9])${w}(?![A-Za-z0-9])`).test(t)
 for (const [what, ok] of [["Secure Boot", unverified.includes("Secure Boot")], ["ARM", word(unverified, "ARM")], ["WireGuard", unverified.includes("WireGuard")]])
   if (!ok) fail(`the «Что не проверено» section of docs/edge-os.md does not mention ${what}`);
 
+// step 3: updates delivered by the centre are described, and no longer listed as missing
+if (!headings.some((h) => /обновлени.*(из центра|центр)/.test(h))) fail("docs/edge-os.md has no section on updates from the centre");
+for (const must of ["urban-center release add", "update-inbox", "urban-update.path", "/run/urban/update.json", "check-ota.mjs",
+  "RAUC_MF_VERSION", "новее"]) {
+  if (!text.includes(must)) fail(`the guide never shows ${must} (updates from the centre)`);
+}
+if (/не раздаёт обновлени|Доставка обновлений с платформы не сделана/i.test(text))
+  fail("docs/edge-os.md still says the centre does not deliver updates");
+
 // docs/mini-pc.md: from a box to an enrolled unit, for a person with a Windows laptop
 const guide = join(ROOT, "docs", "mini-pc.md");
 if (!existsSync(guide)) fail("docs/mini-pc.md is missing");
@@ -65,4 +74,8 @@ const todo = /\*\*Не сделано[^\n]*(?:\n(?!\n)[^\n]*)*/.exec(context);
 if (!todo) fail("CONTEXT.md has no «Не сделано» paragraph");
 if (!todo[0].includes("WireGuard")) fail("the «Не сделано» paragraph of CONTEXT.md does not mention WireGuard");
 if (!word(todo[0], "ARM")) fail("the «Не сделано» paragraph of CONTEXT.md does not mention ARM");
+if (/обновлени/i.test(todo[0]) && /платформ|центр/i.test(todo[0]) && /не раздаёт|по SSH/i.test(todo[0]))
+  fail("the «Не сделано» paragraph of CONTEXT.md still lists updates from the centre as missing");
+for (const must of ["urban-center release", "Обновления из центра"])
+  if (!context.includes(must)) fail(`CONTEXT.md does not record ${JSON.stringify(must)} (step 3)`);
 console.log("DOCS CHECK PASSED");

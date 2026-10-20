@@ -23,10 +23,31 @@ VERSION = "0.1.0"
 MAX_SKEW = 30  # seconds between the issue time of a command and the clock of the unit
 
 
+def envelope_refusal(env: dict, device: str, public, last_seq: int, wall) -> str | None:
+    """Why a signed command envelope is not to be obeyed by `device`, or None: signed by the gateway key,
+    addressed to this device, a sequence number above anything seen, issued within MAX_SKEW of its clock.
+    What the command is about (its junction) is for the caller to check."""
+    try:
+        signed = {k: env[k] for k in ("device", "seq", "t", "body")}
+    except (KeyError, TypeError):
+        return "malformed command"
+    if public is None:
+        return "no gateway key yet"
+    if not crypto.verify(public, signed, str(env.get("sig"))):
+        return "bad signature"
+    if signed["device"] != device:
+        return "addressed to another device"
+    if not isinstance(signed["seq"], int) or signed["seq"] <= last_seq:
+        return "replayed or out of order"
+    if not isinstance(signed["t"], (int, float)) or abs(wall() - signed["t"]) > MAX_SKEW:
+        return "stale command"
+    return None
+
+
 class EdgeDevice:
     def __init__(self, device_id: str, tls: str | None, key, gateway_public, adapter: ControllerAdapter,
                  state_path: Path | None = None, wall=time.time, script: dict | None = None,
-                 root_public=None, gateway_state: Path | None = None, probe=None):
+                 root_public=None, gateway_state: Path | None = None, probe=None, updater=None):
         """tls: the junction this unit is installed at, or None to take it from the platform's welcome;
         gateway_public: gateway.pub, or None for a unit that takes the gateway key from the root's certificate;
         state_path: where the last accepted sequence number is kept; wall(): wall-clock seconds;
@@ -34,13 +55,15 @@ class EdgeDevice:
         root_public: the installed root key, to follow gateway key rotations (devices/trust.py);
         gateway_state: where the accepted gateway certificate is kept;
         probe(): {"temp", "door"} from the cabinet's real sensors (edge/probe.py), None in either when absent.
-        Without a probe the unit is a demo one and its temperature and door follow `script`."""
+        Without a probe the unit is a demo one and its temperature and door follow `script`;
+        updater: takes the centre's signed OS update offers and reports the system version (edge/update.py)."""
         self.id, self.tls, self.key = device_id, tls, key
         self.trust = GatewayTrust(root_public, gateway_public, gateway_state)
         self.adapter = adapter
         self.controller = EdgeController(adapter)
         self.script = script or {}
         self.probe = probe
+        self.updater = updater
         self.started = time.monotonic()
         self.state_path, self.wall = state_path, wall
         self.last_seq = 0
@@ -82,33 +105,27 @@ class EdgeDevice:
 
     # ---- commands from the gateway
     def on_command(self, env: dict) -> bool:
-        why = self._refusal(env)
+        body = env.get("body") if isinstance(env, dict) else None
+        offer = isinstance(body, dict) and "update" in body  # an OS update offer: for this unit, not for its junction
+        why = self._refusal(env, junction=not offer)
         if why:
             self.outbox.append({"type": "edge", "status": "refused", "device": self.id, "reason": why})
             return False
         self.last_seq = env["seq"]
         if self.state_path is not None:
             self.state_path.write_text(str(self.last_seq))
+        if offer:  # never reaches the controller
+            if self.updater is not None:
+                self.updater.offer(body["update"])
+            return True
         self.outbox += self.controller.handle(env["body"], self.clock)
         return True
 
-    def _refusal(self, env: dict) -> str | None:
-        try:
-            signed = {k: env[k] for k in ("device", "seq", "t", "body")}
-            body = env["body"]
-        except (KeyError, TypeError):
-            return "malformed command"
-        if self.gateway_public is None:
-            return "no gateway key yet"
-        if not crypto.verify(self.gateway_public, signed, str(env.get("sig"))):
-            return "bad signature"
-        if signed["device"] != self.id:
-            return "addressed to another device"
-        if not isinstance(signed["seq"], int) or signed["seq"] <= self.last_seq:
-            return "replayed or out of order"
-        if not isinstance(signed["t"], (int, float)) or abs(self.wall() - signed["t"]) > MAX_SKEW:
-            return "stale command"
-        if not isinstance(body, dict) or body.get("tls") != self.tls:
+    def _refusal(self, env: dict, junction: bool = True) -> str | None:
+        why = envelope_refusal(env, self.id, self.gateway_public, self.last_seq, self.wall)
+        if why:
+            return why
+        if junction and (not isinstance(env["body"], dict) or env["body"].get("tls") != self.tls):
             return "not my junction"
         return None
 
@@ -141,7 +158,8 @@ class EdgeDevice:
         return {"type": "report", "t": self.clock, "queues": queues, "events": events, "epoch": self.trust.epoch,
                 "health": {"version": VERSION, "temp": temp, "door": door,
                            "controller": getattr(self.adapter, "last_error", None) or "ok",
-                           "leases": len(self.controller.leases), "uptime": round(time.monotonic() - self.started)}}
+                           "leases": len(self.controller.leases), "uptime": round(time.monotonic() - self.started),
+                           **(self.updater.health() if self.updater is not None else {})}}
 
     def reset(self):
         """The street was reset (scenario restart in the demo): nothing is leased any more."""

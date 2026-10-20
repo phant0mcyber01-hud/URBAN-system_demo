@@ -2,8 +2,8 @@
 # What the machine's own screen shows above the login prompt: who it is and in which role, its key and
 # enrolment code (a junction unit), its address, the last self-check, its health and its power. An installer
 # plugs in a monitor and reads it; nothing has to be typed. Written to /run (the root is read-only) and
-# linked from /etc/issue.d; getty is asked to redraw. Called by urban-prepare, urban-os-check, urban-health
-# and the power manager when its plan changes.
+# linked from /etc/issue.d; getty is asked to redraw. Called by urban-prepare, urban-os-check, urban-health,
+# the update helper and the power manager when its plan changes.
 D=/var/lib/urban
 OUT=/run/urban/console.issue
 install -d /run/urban
@@ -19,6 +19,7 @@ health=$(cat /run/urban/health 2>/dev/null || echo "waiting for the self-check")
 version=$(sed -n 's/^VERSION=//p' /etc/urban-os-release)
 slot=$(sed -n 's/.*rauc\.slot=\([AB]\).*/\1/p' /proc/cmdline)
 power=$(cat /run/urban/power.txt 2>/dev/null)  # written by the power manager as the screen shows it
+update=$(cat /run/urban/update.txt 2>/dev/null)  # written by the update helper (urban-unit apply-update)
 case "$role" in
   unit) what="junction unit"; [ "$vision" = off ] && what="junction unit, light (no cameras)" ;;
   district) what="district server" ;;
@@ -53,6 +54,7 @@ esac
   printf "  self-check    %s\n" "$check"
   printf "  health        %s\n" "$health"
   printf "  power         %s\n" "${power:-starting}"
+  [ -z "$update" ] || printf "  update        %s\n" "$update"
   case "$crypt" in
     luks2-tpm2) echo "  data          encrypted - key sealed in this machine's TPM (a disk alone cannot be read)" ;;
     plain) echo "  data          NOT encrypted - this machine has no TPM" ;;

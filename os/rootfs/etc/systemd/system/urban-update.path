@@ -1,0 +1,14 @@
+# An update the control centre delivered is waiting: the client (user urban, sandboxed) has downloaded it into the
+# inbox and written request.json there. Started by urban-prepare for the roles unit and district (the root is
+# read-only, so it cannot be "enabled"). The root helper behind it is urban-update.service.
+[Unit]
+Description=URBAN OS: an update from the control centre is waiting in the inbox
+DefaultDependencies=no
+Conflicts=shutdown.target
+Before=shutdown.target
+# an intruder's endless requests must not make systemd give up on the next real one
+StartLimitIntervalSec=0
+
+[Path]
+PathExists=/var/lib/urban/update-inbox/request.json
+Unit=urban-update.service

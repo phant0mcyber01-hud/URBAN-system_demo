@@ -1,0 +1,33 @@
+# The root helper for updates delivered by the control centre: `urban-unit apply-update` reads the client's request
+# as hostile input, takes the package out of the inbox, checks size, hash, URBAN's signature and that the version is
+# newer, and only then lets RAUC write the other slot; then the machine restarts into it (urban-health and the
+# rollback stay as they were). Run by urban-update.path.
+#
+# Its sandbox is deliberately only moderate. The slots and the boot state are written by rauc.service (its own
+# unit, over D-Bus), not by this process, so nothing here needs the boot partition or the block devices; but
+# `rauc info` may mount the package while it checks it (loop device, /run/rauc), so the file system is not made
+# read-only here and no device or capability is taken away. What is closed is what a root helper never needs.
+[Unit]
+Description=URBAN OS: install an update delivered by the control centre
+After=urban-prepare.service urban-health.service
+RequiresMountsFor=/var/lib/urban /boot/efi
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/urban-unit apply-update
+StandardOutput=journal+console
+StandardError=journal+console
+# a download of the package is done; writing a slot over a slow disk takes minutes
+TimeoutStartSec=2h
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native

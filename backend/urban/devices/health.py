@@ -14,6 +14,15 @@ STALE_REPORT = 10                    # seconds online without a report before it
 BLOCKING = {"door", "controller"}    # alerts that stop commands at that junction
 
 
+UPDATE_STATES = {"downloading", "ready", "failed", "installing", "refused", "installed"}
+REASON_MAX = 120                     # longest reason an update state may carry
+
+
+def _plain(text: str) -> str:
+    """Printable ASCII and Cyrillic only: no control characters, no look-alike or invisible ones."""
+    return "".join(ch for ch in text if " " <= ch <= "~" or "Ѐ" <= ch <= "ӿ")
+
+
 def clean(health) -> dict:
     """What a unit says about itself, reduced to numbers and short words. Everything else is dropped:
     a unit is trusted for measurements, not for markup, and this is what reaches every browser and the history."""
@@ -31,6 +40,15 @@ def clean(health) -> dict:
     if isinstance(relay, dict):
         out["relay"] = {k: v for k, v in relay.items() if k in ("units", "sessions", "refused", "bytes_up", "bytes_down")
                         and isinstance(v, int) and not isinstance(v, bool) and 0 <= v < 10 ** 15}
+    os_version = health.get("os")  # the OS release the device runs (integer, /etc/urban-os-release)
+    if isinstance(os_version, int) and not isinstance(os_version, bool) and 0 <= os_version < 10 ** 9:
+        out["os"] = os_version
+    update = health.get("update")  # where its over-the-air update stands
+    if isinstance(update, dict) and update.get("state") in UPDATE_STATES:
+        v, reason = update.get("version"), update.get("reason")
+        if isinstance(v, int) and not isinstance(v, bool) and 0 <= v < 10 ** 9:
+            out["update"] = {"state": update["state"], "version": v,
+                             "reason": _plain(reason)[:REASON_MAX] if isinstance(reason, str) else ""}
     if health.get("door") in ("open", "closed"):
         out["door"] = health["door"]
     for key in ("controller", "version"):

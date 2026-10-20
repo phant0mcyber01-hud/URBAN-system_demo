@@ -167,6 +167,13 @@ sudo systemctl enable --now urban-edge@edge-J-21
   Хранятся 30 дней в `/var/backups/urban`. Ключи (`data/pki/*.key`) в копию **не** попадают намеренно.
 - **Обновление:** `cd /opt/urban && sudo -u urban git pull && sudo -u urban .venv/bin/pip install -e backend && (cd web && sudo -u urban npm run build) && sudo systemctl restart urban`.
   Цепочка аудита продолжается, аренды на блоках переживают перезапуск платформы сами (откат по таймеру).
+- **Обновление блоков и районных серверов (URBAN OS):** на машине-центре, не руками на каждом блоке.
+  `scp urban-edge-2.raucb root@<центр>:/var/lib/urban/update/`, затем
+  `urban-center release add /var/lib/urban/update/urban-edge-2.raucb --version 2` (первая проба —
+  `--devices edge-J-21`), `urban-center release list`, `urban-center release withdraw 2`. Блоки со старой версией
+  получают предложение по своей обычной связи, сами проверяют и ставят пакет; ход виден во вкладке «Устройства»
+  («ОС N», «обновляется до N»). Подробности и что проверяет блок — [docs/edge-os.md](../docs/edge-os.md), раздел
+  «Обновления из центра». Это про образ URBAN OS; платформу на обычном сервере обновляет пункт «Обновление» выше.
 - **Логи:** `journalctl -u urban`, `journalctl -u urban-edge@edge-J-21`. Вход, выход и решения операторов — в
   журнале аудита (вкладки «Безопасность» и «История»).
 - **Мониторинг:** `/api/health` без входа (`ok`, `mode`, `devices_online`); всё остальное требует учётной записи.

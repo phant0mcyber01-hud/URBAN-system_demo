@@ -43,6 +43,7 @@ from ..devices.registry import ACTIVE, REVOKED, Registry, device_id, provision
 from ..city.passport import PassportError, Passports, problems
 from ..junctions import APPROVED, DRAFT, _junction, approved, approved_plans, load_all_junctions, load_cameras
 from ..platform import Platform
+from ..release import ReleaseStore
 from ..sources import clock
 from ..sources.field import FieldEmulator
 from ..export import Exporter, sinks_from_env
@@ -79,7 +80,7 @@ meta = _meta()
 GATEWAY_CERT = json.loads((c.PKI / "gateway.cert.json").read_text())
 hub = DeviceHub(Registry(c.PKI / "devices.json"), crypto.load_private((c.PKI / "gateway.key").read_text()),
                 on_report=lambda rec, report: platform.on_report(rec, report), clock=lambda: platform.t,
-                plans=approved_plans(junctions), gateway_cert=GATEWAY_CERT)
+                plans=approved_plans(junctions), gateway_cert=GATEWAY_CERT, releases=ReleaseStore(c.RELEASES))
 store = Store(c.DB, mode=c.SOURCE, retention_days=c.HISTORY_DAYS)
 platform = Platform(meta["center"], meta["radius"], junctions, send=hub.send, reachable=hub.online, store=store,
                     corridor=c.GREEN_CORRIDOR)
@@ -211,6 +212,9 @@ device_app = FastAPI(title="URBAN device endpoint", docs_url=None, redoc_url=Non
 @device_app.websocket("/device")
 async def device_endpoint(ws: WebSocket):
     await hub.serve(ws)
+
+
+device_app.include_router(hub.update_routes())  # GET /update/{token}: OS update packages for devices
 
 
 @app.websocket("/field")

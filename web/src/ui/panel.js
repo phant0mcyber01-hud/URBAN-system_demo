@@ -74,6 +74,7 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
           <span title="блоков на связи через него">${d.r && d.r.units != null ? `${esc(d.r.units)} ${plural(Number(d.r.units) || 0, 'блок', 'блока', 'блоков')} через него` : 'ретранслятор: нет данных'}</span>
           <span title="отчётов, накопленных без связи с центром">${d.b ? `${esc(d.b)} отчётов ждут` : 'буфер пуст'}</span>
           <span title="температура в шкафу">${d.t == null ? '—' : `${esc(d.t)} °C`}</span>
+          ${osSpan(d)}
           <span title="версия ПО">${esc(d.v ?? '—')}</span>
           <span title="последний отчёт">${age(d.a)} назад</span>
           ${devButton(d)}
@@ -89,6 +90,13 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
        <button data-act="${d.s === 'revoked' ? 'restore' : 'revoke'}" data-id="${esc(d.id)}">${d.s === 'revoked' ? 'Доверять' : 'Отозвать'}</button>
        ${d.s === 'revoked' && S.mode === 'field' ? `<button data-act="remove" data-id="${esc(d.id)}" title="Блок выведен из работы: забыть его, перекрёсток освободится">Убрать</button>` : ''}` : '');
   const age = (s) => (s == null ? '—' : s < 60 ? `${s} с` : `${Math.floor(s / 60)} мин`);
+  // the system version and where its over-the-air update stands (the device reports it, the centre offers it)
+  const UPDATE_RU = { downloading: (u) => `обновляется до ${u.version}`, ready: (u) => `обновляется до ${u.version}`,
+    installing: (u) => `обновляется до ${u.version}`, installed: (u) => `обновлено до ${u.version}`,
+    failed: (u) => `обновление не загружено${u.reason ? `: ${u.reason}` : ''}`,
+    refused: (u) => `обновление отклонено${u.reason ? `: ${u.reason}` : ''}` };
+  const osSpan = (d) => `<span title="версия системы и состояние обновления по воздуху">ОС ${esc(d.os ?? '—')}${d.up && UPDATE_RU[d.up.state]
+    ? ` · ${esc(UPDATE_RU[d.up.state](d.up))}` : ''}</span>`;
   const deviceSummary = () => {
     const all = Object.values(S.dev);
     if (!all.length) return empty('ожидание устройств');
@@ -131,6 +139,7 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
           <span title="дверь шкафа">${d.d === 'open' ? 'дверь открыта' : d.d === 'closed' ? 'дверь закрыта' : '—'}</span>
           <span title="связь с контроллером">${d.c == null ? '—' : d.c === 'ok' ? 'контроллер ок' : esc(d.c)}</span>
           <span title="действующих аренд">${esc(d.l ?? 0)} аренд</span>
+          ${osSpan(d)}
           <span title="версия ПО">${esc(d.v ?? '—')}</span>
           <span title="последний отчёт">${age(d.a)} назад</span>
           ${devButton(d)}

@@ -14,10 +14,13 @@ ExecStart=/opt/urban/.venv/bin/python -m urban.node.district --unit %i --platfor
     --pki /etc/urban/pki --sensors "${SENSORS}" --relay /run/urban/relay.json --temp "${TEMP_SENSOR}"
 Restart=always
 RestartSec=2
-# The sandbox: its own key folder and the network, nothing else (as urban-edge@)
+# The sandbox: its own key folder, the update inbox and the network, nothing else (as urban-edge@)
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=/etc/urban/pki
+# its key folder, and the update inbox (OTA updates: it downloads a package there and writes request.json;
+# the root helper urban-update.service installs it only after its own checks). The "-" keeps a server install
+# without the inbox working.
+ReadWritePaths=/etc/urban/pki -/var/lib/urban/update-inbox
 InaccessiblePaths=-/var/lib/urban/ssh -/var/lib/urban/update -/var/lib/urban/rauc -/var/lib/urban/platform -/boot
 ProtectHome=yes
 PrivateTmp=yes

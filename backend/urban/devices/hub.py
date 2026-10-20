@@ -10,23 +10,31 @@ import json
 import secrets
 import time
 import traceback
+from pathlib import Path
 
-from fastapi import WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 
 from . import crypto
 from .health import clean
 from .registry import ACTIVE, REVOKED, Registry, kind_of
 
 HELLO_TIMEOUT = 10  # seconds a connection may stay unauthenticated
+LINK_TTL = 3600     # seconds a download link for an update package stays valid
+REOFFER = 600       # seconds before the same release is offered to the same device again (it may be downloading)
 
 
 class DeviceHub:
     def __init__(self, registry: Registry, gateway_key, on_report, clock=lambda: 0, wall=time.time,
-                 plans: dict[str, set[int]] | None = None, gateway_cert: dict | None = None):
+                 plans: dict[str, set[int]] | None = None, gateway_cert: dict | None = None, releases=None):
         """on_report(device record, report dict); clock(): platform time sent in the welcome;
         wall(): wall-clock seconds stamped into every command, so a device can refuse stale ones;
         plans: tls id -> approved plan ids, handed to each unit at session start (its junction passport);
-        gateway_cert: the root's certificate for gateway_key, presented at session start (devices/trust.py)."""
+        gateway_cert: the root's certificate for gateway_key, presented at session start (devices/trust.py);
+        releases: the ReleaseStore of OS update packages to offer (urban/release.py), or None to offer nothing."""
+        self.releases = releases
+        self.links: dict[str, dict] = {}  # download token -> {"device", "version", "until"}
+        self._offered: dict[str, tuple[int, float]] = {}  # device id -> (release version, wall time of the offer)
         self.plans = plans or {}
         self.gateway_cert = gateway_cert
         self.registry, self.key, self.on_report, self.clock, self.wall = registry, gateway_key, on_report, clock, wall
@@ -57,6 +65,86 @@ class DeviceHub:
             return
         text = json.dumps({"type": "cmd", **self.envelope(rec["id"], msg)}, ensure_ascii=False)
         asyncio.ensure_future(self._deliver(rec["id"], text))
+
+    def send_device(self, device: str, body: dict) -> bool:
+        """Deliver a signed command to one device by its id (an update offer is not about any junction).
+        False if it is not connected."""
+        if device not in self.sessions:
+            return False
+        text = json.dumps({"type": "cmd", **self.envelope(device, body)}, ensure_ascii=False)
+        asyncio.ensure_future(self._deliver(device, text))
+        return True
+
+    # ---- over-the-air updates: the offer goes down the signed channel, the package comes over the same listener
+    def pending_release(self, device: str, rec: dict) -> dict | None:
+        """The release this device should be offered now, or None: it must be a unit or a district server that
+        reported a system version (an integer) older than the newest release that is not withdrawn and targets it."""
+        if self.releases is None or kind_of(rec) not in ("unit", "district"):
+            return None
+        have = self.seen.get(device, {}).get("health", {}).get("os")
+        rel = self.releases.newest_for(device)
+        if rel is None or not isinstance(have, int) or isinstance(have, bool) or have >= rel["version"]:
+            return None
+        if not self.releases.path(rel).is_file():
+            return None
+        return rel
+
+    def offer_update(self, device: str, rel: dict) -> dict | None:
+        """Mint a download link bound to this device and release and build the signed offer for it."""
+        now = self.wall()
+        self.links = {t: v for t, v in self.links.items() if v["until"] > now and v["device"] != device}
+        token = secrets.token_hex(32)
+        self.links[token] = {"device": device, "version": rel["version"], "until": now + LINK_TTL}
+        self._offered[device] = (rel["version"], now)
+        return {"update": {"version": rel["version"], "sha256": rel["sha256"], "size": rel["size"],
+                           "path": f"/update/{token}"}}
+
+    async def _offer(self, device: str, rec: dict):
+        """Offer the device the release it is due, unless the same one went out less than REOFFER ago."""
+        try:
+            rel = self.pending_release(device, rec)
+            if rel is None:
+                return
+            last = self._offered.get(device)
+            if last is not None and last[0] == rel["version"] and 0 <= self.wall() - last[1] < REOFFER:
+                return
+            body = self.offer_update(device, rel)
+            text = json.dumps({"type": "cmd", **self.envelope(device, body)}, ensure_ascii=False)
+            await self._deliver(device, text)
+        except (KeyError, TypeError, OSError):  # a damaged release entry must not end the device's session
+            print(f"hub: could not offer an update to {device}", flush=True)
+            traceback.print_exc()
+
+    def update_file(self, token: str) -> tuple[Path, str] | None:
+        """The package a download link stands for: valid for one device and one release for LINK_TTL, and only
+        while that release is still offered to that device. (path, file name), or None."""
+        link = self.links.get(token)
+        if link is None or self.releases is None:
+            return None
+        if link["until"] <= self.wall():
+            self.links.pop(token, None)
+            return None
+        rec = self.registry.devices.get(link["device"])
+        rel = self.releases.get(link["version"])
+        if (rec is None or rec["status"] != ACTIVE or rel is None or rel.get("withdrawn")
+                or (rel.get("devices") is not None and link["device"] not in rel["devices"])):
+            return None
+        path = self.releases.path(rel)
+        return (path, path.name) if path.is_file() else None
+
+    def update_routes(self) -> APIRouter:
+        """GET /update/{token} for the device listener: the package a download link stands for. Whatever is wrong
+        with the link (unknown, expired, withdrawn, another device's) is the same plain 404."""
+        router = APIRouter()
+
+        @router.get("/update/{token}")
+        def update_package(token: str):
+            found = self.update_file(token)
+            if found is None:
+                raise HTTPException(404)
+            path, name = found
+            return FileResponse(path, media_type="application/octet-stream", filename=name)
+        return router
 
     async def _deliver(self, device: str, text: str):
         ws = self.sessions.get(device)
@@ -94,6 +182,8 @@ class DeviceHub:
             await ws.send_text(json.dumps({"type": "welcome", "t": self.clock(), "tls": rec["tls"],
                                            "plans": sorted(self.plans.get(rec["tls"], ())),
                                            "gateway": self.gateway_cert}))
+            self._offered.pop(device, None)  # a new session may have a device that lost its download
+            await self._offer(device, rec)
             while True:
                 report = json.loads(await ws.receive_text())
                 if isinstance(report, dict) and report.get("type") == "report":
@@ -105,6 +195,7 @@ class DeviceHub:
                                                     if d.get("district") == rec["id"] and d.get("junction")
                                                     and d["status"] == ACTIVE]}  # a revoked unit is no one's junction
                     self.on_report(rec, report)
+                    await self._offer(device, rec)
         except (WebSocketDisconnect, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError):
             pass  # the usual ends of a session: gone, silent, or talking nonsense
         except Exception:  # a bug in report handling must not look like a flaky network

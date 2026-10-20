@@ -16,11 +16,14 @@ ExecStart=/opt/urban/.venv/bin/python -m urban.edge --unit %i --platform ${PLATF
     --pki /etc/urban/pki $EXTRA
 Restart=always
 RestartSec=2
-# The sandbox: a hacked unit service reaches its own key folder, the network and the controller's port, nothing
-# else. No maintenance keys, no update bundles, no boot files, no other process, no privilege, no new code in memory.
+# The sandbox: a hacked unit service reaches its own key folder, the update inbox, the network and the controller's port, nothing
+# else. No maintenance keys, no staged update bundles (the inbox holds only what the root helper has yet to check), no boot files, no other process, no privilege, no new code in memory.
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=/etc/urban/pki
+# its key folder, and the update inbox (OTA updates: it downloads a package there and writes request.json;
+# the root helper urban-update.service installs it only after its own checks). The "-" keeps a server install
+# without the inbox working.
+ReadWritePaths=/etc/urban/pki -/var/lib/urban/update-inbox
 InaccessiblePaths=-/var/lib/urban/ssh -/var/lib/urban/update -/var/lib/urban/rauc -/var/lib/urban/platform -/boot
 ProtectHome=yes
 PrivateTmp=yes

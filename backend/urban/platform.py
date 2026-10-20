@@ -265,7 +265,7 @@ class Platform:
                 "id": row["id"], "k": kind, "addr": row.get("address"), "via": row.get("district"),
                 "r": h.get("relay"), "b": h.get("buffered"),
                 "serial": row.get("serial", ""), "o": int(row["online"]), "s": row["status"],
-                "v": h.get("version"), "t": h.get("temp"), "d": h.get("door"), "c": h.get("controller"),
+                "v": h.get("version"), "os": h.get("os"), "up": h.get("update"), "t": h.get("temp"), "d": h.get("door"), "c": h.get("controller"),
                 "l": h.get("leases"), "u": h.get("uptime"), "a": row.get("age"), "n": row.get("connects", 0),
                 "f": int(bool(row.get("first_seen"))),
                 "al": [[a["level"], a["text"]] for a in alerts], "lock": row.get("tls") in self.gateway.locked,

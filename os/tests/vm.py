@@ -10,6 +10,8 @@
     python3 vm.py encrypted             with a TPM the data partition becomes LUKS2 (key in the TPM); without, plain
     python3 vm.py light                 a light unit (VISION=off) in 1 GB of memory
     python3 vm.py chain                 unit -> district -> centre: three machines, the relay, the district's reports
+    python3 vm.py ota                   over the air: the centre releases version 2, the district and the unit install it
+                                        by themselves; the unit's root helper refuses what it must refuse
     python3 vm.py demo [pilot]          the three machines (or the pilot's one) kept running, screens over VNC
     python3 vm.py demo-enrol            enrol the demo's district and unit at its centre, by the centre's CLI
     python3 vm.py demo-kit FILE DEVICE  put a kit downloaded from the demo's centre onto that machine
@@ -20,6 +22,7 @@ Each scenario starts from a fresh copy of the built image, with a software TPM (
 as a real mini-PC has one. The serial console is kept in /out/logs/;
 only the lines that matter are printed. The last line is the verdict the gate looks for.
 """
+import base64
 import hashlib
 import ipaddress
 import json
@@ -208,8 +211,8 @@ class VM:
             time.sleep(3)
         raise Fail(f"SSH did not come up: {last}")
 
-    def ssh(self, cmd, check=True):
-        return remote_ssh(self.ssh_port, self.key, cmd, check)
+    def ssh(self, cmd, check=True, timeout=600):
+        return remote_ssh(self.ssh_port, self.key, cmd, check, timeout)
 
     def put(self, src, dst):
         remote_put(self.ssh_port, self.key, src, dst)
@@ -260,9 +263,9 @@ class VM:
         self.log.close()
 
 
-def remote_ssh(port, key, cmd, check=True):
+def remote_ssh(port, key, cmd, check=True, timeout=600):
     return sh(["ssh", "-i", key, "-p", str(port), "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-               "-o", "ConnectTimeout=10", "-o", "LogLevel=ERROR", "root@127.0.0.1", cmd], check=check, timeout=600)
+               "-o", "ConnectTimeout=10", "-o", "LogLevel=ERROR", "root@127.0.0.1", cmd], check=check, timeout=timeout)
 
 
 def remote_put(port, key, src, dst):
@@ -368,6 +371,8 @@ def roles_in(slot, listing):
         "the kernel hardening": "etc/sysctl.d/90-urban-hardening.conf",
         "the district relay service": "etc/systemd/system/urban-relay.service",
         "the district's link to the centre": "etc/systemd/system/urban-district@.service",
+        "the update helper's path unit (OTA updates)": "etc/systemd/system/urban-update.path",
+        "the update helper's service (OTA updates)": "etc/systemd/system/urban-update.service",
         "cryptsetup (the data partition is LUKS2)": "usr/sbin/cryptsetup",
         "systemd-cryptsetup": "usr/lib/systemd/systemd-cryptsetup",
         "systemd-cryptenroll": "usr/bin/systemd-cryptenroll",
@@ -398,7 +403,7 @@ def roles_in(slot, listing):
     for role in ("unit)", "district)", "center|district,center"):
         if role not in prepare:
             raise Fail(f"urban-prepare does not know the role {role}")
-    for need in ("urban-relay.service", "urban-district@$UNIT.service", "VISION"):
+    for need in ("urban-relay.service", "urban-district@$UNIT.service", "VISION", "update-inbox", "urban-update.path"):
         if need not in prepare:
             raise Fail(f"urban-prepare does not start or open {need}")
     if "<html" not in open("/tmp/sq2/opt/urban/web/dist/index.html").read().lower():
@@ -1012,7 +1017,24 @@ say jail_writes_etc "$(try inside touch /var/lib/urban/etc/intruder)"
 say jail_writes_update "$(try inside touch /var/lib/urban/update/intruder)"
 say jail_writes_own_keys_control "$(try inside touch /var/lib/urban/etc/pki/edge/.probe)"
 say jail_writes_run "$(try inside touch /run/urban/.probe)"
+say jail_writes_rauc "$(try inside touch /var/lib/urban/rauc/intruder)"
+say jail_writes_data_root "$(try inside touch /var/lib/urban/intruder)"
+say jail_writes_inbox_control "$(try inside touch /var/lib/urban/update-inbox/.probe)"
 rm -f /var/lib/urban/etc/pki/edge/.probe /run/urban/.probe /var/lib/urban/update/intruder /var/lib/urban/etc/intruder /opt/urban/intruder
+rm -f /var/lib/urban/rauc/intruder /var/lib/urban/intruder /var/lib/urban/update-inbox/.probe
+# the update inbox is the jail's own, so it may hand a package to the root helper; it must not be able to install one
+# or to restart the machine itself. Each refusal has a control that proves the tool runs in the jail and reaches the
+# system bus (else "refused" could just mean "could not start"); the package is a genuine, signed one (a root rauc
+# reads it: control), so only the missing privilege can refuse it.
+say root_rauc_info_control "$(try rauc info /var/lib/urban/update-inbox/probe.raucb)"
+say jail_rauc_runs_control "$(try inside rauc --version)"
+say jail_bus_control "$(try inside busctl --system list --no-pager)"
+say jail_systemctl_control "$(try inside systemctl show -p Version --value)"
+say jail_rauc_install "$(try inside rauc install /var/lib/urban/update-inbox/probe.raucb)"
+say jail_rauc_mark_good "$(try inside rauc status mark-good booted)"
+say jail_rauc_mark_bad "$(try inside rauc status mark-bad other)"
+say jail_reboot "$(try inside systemctl --no-ask-password reboot)"
+rm -f /var/lib/urban/update-inbox/probe.raucb
 # KNOWN LIMIT, not a defence: root on a running unit can read the unit's own private key (the service needs it
 # to prove who it is; the TPM seals the disk at rest, not a running system). Printed so the gate does not imply more.
 say root_reads_unit_key_known_limit "$(try cat /var/lib/urban/etc/pki/edge/$unit.key)"
@@ -1049,6 +1071,11 @@ def hardened():
         if r.returncode != 0:
             raise Fail(f"urban-unit setup: {(r.stderr or r.stdout).strip()[-300:]}")
         time.sleep(5)
+        # a genuine, signed package in the inbox, as the unit's client would leave one: what the jail is refused to install
+        tiny_bundle("/tmp/probe.raucb", 9, f"{OUT}/keys/signing.pem", f"{OUT}/keys/signing.key")
+        vm.put("/tmp/probe.raucb", f"{STAGE}/probe.raucb")
+        vm.ssh(f"install -m 600 -o urban -g urban {STAGE}/probe.raucb /var/lib/urban/update-inbox/probe.raucb "
+               f"&& rm -f {STAGE}/probe.raucb")
         if not running(vm, unit):
             raise Fail(f"urban-edge@{unit} does not run in its sandbox: "
                        + vm.ssh(f"journalctl -u urban-edge@{unit} --no-pager -n 15 -o cat", check=False).stdout)
@@ -1073,6 +1100,10 @@ def hardened():
             "jail_reads_ssh_keys": "no", "root_reads_ssh_keys_control": "yes", "jail_reads_boot": "no",
             "root_reads_boot_control": "yes", "jail_writes_system": "no", "jail_writes_etc": "no",
             "jail_writes_update": "no", "jail_writes_own_keys_control": "yes", "jail_writes_run": "no",
+            "jail_writes_rauc": "no", "jail_writes_data_root": "no", "jail_writes_inbox_control": "yes",
+            "root_rauc_info_control": "yes", "jail_rauc_runs_control": "yes", "jail_bus_control": "yes",
+            "jail_systemctl_control": "yes", "jail_rauc_install": "no", "jail_rauc_mark_good": "no",
+            "jail_rauc_mark_bad": "no", "jail_reboot": "no",
             "jail_sees_pid1": "no", "jail_sees_itself_control": "yes",
         }
         wrong = {k: (seen.get(k), v) for k, v in want.items() if seen.get(k) != v}
@@ -1165,8 +1196,9 @@ def hardened():
             raise Fail("control failed: SSH with the default modern algorithms was refused")
         print("   root: no /dev/mem, no /proc/kcore, no memory of the unit's process (its own: yes); lockdown "
               "confidentiality; ptrace off for all", flush=True)
-        print("   hijacked unit service: no SSH keys, no boot files, no writes outside its key folder and /run/urban "
-              "(inside: yes), no other process", flush=True)
+        print("   hijacked unit service: no SSH keys, no boot files, no writes outside its key folder and the update inbox "
+              "(both: yes), no other process; rauc install, rauc status mark-good/mark-bad and systemctl reboot "
+              "refused (their controls run: yes)", flush=True)
         key_known = {"yes": "root CAN read the unit's private key on a running unit",
                      "no": "root could not read the unit's key (better than expected)"}.get(seen.get("root_reads_unit_key_known_limit"),
                                                                                            "the key probe gave no answer")
@@ -1493,6 +1525,252 @@ def chain():
                 os.remove(vm.disk)
 
 
+# ---------------------------------------------------------------- over the air
+
+OTA_TIMEOUT = 5400 if os.environ.get("URBAN_KVM") != "1" else 1500  # a package of hundreds of MB crosses two emulated hops
+INBOX = "/var/lib/urban/update-inbox"
+
+
+def tiny_bundle(dst, version, cert, key):
+    """A bundle in the unit's own format that carries no system (4 MiB of random bytes), signed with `cert`/`key`: for the probes
+    that must be refused before anything is written. Whose key signed it is the point of each probe."""
+    d = f"/tmp/tiny-{version}-{hashlib.sha1(dst.encode()).hexdigest()[:8]}"
+    shutil.rmtree(d, ignore_errors=True)
+    os.makedirs(d)
+    sh(["dd", "if=/dev/urandom", f"of={d}/rootfs.img", "bs=1M", "count=4", "status=none"])  # random: RAUC refuses a bundle that squashes to 4 KiB
+    with open(f"{d}/manifest.raucm", "w") as f:
+        f.write(f"[update]\ncompatible=urban-edge-x86_64\nversion={version}\n\n[bundle]\nformat=verity\n\n"
+                "[image.rootfs]\nfilename=rootfs.img\n")
+    if os.path.exists(dst):
+        os.remove(dst)
+    sh(["rauc", "bundle", "--cert", cert, "--key", key, d, dst])
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def centre_rows(centre, ctx, port=2443):
+    """GET /api/devices as the interface does: signed in as admin (the first password is in the platform's journal).
+    Returns a function that signs in again and reads the rows, so a long wait cannot outlive a session."""
+    import urllib.error
+    import urllib.request
+    password = admin_password(centre, "/tmp/ota-admin.txt")
+    if not password:
+        raise Fail("the centre's first admin password is not in its journal")
+
+    def call(path, body=None, token=None):
+        headers = {"Content-Type": "application/json", **({"Authorization": f"Bearer {token}"} if token else {})}
+        req = urllib.request.Request(f"https://127.0.0.1:{port}{path}", headers=headers,
+                                     data=json.dumps(body).encode() if body is not None else None)
+        with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
+            return json.loads(r.read())
+
+    def rows():
+        try:
+            token = call("/api/login", {"name": "admin", "password": password})["token"]
+        except urllib.error.HTTPError as err:
+            raise Fail(f"signing in to the centre failed: {err.code} {err.read().decode('utf-8', 'replace')[:200]}")
+        return {d["id"]: d for d in call("/api/devices", token=token)}
+
+    return rows
+
+
+def wait_helper(vm, who, version):
+    """The device's root helper says it installed `version` (a refusal fails at once, with its reason)."""
+    m = vm.wait(r"URBAN-UPDATE (installed|refused) version=(\d+) ?(.*)", OTA_TIMEOUT)
+    if m.group(1) != "installed" or m.group(2) != str(version):
+        raise Fail(f"{who}: the update helper said {m.group(0)!r}, wanted 'installed version={version}'")
+
+
+def slot_state(vm):
+    """What an update must not change when it is refused: which slot runs, the state of both, the boot variables, and the
+    first 8 MiB of each slot's partition (a bundle written into either would show there)."""
+    booted, by_slot = slots(vm)
+    return {"booted": booted, "status": {n: s.get("boot_status") for n, s in sorted(by_slot.items())},
+            "grubenv": vm.ssh("grub-editenv /boot/efi/EFI/BOOT/grubenv list").stdout,
+            "heads": vm.ssh("for s in a b; do head -c 8M /dev/disk/by-partlabel/rootfs-$s | sha256sum; done").stdout}
+
+
+def ota_settle(vm, unit):
+    """The unit's own service must still be running after each refused package (the helper stops nothing)."""
+    end = time.time() + 90
+    while time.time() < end:
+        if vm.ssh(f"systemctl is-active urban-edge@{unit}", check=False).stdout.strip() == "active":
+            time.sleep(4)
+            return
+        time.sleep(2)
+    raise Fail(f"urban-edge@{unit} is not running after the helper refused a package:\n"
+               + vm.ssh(f"journalctl -u urban-edge@{unit} --no-pager -n 10 -o cat", check=False).stdout)
+
+
+def ota():
+    """Over the air. The centre keeps release 2 (urban-center release add); the district and the unit behind it each
+    download it, hand it to their root helper and boot slot B by themselves; the centre's Devices shows both on os 2.
+    Then, on the unit, what a hijacked unit service could write into its inbox is refused by the root helper, each time
+    leaving the running slot as it was: a package signed by another key, an old package claimed to be newer, an honest
+    old one, a wrong hash, a file name outside the inbox, a link to a file elsewhere."""
+    centre, district, unit = chain_vms("ota")
+    uid = "edge-J-01"
+    try:
+        # attack material first: a failure here must not cost a boot
+        foreign = "/tmp/ota-foreign"
+        shutil.rmtree(foreign, ignore_errors=True)
+        os.makedirs(foreign)
+        sh(f"openssl req -x509 -newkey rsa:2048 -nodes -keyout {foreign}/key.pem -out {foreign}/cert.pem -days 30 -subj /CN=not-urban")
+        keys = (f"{OUT}/keys/signing.pem", f"{OUT}/keys/signing.key")
+        tiny_bundle("/tmp/ota-foreign-4.raucb", 4, f"{foreign}/cert.pem", f"{foreign}/key.pem")
+        tiny_bundle("/tmp/ota-genuine-1.raucb", 1, *keys)
+        tiny_bundle("/tmp/ota-genuine-5.raucb", 5, *keys)
+
+        for vm in (centre, district, unit):
+            vm.start()
+        centre.booted("1", "A")
+        district.wait(r"URBAN-RELAY units -> 10\.0\.2\.2:28443 in the kernel")
+        district.booted("1", "A")
+        unit.booted("1", "A")
+        push_city(centre)
+        ctx = centre_ca(centre)
+        health(ctx)
+        enrol_chain(centre, district, unit)
+        wait_online(district, "urban-district@district-1", "district")
+        wait_online(unit, f"urban-edge@{uid}", "edge")
+        body = health(ctx)
+        if body.get("devices_online") != 2:
+            raise Fail(f"the centre sees {body.get('devices_online')} device(s) online, not the district and the unit")
+        # the inbox is each client's own, and the helper waits for requests
+        for vm, who in ((district, "district"), (unit, "unit")):
+            got = vm.ssh(f"stat -c '%U:%G %a' {INBOX}; systemctl is-active urban-update.path").stdout.split()
+            if got != ["urban:urban", "700", "active"]:
+                raise Fail(f"{who}: the update inbox / path unit are {got}, want urban:urban 700 and an active path unit")
+        print("OK the district and the unit are online at the centre on version 1; each has its inbox (urban:urban 700) "
+              "and the helper's path unit waiting", flush=True)
+
+        # the release: one command on the centre
+        centre.put(f"{OUT}/urban-edge-2.raucb", f"{STAGE}/urban-edge-2.raucb")
+        r = centre.ssh(f"urban-center release add {STAGE}/urban-edge-2.raucb --version 2", check=False, timeout=2400)
+        if r.returncode != 0:
+            raise Fail(f"urban-center release add: {(r.stderr or r.stdout).strip()[-400:]}")
+        listing = centre.ssh("urban-center release list").stdout
+        if not re.search(r"^\s*2\s+offered\b", listing, re.M):
+            raise Fail(f"release 2 is not listed as offered:\n{listing}")
+        left = centre.ssh("ls /var/lib/urban/platform/release-staging").stdout.split()
+        if left:
+            raise Fail(f"the staging folder of release add was not cleaned up: {left}")
+        print(f"OK centre: {r.stdout.strip()} | list: {listing.strip()}", flush=True)
+
+        # both devices take it by themselves
+        for vm, who in ((district, "district-1"), (unit, uid)):
+            wait_helper(vm, who, 2)
+        for vm, who in ((district, "district-1"), (unit, uid)):
+            line = vm.booted("2", "B")
+            encrypted_line(line, f"{who} in slot B after the update")
+            booted, by_slot = slots(vm)
+            if booted != "B" or by_slot["B"].get("boot_status") != "good":
+                raise Fail(f"{who} after the update: booted {booted}, slot B {by_slot['B'].get('boot_status')}")
+            print(f"OK {who}: 'URBAN-UPDATE installed version=2' by itself, rebooted into slot B, "
+                  f"{line[line.index('URBAN-OS-CHECK'):][:70]}, slot B marked good", flush=True)
+
+        # the centre's own view
+        rows, end, seen = centre_rows(centre, ctx), time.time() + 900, {}
+        while time.time() < end:
+            seen = rows()
+            if all(seen.get(d, {}).get("online") and (seen[d].get("health") or {}).get("os") == 2 for d in ("district-1", uid)):
+                break
+            time.sleep(10)
+        else:
+            raise Fail("the centre does not show both devices online on os 2: "
+                       + json.dumps({d: {"online": seen.get(d, {}).get("online"), "health": seen.get(d, {}).get("health")}
+                                     for d in ("district-1", uid)}, sort_keys=True))
+        print("OK centre Devices (/api/devices as admin): " + "; ".join(
+            f"{d} online, os {seen[d]['health']['os']}, update {json.dumps(seen[d]['health'].get('update'), sort_keys=True)}"
+            for d in ("district-1", uid)), flush=True)
+
+        # the root helper on the unit, attacked by the user urban (what a hijacked unit service can do in its inbox)
+        if unit.ssh("test -e /run/urban/update-reboot", check=False).returncode == 0:
+            raise Fail("the helper's restart marker survived the reboot into slot B")
+        before = slot_state(unit)
+        if before["booted"] != "B":
+            raise Fail(f"the unit does not run slot B before the probes: {before}")
+
+        def send(name, local, req):
+            """What the hijacked service does: a file into the inbox (urban's own), then request.json (urban's own)."""
+            unit.ssh("rm -f /run/urban/update.json")
+            if local:
+                unit.put(local, f"{STAGE}/{name}.tmp")
+                unit.ssh(f"install -m 600 -o urban -g urban {STAGE}/{name}.tmp {INBOX}/{name} && rm -f {STAGE}/{name}.tmp")
+            body = base64.b64encode(json.dumps(req).encode()).decode()
+            unit.ssh(f"echo {body} | base64 -d | runuser -u urban -- tee {INBOX}/request.json.part >/dev/null "
+                     f"&& runuser -u urban -- mv {INBOX}/request.json.part {INBOX}/request.json")
+
+        def refused(what, version, reason):
+            m = unit.wait(r"URBAN-UPDATE (installed|refused|installing) version=(\d+) (.*)", 300)
+            if (m.group(1), m.group(2), m.group(3).strip()) != ("refused", str(version), reason):
+                raise Fail(f"{what}: the helper said {m.group(0)!r}, wanted 'refused version={version} {reason}'")
+            state = json.loads(unit.ssh("cat /run/urban/update.json").stdout)
+            if state != {"state": "refused", "version": version, "reason": reason}:
+                raise Fail(f"{what}: /run/urban/update.json says {state}")
+            mode = unit.ssh("stat -c '%U %a' /run/urban/update.json").stdout.split()
+            if mode != ["root", "644"]:
+                raise Fail(f"{what}: update.json is {mode}, want root 644")
+            after = slot_state(unit)
+            if after != before:
+                raise Fail(f"{what}: the refused request changed the unit: {before} -> {after}")
+            left = [n for n in unit.ssh(f"ls -A {STAGE} {INBOX}").stdout.split() if n.startswith("ota-") or n == "request.json"]
+            if left:
+                raise Fail(f"{what}: left behind: {left}")
+            ota_settle(unit, uid)
+
+        def facts(path):
+            with open(path, "rb") as f:
+                data = f.read()
+            return {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+
+        # (a) a package signed by another key (everything else right: name, size, hash, a newer version)
+        send("urban-4.raucb", "/tmp/ota-foreign-4.raucb", {"version": 4, "file": "urban-4.raucb", **facts("/tmp/ota-foreign-4.raucb")})
+        refused("foreign signature", 4, "signature")
+        print("OK a package signed by another key is refused (signature); slot B still runs, both slots and the boot "
+              "variables unchanged", flush=True)
+        # (b) an older genuine package that claims to be version 3
+        send("urban-3.raucb", "/tmp/ota-genuine-1.raucb", {"version": 3, "file": "urban-3.raucb", **facts("/tmp/ota-genuine-1.raucb")})
+        refused("older claimed newer", 3, "version mismatch")
+        print("OK a genuine version-1 package claimed as version 3 is refused (version mismatch); nothing changed", flush=True)
+        # (b2) the same package, honest about being older than the running system 2
+        send("urban-1.raucb", "/tmp/ota-genuine-1.raucb", {"version": 1, "file": "urban-1.raucb", **facts("/tmp/ota-genuine-1.raucb")})
+        refused("downgrade", 1, "not newer")
+        print("OK a genuine package of version 1 is refused on a system on version 2 (not newer): no downgrade", flush=True)
+        # (d) a package whose hash is not the one the request names
+        send("urban-5.raucb", "/tmp/ota-genuine-5.raucb",
+             {"version": 5, "file": "urban-5.raucb", "sha256": "0" * 64, "size": facts("/tmp/ota-genuine-5.raucb")["size"]})
+        refused("wrong hash", 5, "hash")
+        print("OK a genuine newer package whose hash is not the one in the request is refused (hash)", flush=True)
+        # (c) a file name outside the inbox; a decoy of root's at that place must stay exactly as it is
+        unit.ssh(f"echo decoy > {STAGE}/x.raucb")
+        send("", None, {"version": 7, "file": "../update/x.raucb", "sha256": "a" * 64, "size": 6})
+        refused("file outside the inbox", 0, "bad request")
+        if unit.ssh(f"cat {STAGE}/x.raucb").stdout.strip() != "decoy":
+            raise Fail("the file named outside the inbox was touched")
+        unit.ssh(f"rm -f {STAGE}/x.raucb")
+        print("OK a request naming ../update/x.raucb is refused (bad request); the file there was not touched", flush=True)
+        # (e) a link in the inbox to a file only root can read: refused, and the target is left where it is
+        keys_before = unit.ssh("sha256sum /var/lib/urban/ssh/authorized_keys").stdout
+        unit.ssh(f"runuser -u urban -- ln -s /var/lib/urban/ssh/authorized_keys {INBOX}/urban-6.raucb")
+        send("", None, {"version": 6, "file": "urban-6.raucb", "sha256": "b" * 64, "size": 100})
+        refused("link in the inbox", 6, "bad request")
+        if unit.ssh("sha256sum /var/lib/urban/ssh/authorized_keys").stdout != keys_before:
+            raise Fail("the file a link in the inbox pointed to was changed")
+        unit.ssh(f"rm -f {INBOX}/urban-6.raucb")
+        print("OK a link in the inbox to the maintenance keys is refused (bad request); the keys are where they were", flush=True)
+        print(f"   unit {uid} still on slot B, version 2; the user urban's processes were restarted by systemd after each probe",
+              flush=True)
+        print("OTA CHECK PASSED", flush=True)
+    finally:
+        for vm in (centre, district, unit):
+            vm.stop()
+            if os.path.exists(vm.disk):
+                os.remove(vm.disk)
+        for f in ("/tmp/ota-foreign-4.raucb", "/tmp/ota-genuine-1.raucb", "/tmp/ota-genuine-5.raucb"):
+            if os.path.exists(f):
+                os.remove(f)
+
+
 def demo(pilot=False):
     """The machines kept running for a person: screens on VNC :0 :1 :2 (noVNC in front of them), the centre's
     interface on 2443, the admin password in /out/logs/demo-admin.txt."""
@@ -1668,6 +1946,8 @@ if __name__ == "__main__":
             measure(sys.argv[2] if len(sys.argv) > 2 else "now")
         elif what == "chain":
             chain()
+        elif what == "ota":
+            ota()
         elif what == "demo":
             demo(pilot=len(sys.argv) > 2 and sys.argv[2] == "pilot")
         elif what == "demo-enrol":

@@ -4,11 +4,46 @@
 #   urban-center provision list | enroll-district ... | enroll ... | assign ... | kit <device>
 #   urban-center users password admin        a new password for an account
 #   urban-center city create                 load the city map (stop the service first: systemctl stop urban-platform)
+#   urban-center release add FILE --version N [--devices a,b]   keep a signed update package for the devices
+#   urban-center release list | withdraw N   (FILE may sit in /var/lib/urban/update, root's: it is staged for urban)
 set -eu
-[ $# -ge 1 ] || { sed -n '2,7p' "$0"; exit 2; }
-case "$1" in provision|users|city) ;; *) echo "urban-center: provision, users or city" >&2; exit 2 ;; esac
+[ $# -ge 1 ] || { sed -n '2,8p' "$0"; exit 2; }
+case "$1" in provision|users|city|release) ;; *) echo "urban-center: provision, users, city or release" >&2; exit 2 ;; esac
 cd /opt/urban
 set -a; . /var/lib/urban/etc/platform.env; set +a
-exec runuser -u urban -- env URBAN_SOURCE="$URBAN_SOURCE" HOST="$HOST" PORT="$PORT" UI_TLS="$UI_TLS" \
-  DEVICE_HOST="$DEVICE_HOST" DEVICE_PORT="$DEVICE_PORT" DEVICE_NAME="$DEVICE_NAME" \
-  /opt/urban/.venv/bin/python -m "urban.$1" "${@:2}"
+as_urban=(runuser -u urban -- env URBAN_SOURCE="$URBAN_SOURCE" HOST="$HOST" PORT="$PORT" UI_TLS="$UI_TLS"
+  DEVICE_HOST="$DEVICE_HOST" DEVICE_PORT="$DEVICE_PORT" DEVICE_NAME="$DEVICE_NAME")
+module=/opt/urban/.venv/bin/python
+if [ "$1" != release ] || [ "${2:-}" != add ]; then
+  exec "${as_urban[@]}" "$module" -m "urban.$1" "${@:2}"
+fi
+
+# release add: the package usually sits in /var/lib/urban/update (root only, copied there by scp), where the urban
+# user cannot read it. It is staged for the command - a link to the same file when it is on the same disk (no second
+# copy of a few hundred MB; the file stays root's and is made readable for the group urban), otherwise a copy - in a
+# folder only urban reads, and removed when the command is done. The file you named stays where it was.
+args=("${@:3}")
+file=""; idx=-1; skip=0
+for i in "${!args[@]}"; do
+  if [ "$skip" = 1 ]; then skip=0; continue; fi
+  case "${args[$i]}" in
+    --version|--devices) skip=1 ;;  # their values are not the file
+    -*) ;;
+    *) if [ -z "$file" ]; then file=${args[$i]}; idx=$i; fi ;;
+  esac
+done
+[ -n "$file" ] || { echo "urban-center: release add FILE --version N [--devices a,b]" >&2; exit 2; }
+[ -f "$file" ] || { echo "urban-center: no such file: $file" >&2; exit 1; }
+staging=/var/lib/urban/platform/release-staging
+install -d -m 750 -o urban -g urban /var/lib/urban/platform "$staging"
+tmp=$(mktemp -d "$staging/add.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT
+chown urban:urban "$tmp"; chmod 750 "$tmp"
+name=$(basename "$file")
+if ln -- "$file" "$tmp/$name" 2>/dev/null; then
+  chgrp urban "$tmp/$name"; chmod 640 "$tmp/$name"
+else
+  install -m 640 -o root -g urban -- "$file" "$tmp/$name"
+fi
+args[$idx]="$tmp/$name"
+"${as_urban[@]}" "$module" -m urban.release add "${args[@]}"

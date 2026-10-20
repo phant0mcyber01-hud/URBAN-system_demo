@@ -5,9 +5,106 @@
 #   urban-unit setup KIT.json  the kit from the platform (Устройства -> Комплект); then the unit starts working
 #   urban-unit update BUNDLE   install a signed update into the other slot and reboot into it
 #                              (copy bundles to /var/lib/urban/update: the root is read-only, /tmp is small)
+#   urban-unit apply-update    the root helper behind updates the control centre delivers: run by
+#                              urban-update.service when the client's request.json appears in the inbox
+#                              (nothing to type by hand)
 set -eu
 D=/var/lib/urban
 UNIT=$(sed -n 's/^UNIT=//p' "$D/etc/unit.conf" 2>/dev/null || true)
+
+# ---- updates delivered by the control centre
+# The client of the unit (or district) service runs as the sandboxed user urban: it downloads a package into the
+# inbox and asks for it to be installed with request.json. Everything in the inbox is the intruder's if that
+# service is hijacked, so this helper (root) trusts nothing there: the request is parsed strictly, the package is
+# taken out of the inbox before it is looked at, and it is installed only if it is signed by URBAN's build key
+# (the keyring in the image), is exactly the version the request says, and is newer than the running system.
+# The most a hijacked service can cause is a genuine, newer URBAN release being installed.
+apply_update() {
+  local inbox=$D/update-inbox stage=$D/update st=/run/urban/update
+  local v=0 f="" h="" s="" got mfv cur staged parsed
+  install -d -m 755 -o root -g root /run/urban
+  # one state, three places: /run/urban/update.json (the client reports it), update.txt (the machine's screen)
+  # and one marker on the console that the tests wait for
+  say() {  # $1 state, $2 short reason (fixed words, never taken from the request)
+    printf '{"state": "%s", "version": %s, "reason": "%s"}\n' "$1" "$v" "$2" > "$st.json.tmp"
+    chmod 644 "$st.json.tmp"; mv -f "$st.json.tmp" "$st.json"
+    printf '%s version %s: %s\n' "$1" "$v" "$2" > "$st.txt.tmp"
+    chmod 644 "$st.txt.tmp"; mv -f "$st.txt.tmp" "$st.txt"
+    echo "URBAN-UPDATE $1 version=$v $2"
+    /usr/local/bin/urban-console >/dev/null 2>&1 || true
+  }
+  refuse() {  # the running system is never touched; whatever was staged goes
+    rm -rf -- "$stage"/ota-*.raucb
+    say refused "$1"
+    exit 1
+  }
+
+  [ -e "$inbox/request.json" ] || [ -L "$inbox/request.json" ] || exit 0  # nothing (any more)
+  rm -rf -- "$stage"/ota-*.raucb  # left over from an install that did not finish
+  # The request, read the way a hostile file must be: no symlink, a regular file, small, strict JSON of exactly
+  # the shape the client writes. Anything else is no request. It is removed at once (whatever it was), so that
+  # the path unit does not fire again for it.
+  parsed=$(/usr/bin/python3 -I -S - "$inbox/request.json" <<'PY' 2>/dev/null
+import json, os, re, stat, sys
+try:
+    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_size > 4096:
+        sys.exit(1)
+    req = json.loads(os.read(fd, 4097).decode("ascii"))
+    v, f, h, s = (req.get(k) for k in ("version", "file", "sha256", "size"))
+    ok = (type(v) is int and 0 < v < 10**9 and type(s) is int and 0 < s <= 2 * 2**30
+          and isinstance(f, str) and re.fullmatch(r"urban-[0-9]+\.raucb", f) and f == "urban-%d.raucb" % v
+          and isinstance(h, str) and re.fullmatch(r"[0-9a-fA-F]{64}", h))
+    if not ok:
+        sys.exit(1)
+    print(v, f, h.lower(), s)
+except Exception:
+    sys.exit(1)
+PY
+  ) || parsed=""
+  rm -rf --one-file-system -- "$inbox/request.json"
+  [ -n "$parsed" ] || refuse "bad request"
+  read -r v f h s <<< "$parsed"
+
+  [ ! -e /run/urban/update-reboot ] || refuse "restart pending"
+  { [ -f "$inbox/$f" ] && [ ! -L "$inbox/$f" ]; } || refuse "bad request"
+
+  # Take the package out of the inbox before looking at it, so that nothing can open it by name any more. A process
+  # that already holds it open could still write to it after the checks below; that cannot get a change installed:
+  # bundles are format=verity, RAUC checks every block of the payload against the hash tree in the signed manifest
+  # while it reads it, and the signature itself covers the manifest. No service is stopped for this (on the pilot
+  # machine the user urban also runs the control centre).
+  staged=$stage/ota-$v.raucb
+  mv -T -- "$inbox/$f" "$staged" 2>/dev/null || refuse "bad request"  # rename(2): a link is moved as a link
+  if [ -L "$staged" ] || [ ! -f "$staged" ]; then refuse "bad request"; fi
+  chown root:root "$staged" && chmod 600 "$staged"
+  # a second name for the same file in the inbox would still let the intruder write to it
+  [ "$(stat -c %h "$staged")" = 1 ] || refuse "bad request"
+  [ "$(stat -c %s "$staged")" = "$s" ] || refuse "hash"
+  got=$(sha256sum "$staged" | cut -d' ' -f1)
+  [ "$got" = "$h" ] || refuse "hash"
+
+  # the signature (against the keyring of this image) and the manifest, as RAUC reads them
+  got=$(timeout 900 rauc info --output-format=shell "$staged" 2>/dev/null) || refuse "signature"
+  mfv=$(printf '%s\n' "$got" | sed -n "s/^RAUC_MF_VERSION=['\"]\{0,1\}\([0-9]\{1,9\}\)['\"]\{0,1\}\$/\1/p" | head -n 1)
+  { [ -n "$mfv" ] && [ "$((10#$mfv))" = "$v" ]; } || refuse "version mismatch"
+  cur=$(sed -n 's/^VERSION=\([0-9]\{1,9\}\)$/\1/p' /etc/urban-os-release)
+  { [ -n "$cur" ] && [ "$v" -gt "$((10#$cur))" ]; } || refuse "not newer"
+
+  say installing "installing into the other slot"
+  if ! rauc install "$staged" > /run/urban/update-rauc.log 2>&1; then
+    tail -n 5 /run/urban/update-rauc.log >&2 || true
+    refuse "install failed"
+  fi
+  rm -f -- "$staged"
+  : > /run/urban/update-reboot  # no second install until the machine has restarted into this one
+  say installed "restarting into the new system"
+  # a short delay, so that the client can report; the existing health check and rollback cover a bad new slot
+  systemd-run --quiet --on-active=5 --unit=urban-update-reboot --collect systemctl reboot \
+    || systemctl --no-block reboot
+}
+
 case "${1:-status}" in
   status)
     echo "unit:     ${UNIT:-not set (urban-unit.txt on URBAN-ESP)}"
@@ -43,8 +140,11 @@ case "${1:-status}" in
     echo "installed into the other slot; rebooting into it"
     systemctl reboot
     ;;
+  apply-update)
+    apply_update
+    ;;
   *)
-    sed -n '2,6p' "$0"
+    sed -n '2,9p' "$0"
     exit 2
     ;;
 esac
