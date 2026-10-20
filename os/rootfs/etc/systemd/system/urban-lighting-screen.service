@@ -1,0 +1,36 @@
+# Redraws the machine's screen (urban-console), which reads the lighting program's state. A sandbox like the power
+# manager's, which redraws the screen the same way: it writes /run/urban (the screen's text) and nothing else,
+# has no network, no capability, no device, and sees no key.
+[Unit]
+Description=URBAN OS: redraw the screen (street-lighting cabinet)
+After=urban-prepare.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/urban-console
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=-/run/urban -/run/agetty.reload
+InaccessiblePaths=-/var/lib/urban/ssh -/var/lib/urban/etc/pki -/var/lib/urban/update -/var/lib/urban/rauc -/var/lib/urban/platform -/boot
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+UMask=0022

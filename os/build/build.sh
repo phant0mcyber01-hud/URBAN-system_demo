@@ -92,7 +92,7 @@ chroot "$ROOT" python3 -m venv /opt/urban/.venv
 chroot "$ROOT" /opt/urban/.venv/bin/pip install --quiet --upgrade pip
 chroot "$ROOT" /opt/urban/.venv/bin/pip install --quiet -e "/opt/urban/backend[edge,vision]"
 chroot "$ROOT" /opt/urban/.venv/bin/python -m compileall -q /opt/urban/backend/urban >/dev/null
-chroot "$ROOT" /opt/urban/.venv/bin/python -c "import urban.edge.__main__, urban.vision.__main__, cv2, onnxruntime"
+chroot "$ROOT" /opt/urban/.venv/bin/python -c "import urban.edge.__main__, urban.vision.__main__, urban.modules.lighting.__main__, cv2, onnxruntime"
 # the control centre's interface (role center): built on the host with `npm run build` in web/
 [ -f /work/web/dist/index.html ] || { echo "web/dist is missing: run npm run build in web/ first" >&2; exit 1; }
 mkdir -p "$ROOT/opt/urban/web"; cp -r /work/web/dist "$ROOT/opt/urban/web/dist"; chmod -R a+rX,go-w "$ROOT/opt/urban/web"
@@ -106,7 +106,7 @@ fi
 # ---- the operating system around it
 log "system configuration"
 cp -r /work/os/rootfs/. "$ROOT/"
-cp /work/deploy/urban-edge@.service /work/deploy/urban-vision@.service "$ROOT/etc/systemd/system/"
+cp /work/deploy/urban-edge@.service /work/deploy/urban-vision@.service /work/deploy/urban-lighting@.service "$ROOT/etc/systemd/system/"
 # the data partition is mounted by label; systemd-cryptsetup needs the dm-crypt module early
 echo dm_crypt >> "$ROOT/etc/modules"
 cp "$OUT/keys/ca.pem" "$ROOT/etc/rauc/keyring.pem"

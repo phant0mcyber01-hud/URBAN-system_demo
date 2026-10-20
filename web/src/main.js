@@ -17,6 +17,8 @@ import { createCameraView } from './map/cameraView.js';
 import { createSearch } from './map/search.js';
 import { createPlaceCard, describe } from './map/placeCard.js';
 import { createPanel, clock, esc, setClockMode } from './ui/panel.js';
+import { createLighting, normalizeModules, renderModuleSwitch } from './ui/lighting.js';
+import { lightingLayers } from './scene/lightingLayer.js';
 import { createState } from './state.js';
 import qrcode from 'qrcode-generator';
 import * as api from './api.js';
@@ -64,6 +66,7 @@ function select(kind, object, lonlat) {
 const { map, overlay, flyTo } = createMap(scene, {
   onClick: ({ object, layer, coordinate }) => {
     if (!object || !layer) { card.hide(); S.pin = null; return; }
+    if (layer.id === 'lighting') { lighting.pick(object.cabinet ?? object.id); return; }
     if (layer.id === 'cams') { panel.setTab('cameras'); cameras.open(object.id); return; }
     select(layer.id, object, coordinate ? [coordinate[0], coordinate[1]] : null);
   },
@@ -77,6 +80,7 @@ map.on('zoom', () => {
 
 const cameras = createCameraView(scene, { onChange: (id) => { S.cam = id; panel.render(); } });
 const panel = createPanel(scene, S, {
+  beforeTab: () => { if (S.module !== 'traffic') setModule('traffic'); },
   onFly: (junction) => {
     const target = scene.cams.find((c) => c.id === junction) ?? scene.detectors.find((d) => d.id === junction);
     if (!target) return;
@@ -248,6 +252,44 @@ async function loadHistory() {
   } catch (e) { if (e.message === 'нужно войти заново') signedOut(); }
 }
 
+// ---- modules: traffic is the default screen; a second module (street lighting) is one switch away ----
+const lighting = createLighting({
+  root: $('panel'),
+  api,
+  canOperate: () => S.can('operator'),
+  onData: (s) => { S.lighting = s; S.lightingVersion++; },
+  onFocus: (id) => {
+    const c = S.lighting?.cabinets?.find((x) => (x.cabinet ?? x.id) === id);
+    if (c && Number.isFinite(c.lon) && Number.isFinite(c.lat)) flyTo([c.lon, c.lat], 17);
+  },
+  onAuthLost: () => signedOut(),
+  toast: (t) => toast(t),
+});
+function drawModules() {
+  const html = renderModuleSwitch(S.modules, S.module);
+  $('modsw').innerHTML = html;
+  $('modsw').hidden = !html;
+}
+function setModule(id) {
+  if (id === S.module || !S.modules.some((m) => m.id === id)) return;
+  S.module = id;
+  $('tabs').hidden = id !== 'traffic';
+  card.hide();
+  S.pin = null;
+  drawModules();
+  if (id === 'lighting') lighting.start(); else { lighting.stop(); panel.refresh(); }
+}
+$('modsw').onclick = (e) => { const b = e.target.closest('[data-module]'); if (b) setModule(b.dataset.module); };
+// what the centre runs, asked after sign-in; if it cannot say, or runs only traffic, nothing changes on screen
+async function loadModules() {
+  if (!S.user) return;
+  let list = [];
+  try { list = normalizeModules(await api.get('/api/modules')); } catch { /* the interface stays as traffic only */ }
+  S.modules = list.length > 1 ? list : [];
+  if (S.module !== 'traffic' && !S.modules.some((m) => m.id === S.module)) setModule('traffic');
+  drawModules();
+}
+
 // ---- accounts: everything needs a sign-in; what the buttons do depends on the role ----
 const ROLE_TEXT = { viewer: 'наблюдатель', operator: 'оператор', admin: 'администратор' };
 function toast(text) {
@@ -263,6 +305,7 @@ async function run(action) {
 }
 function renderOperator() {
   $('op-tools').hidden = !S.user;
+  lighting.sync();
   if (S.user) {
     $('op-user').textContent = `${S.user.name} · ${ROLE_TEXT[S.user.role] ?? S.user.role}${S.user.mfa_setup ? ' · нужен второй фактор' : ''}`;
     $('op-user').className = `chip${S.user.mfa_setup ? ' warn' : ''}`;  // who you are is not a status: no colour unless something is missing
@@ -307,6 +350,13 @@ async function bootLines() {
 }
 function signedOut() {
   S.user = null;
+  lighting.stop();
+  S.module = 'traffic';
+  S.modules = [];
+  S.lighting = null;
+  $('tabs').hidden = false;
+  drawModules();
+  panel.refresh();
   if (ws) { const w = ws; ws = null; w.close(); }
   $('users').hidden = true;
   $('enrol').hidden = true;
@@ -488,7 +538,8 @@ function frame(now) {
   live.update(now);
   const pulse = 0.5 + 0.5 * Math.sin(now / 300);
   overlay.setProps({
-    layers: [...base, ...overlayLayers(scene, S, show, { main: true, pulse }), ...live.layers(show.traffic)],
+    layers: [...base, ...overlayLayers(scene, S, show, { main: true, pulse }), ...live.layers(show.traffic),
+      ...(S.module === 'lighting' ? lightingLayers(S, pulse) : [])],
   });
   const camOverlay = cameras.overlay;
   if (camOverlay) {
@@ -533,6 +584,7 @@ function connect() {
       renderMode(snap.city);
       S.applySnapshot(snap);
       loadJunctions();
+      loadModules();
     } catch { /* the socket will tell us if the session is gone */ }
     renderOperator();
   };

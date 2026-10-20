@@ -50,6 +50,15 @@ class DeviceHub:
         rec = self.registry.by_tls(tls)
         return rec is not None and rec["id"] in self.sessions
 
+    def is_online(self, device: str) -> bool:
+        """Has this device id a session now (by id, for the modules; online() is by junction)."""
+        return device in self.sessions
+
+    def devices_of(self, kind: str) -> list[dict]:
+        """Copies of the registry records of one kind ("unit", "district", "lighting"), as the registry is now."""
+        self._sync()
+        return [dict(rec) for rec in self.registry.devices.values() if kind_of(rec) == kind]
+
     def envelope(self, device: str, body: dict) -> dict:
         self._seq += 1
         env = {"device": device, "seq": self._seq, "t": int(self.wall()), "body": body}
@@ -77,9 +86,9 @@ class DeviceHub:
 
     # ---- over-the-air updates: the offer goes down the signed channel, the package comes over the same listener
     def pending_release(self, device: str, rec: dict) -> dict | None:
-        """The release this device should be offered now, or None: it must be a unit or a district server that
-        reported a system version (an integer) older than the newest release that is not withdrawn and targets it."""
-        if self.releases is None or kind_of(rec) not in ("unit", "district"):
+        """The release this device should be offered now, or None: it must be a unit, a district server or a
+        lighting cabinet's unit that reported a system version (an integer) older than the newest release that is not withdrawn and targets it."""
+        if self.releases is None or kind_of(rec) not in ("unit", "district", "lighting"):
             return None
         have = self.seen.get(device, {}).get("health", {}).get("os")
         rel = self.releases.newest_for(device)
@@ -179,9 +188,12 @@ class DeviceHub:
             self.seen[device] = self.reconnected(device, hello.get("version"))
             epoch = hello.get("epoch")
             self.epochs[device] = epoch if isinstance(epoch, int) else None
-            await ws.send_text(json.dumps({"type": "welcome", "t": self.clock(), "tls": rec["tls"],
-                                           "plans": sorted(self.plans.get(rec["tls"], ())),
-                                           "gateway": self.gateway_cert}))
+            welcome = {"type": "welcome", "t": self.clock(), "tls": rec["tls"],
+                       "plans": sorted(self.plans.get(rec["tls"], ())) if kind_of(rec) == "unit" else [],  # only a junction has plans
+                       "gateway": self.gateway_cert}
+            if kind_of(rec) == "lighting":
+                welcome["cabinet"] = rec.get("cabinet")
+            await ws.send_text(json.dumps(welcome))
             self._offered.pop(device, None)  # a new session may have a device that lost its download
             await self._offer(device, rec)
             while True:
@@ -240,6 +252,14 @@ class DeviceHub:
             await _close(ws)
         return rec
 
+    async def enroll_lighting(self, device: str, cabinet: str, public: str, serial: str = "",
+                              lon: float | None = None, lat: float | None = None) -> dict:
+        rec = self.registry.enroll_lighting(device, cabinet, public, serial, lon, lat)
+        ws = self.sessions.pop(device, None)
+        if ws is not None:
+            await _close(ws)
+        return rec
+
     def assign(self, device: str, district: str | None) -> dict | None:
         return self.registry.assign(device, district)
 
@@ -276,7 +296,7 @@ class DeviceHub:
         for rec in self.registry.devices.values():
             seen = self.seen.get(rec["id"], {})
             out.append({"id": rec["id"], "kind": kind_of(rec), "junction": rec.get("junction"), "tls": rec.get("tls"),
-                        "name": rec.get("name", ""), "address": rec.get("address"), "district": rec.get("district"),
+                        "name": rec.get("name", ""), "address": rec.get("address"), "cabinet": rec.get("cabinet"), "district": rec.get("district"),
                         "serial": rec.get("serial", ""), "enrolled": rec.get("enrolled", ""),
                         "first_seen": rec.get("first_seen"),
                         "fingerprint": crypto.fingerprint(rec["public_key"]),

@@ -1,0 +1,69 @@
+# One street-lighting cabinet (a light-<cabinet> device, module lighting) on its computer in the cabinet:
+#   systemctl enable --now urban-lighting@light-C-01
+# Its key, ca.pem and gateway.pub live in /etc/urban/pki; parameters in /etc/urban/edge-<id>.env (the kit from
+# `python -m urban.provision kit light-C-01`, written by `python -m urban.edge --setup`). On URBAN OS this unit is
+# started by urban-prepare for a unit with MODULE=lighting in urban-unit.txt.
+# The env file (made by the kit's setup) says PLATFORM, SERVER_NAME, CABINET, LON, LAT and ADAPTER=emulated|relay
+# (emulated models the lamps; relay drives the cabinet's contactor); EXTRA= adds more options of the program,
+# e.g. --relay-device /sys/class/gpio/gpio17/value.
+[Unit]
+Description=URBAN street-lighting cabinet %i
+# no wait for the network: the program starts at once, keeps its own schedule and keeps trying the centre
+After=network.target
+
+[Service]
+User=urban
+Group=urban
+WorkingDirectory=/opt/urban
+# systemd has no ${VAR:-default}: the defaults are set here, and the env file (read after) overrides them. An empty
+# CABINET means "the id after light-"; LON and LAT default to Fergana, the pilot city (the program's own default).
+Environment=ADAPTER=emulated CABINET= LON=71.78 LAT=40.39 EXTRA=
+EnvironmentFile=/etc/urban/edge-%i.env
+ExecStart=/opt/urban/.venv/bin/python -m urban.modules.lighting --unit %i --platform ${PLATFORM} --server-name ${SERVER_NAME} \
+    --pki /etc/urban/pki --adapter ${ADAPTER} --cabinet "${CABINET}" --lon ${LON} --lat ${LAT} \
+    --status /run/urban/light/lighting.json $EXTRA
+Restart=always
+RestartSec=2
+# The sandbox (as urban-edge@): a hacked program reaches its own key folder, the update inbox, its status folder and
+# the network, nothing else. No maintenance keys, no staged update bundles, no boot files, no other process, no
+# privilege, no new code in memory. Its state goes to /run/urban/light (the only place of /run/urban it may write;
+# the "-" keeps a server install without that folder working: the program then runs without a status file).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/etc/urban/pki -/var/lib/urban/update-inbox -/run/urban/light
+InaccessiblePaths=-/var/lib/urban/ssh -/var/lib/urban/update -/var/lib/urban/rauc -/var/lib/urban/platform -/boot
+ProtectHome=yes
+PrivateTmp=yes
+# the cabinet's contactor board on a serial line or a GPIO relay board: those devices only
+DevicePolicy=closed
+DeviceAllow=char-ttyUSB rw
+DeviceAllow=char-ttyACM rw
+DeviceAllow=char-ttyS rw
+DeviceAllow=char-gpiochip rw
+SupplementaryGroups=dialout
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+KeyringMode=private
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

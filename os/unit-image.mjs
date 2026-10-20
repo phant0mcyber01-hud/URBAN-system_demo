@@ -3,6 +3,7 @@
 //   node os/unit-image.mjs --unit edge-J-07 --serial URB-0001 [--key my-key.pub] [--version 1]
 //   node os/unit-image.mjs --role district --unit district-1 --serial SRV-0001 --center urban-center
 //   node os/unit-image.mjs --unit edge-J-07 --serial URB-0001 --vision off     (a light unit: no cameras)
+//   node os/unit-image.mjs --unit light-C-01 --serial LGT-0001 --module lighting    (a street-lighting cabinet)
 //   node os/unit-image.mjs --role district,center --unit center --serial SRV-0002 --host urban-center
 //
 // Takes the built disk image, puts the machine's name, serial and role (urban-unit.txt) and the maintenance key
@@ -24,11 +25,14 @@ const role = opt("--role", "unit");
 const host = opt("--host", "");
 const center = opt("--center", "");
 const vision = opt("--vision", "");
-const names = { unit: /^edge-[A-Za-z0-9._-]+$/, district: /^district-[A-Za-z0-9._-]+$/,
+const module_ = opt("--module", "");
+if (module_ && module_ !== "lighting") fail("--module lighting is the only choice (a street-lighting cabinet); leave it out for a junction unit");
+if (module_ && role !== "unit") fail("--module lighting is for a unit (--role unit)");
+const names = { unit: module_ ? /^light-[A-Za-z0-9._-]+$/ : /^edge-[A-Za-z0-9._-]+$/, district: /^district-[A-Za-z0-9._-]+$/,
   center: /^center(-[A-Za-z0-9._-]+)?$/, "district,center": /^center(-[A-Za-z0-9._-]+)?$/ };
 if (!names[role]) fail("--role unit | district | center | district,center");
 if (!names[role].test(unit) || unit === "edge-J-00") {
-  fail({ unit: "--unit edge-<junction>, e.g. edge-J-07", district: "--unit district-<name>, e.g. district-1" }[role]
+  fail({ unit: module_ ? "--unit light-<cabinet>, e.g. light-C-01" : "--unit edge-<junction>, e.g. edge-J-07", district: "--unit district-<name>, e.g. district-1" }[role]
     || "--unit center or center-<name>");
 }
 if (host && !/^[A-Za-z0-9.-]+$/.test(host)) fail("--host: a host name or an address");
@@ -62,7 +66,7 @@ const name = `urban-edge-${version}-${unit}`;
 const unitTxt = readFileSync(join(ROOT, "os", "build", "urban-unit.txt"), "utf8")
   .replace(/^UNIT=.*$/m, `UNIT=${unit}`).replace(/^SERIAL=.*$/m, `SERIAL=${serial}`)
   .replace(/^ROLE=.*$/m, `ROLE=${role}`).replace(/^HOST=.*$/m, `HOST=${host}`)
-  .replace(/^CENTER=.*$/m, `CENTER=${center}`).replace(/^VISION=.*$/m, `VISION=${vision}`).replace(/\r?\n/g, "\r\n");
+  .replace(/^CENTER=.*$/m, `CENTER=${center}`).replace(/^VISION=.*$/m, `VISION=${vision}`).replace(/^MODULE=.*$/m, `MODULE=${module_}`).replace(/\r?\n/g, "\r\n");
 const script = `set -euo pipefail
 img=/tmp/${name}.img
 cp --sparse=always /out/urban-edge-${version}.img "$img"

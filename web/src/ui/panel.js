@@ -50,7 +50,7 @@ const exportItem = (e) => {
     Проверка копии: <code>python -m urban.export verify</code>.</small></div>`;
 };
 
-export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
+export function createPanel(scene, S, { onCamera, onAction, onFly, onTab, beforeTab }) {
   const shadowList = (filter, n = 6) => {
     const list = S.shadow.filter(filter).slice(-n).reverse();
     return list.length ? list.map((p) => `<div class="item">${chip('shadow', 'ТОЛЬКО ЗАПИСЬ')} <code>${esc(p.command)}</code>
@@ -440,6 +440,7 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
 
   const api = {
     render() {
+      if (S.module !== 'traffic') { $('clock').textContent = clock(S.t); return; }  // another module owns the panel
       const html = TABS[S.tab][1]();
       if (html !== last) { panel.innerHTML = html; last = html; }
       $('clock').textContent = clock(S.t);
@@ -458,6 +459,7 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab }) {
     },
     refresh() { last = ''; api.render(); },
     setTab(tab) {
+      if (beforeTab) beforeTab();  // a traffic tab was asked for: leave the other module
       S.tab = tab;
       for (const b of tabs.children) b.classList.toggle('sel', b.dataset.tab === tab);
       last = '';

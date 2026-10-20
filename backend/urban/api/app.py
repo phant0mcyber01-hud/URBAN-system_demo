@@ -38,9 +38,11 @@ from ..accounts import Accounts, CodeRequired, allows, keep_first_password
 from ..core.bus import PLATFORM_FRAME, SOURCE_FRAME, Bus
 from ..devices import crypto
 from ..devices.hub import DeviceHub
-from ..devices.enrolment import is_district, make_kit, parse_code
+from ..devices.enrolment import is_district, is_lighting, make_kit, parse_code
 from ..devices.registry import ACTIVE, REVOKED, Registry, device_id, provision
 from ..city.passport import PassportError, Passports, problems
+from ..modules import ModuleError, describe, load_modules, mount_routes, report_router, startup_all, tick_all
+from ..modules.base import Core
 from ..junctions import APPROVED, DRAFT, _junction, approved, approved_plans, load_all_junctions, load_cameras
 from ..platform import Platform
 from ..release import ReleaseStore
@@ -79,7 +81,7 @@ def _meta() -> dict:
 meta = _meta()
 GATEWAY_CERT = json.loads((c.PKI / "gateway.cert.json").read_text())
 hub = DeviceHub(Registry(c.PKI / "devices.json"), crypto.load_private((c.PKI / "gateway.key").read_text()),
-                on_report=lambda rec, report: platform.on_report(rec, report), clock=lambda: platform.t,
+                on_report=lambda rec, report: route_report(rec, report), clock=lambda: platform.t,
                 plans=approved_plans(junctions), gateway_cert=GATEWAY_CERT, releases=ReleaseStore(c.RELEASES))
 store = Store(c.DB, mode=c.SOURCE, retention_days=c.HISTORY_DAYS)
 platform = Platform(meta["center"], meta["radius"], junctions, send=hub.send, reachable=hub.online, store=store,
@@ -160,12 +162,15 @@ async def lifespan(_):
     threading.Thread(target=source_thread, args=(field.loop, stop), daemon=True).start()
     watchdog = asyncio.create_task(edge_watchdog(stop)) if SPAWN_EDGE else None
     checker = asyncio.create_task(chain_checker())
+    await startup_all(modules)
+    ticker = asyncio.create_task(module_ticker())
     shipper = asyncio.create_task(exporter.loop()) if exporter.sinks else None
     print(f"  Audit copy: {', '.join(s.name for s in exporter.sinks)}" if exporter.sinks
           else "  Audit copy: none (set AUDIT_EXPORT or AUDIT_SYSLOG in .env)", flush=True)
     yield
     stop.set()
     checker.cancel()
+    ticker.cancel()
     if shipper is not None:
         shipper.cancel()
     if watchdog is not None:
@@ -184,6 +189,13 @@ async def chain_checker():
             print(f"AUDIT CHAIN BROKEN at record #{result['broken_at']}: the history file was changed outside the platform",
                   flush=True)
         await asyncio.sleep(CHAIN_CHECK)
+
+
+async def module_ticker():
+    """About once a second: the modules renew the leases they still want and let the others lapse."""
+    while True:
+        tick_all(modules, time.time())
+        await asyncio.sleep(1)
 
 
 async def edge_watchdog(stop: threading.Event):
@@ -254,6 +266,25 @@ def role(needed: str):
 
 
 viewer, operator, admin = role("viewer"), role("operator"), role("admin")
+
+# ---- City OS modules (urban/modules): what MODULES names, on top of the core's devices, roles and audit log ----
+core = Core(send=hub.send_device, online=hub.is_online, devices=hub.devices_of,
+            audit=lambda event, target, note="", actor="platform":
+                platform.gateway.audit.append(platform.t, event, "-", "-", target, note, actor=actor, mode="approval"),
+            now=time.time, viewer=viewer, operator=operator, admin=admin, demo=c.DEMO,
+            extra={"platform": platform, "hub": hub})
+try:
+    modules = load_modules(c.MODULES, core)
+except ModuleError as err:
+    raise SystemExit(f"MODULES: {err}")
+route_report = report_router(modules)  # a report reaches only the module that owns the device's kind
+mount_routes(app, modules)
+
+
+@app.get("/api/modules")
+def module_list(who: str = Depends(viewer)):
+    """The modules this centre runs, each with a short summary for the interface."""
+    return describe(modules)
 
 
 class Credentials(BaseModel):
@@ -523,6 +554,9 @@ class CodeEnrolment(BaseModel):
     junction: str = ""        # a unit: junction id it is installed at
     district: str | None = None  # a unit: the district server it connects through (its next kit points there)
     address: str = ""         # a district server: the host name or IP its units connect to
+    cabinet: str = ""         # a lighting unit: the cabinet it controls, e.g. C-01
+    lon: float | None = None  # a lighting unit: where the cabinet stands (for its astronomical schedule)
+    lat: float | None = None
 
 
 class Assignment(BaseModel):
@@ -550,6 +584,22 @@ async def device_enroll_code(body: CodeEnrolment, who: str = Depends(admin)):
         platform.gateway.audit.append(platform.t, "district-enrolled", "-", "-", rec["id"],
                                       f"{rec['address']} key {fp}{' (box replaced)' if replaced else ''}", actor=who, mode="approval")
         return {"id": rec["id"], "kind": "district", "address": rec["address"], "serial": rec["serial"],
+                "fingerprint": fp, "replaced": replaced}
+    if is_lighting(code["device"]):
+        if not body.cabinet.strip():
+            raise HTTPException(400, "для блока освещения нужен шкаф, которым он управляет (например C-01)")
+        before = hub.registry.devices.get(code["device"])
+        try:
+            rec = await hub.enroll_lighting(code["device"], body.cabinet.strip(), code["public"], code["serial"],
+                                            body.lon, body.lat)
+        except ValueError as err:
+            raise HTTPException(400, str(err))
+        fp = crypto.fingerprint(rec["public_key"])
+        replaced = before is not None and before["public_key"] != rec["public_key"]
+        platform.gateway.audit.append(platform.t, "device-enrolled", "-", "-", rec["id"],
+                                      f"cabinet {rec['cabinet']} key {fp}{' (box replaced)' if replaced else ''}",
+                                      actor=who, mode="approval")
+        return {"id": rec["id"], "kind": "lighting", "cabinet": rec["cabinet"], "serial": rec["serial"],
                 "fingerprint": fp, "replaced": replaced}
     junction = next((j for j in junctions if j["id"] == body.junction), None)
     if junction is None:

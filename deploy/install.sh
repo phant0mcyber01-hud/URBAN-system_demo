@@ -29,6 +29,7 @@ chmod 600 .env
 
 install -m 644 deploy/urban.service /etc/systemd/system/urban.service
 install -m 644 deploy/urban-edge@.service /etc/systemd/system/urban-edge@.service
+install -m 644 deploy/urban-lighting@.service /etc/systemd/system/urban-lighting@.service  # a street-lighting cabinet (City OS module lighting)
 mkdir -p /etc/urban/pki && chown -R urban:urban /etc/urban && chmod 700 /etc/urban/pki
 install -m 644 deploy/nginx-urban.conf /etc/nginx/sites-available/urban
 ln -sf ../sites-available/urban /etc/nginx/sites-enabled/urban

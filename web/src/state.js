@@ -16,6 +16,9 @@ export function createState(scene) {
     junction: null, // the passport open in the junctions tab
     mode: 'field', // 'field' (the real system: URBAN Edge units) or 'simulation' (the demo twin)
     corridor: false, // green corridor proposals switched on (GREEN_CORRIDOR)
+    modules: [], // from /api/modules: [{id, title}]; fewer than two means no module switch
+    module: 'traffic', // the module on screen: 'traffic' (default) or 'lighting'
+    lighting: null, lightingVersion: 0, // /api/lighting/state, drawn on the map while the lighting module is open
     can: (role) => (RANK[S.user?.role] ?? -1) >= RANK[role],
   };
 

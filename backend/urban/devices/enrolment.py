@@ -23,7 +23,9 @@ from . import crypto
 PREFIX = "URBAN1"
 KIT_VERSION = 1
 SERIAL = re.compile(r"^[A-Za-z0-9._-]{0,40}$")
-DEVICE = re.compile(r"^(edge|district)-[A-Za-z0-9._-]{1,54}$")  # a junction unit, or a district server
+DEVICE = re.compile(r"^(edge|district|light)-[A-Za-z0-9._-]{1,54}$")  # a junction unit, a district server, a lighting cabinet's unit
+LIGHT_DEVICE = re.compile(r"^light-[A-Za-z0-9._-]{1,54}$")
+CABINET = re.compile(r"^[A-Za-z0-9._-]{1,40}$")
 DEFAULT_PORT = 8443
 HOST_PORT = re.compile(r"[A-Za-z0-9.-]+(:\d{1,5})?")      # name or IPv4, optional port
 IPV6_PORT = re.compile(r"\[([0-9A-Fa-f:]+)\](:\d{1,5})?")  # [address], optional port
@@ -31,6 +33,10 @@ IPV6_PORT = re.compile(r"\[([0-9A-Fa-f:]+)\](:\d{1,5})?")  # [address], optional
 
 def is_district(device: str) -> bool:
     return device.startswith("district-")
+
+
+def is_lighting(device: str) -> bool:
+    return device.startswith("light-")
 
 
 def check_address(address) -> str:
@@ -60,7 +66,7 @@ def _check(body: str) -> str:
 
 def make_code(device: str, serial: str, public: str) -> str:
     if not DEVICE.fullmatch(device) or not SERIAL.fullmatch(serial):
-        raise ValueError("device id is edge-<junction> or district-<name>, serial: letters, digits, . _ - (up to 40)")
+        raise ValueError("device id is edge-<junction>, district-<name> or light-<cabinet>, serial: letters, digits, . _ - (up to 40)")
     body = f"{PREFIX}:{device}:{serial}:{public.lower()}"
     return f"{body}:{_check(body)}"
 
@@ -105,6 +111,8 @@ def make_kit(rec: dict, pki: Path, server_name: str, port: int, approaches: list
         "root_pub": root.read_text().strip() if root.exists() else None,
         "gateway_pub": None if root.exists() else gateway.read_text().strip(),  # older setups without a root key
         "approaches": [{k: a.get(k) for k in ("id", "name", "from", "lanes", "zone")} for a in approaches or []],
+        **({"cabinet": rec.get("cabinet"), "lon": rec.get("lon"), "lat": rec.get("lat")}
+           if rec.get("kind") == "lighting" else {}),  # a lighting unit: the cabinet it controls and where it stands
     }
 
 
@@ -116,6 +124,16 @@ SERVER_NAME={server_name}
 SENSORS=/run/urban/q/queues.json
 # cabinet temperature sensor; empty: the computer's own board
 TEMP_SENSOR=
+"""
+
+LIGHTING_ENV_TEMPLATE = """# URBAN lighting unit {unit}, cabinet {cabinet}: the unit of a street-lighting cabinet (urban-lighting@{unit}.service)
+# made by `python -m urban.edge --setup`; PLATFORM, SERVER_NAME, CABINET, LON and LAT are rewritten by the next setup,
+# the rest is kept. systemd reads this file: comments only on their own lines, never after a value.
+PLATFORM={platform}
+SERVER_NAME={server_name}
+CABINET={cabinet}
+{place}# emulated (demo, checks) | relay (the contactor output of the cabinet)
+ADAPTER=emulated
 """
 
 ENV_TEMPLATE = """# URBAN Edge unit {unit} at {junction} {name}
@@ -140,6 +158,27 @@ DOOR_SENSOR=
 """
 
 
+def _lighting_env(kit: dict, unit: str, env_path: Path) -> None:
+    """The env file of a lighting unit: made on first setup, then only the lines the kit decides are rewritten
+    (PLATFORM, SERVER_NAME, CABINET and, if the kit has them, LON and LAT); ADAPTER and anything else stay."""
+    values = {"PLATFORM": kit["platform"], "SERVER_NAME": kit["server_name"], "CABINET": kit["cabinet"]}
+    for name in ("lon", "lat"):
+        if kit.get(name) is not None:
+            values[name.upper()] = repr(float(kit[name]))
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    if env_path.exists():
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+        out = [f"{k}={values.pop(k)}" if (k := line.split("=", 1)[0].strip()) in values else line for line in lines]
+        out += [f"{k}={v}" for k, v in values.items()]
+        if not any(line.split("=", 1)[0].strip() == "ADAPTER" for line in out):
+            out.append("ADAPTER=emulated")
+        env_path.write_text("\n".join(out) + "\n", encoding="utf-8")
+        return
+    place = "".join(f"{k}={values[k]}\n" for k in ("LON", "LAT") if k in values)
+    env_path.write_text(LIGHTING_ENV_TEMPLATE.format(unit=unit, cabinet=kit["cabinet"], platform=kit["platform"],
+                                                     server_name=kit["server_name"], place=place), encoding="utf-8")
+
+
 def install_kit(kit: dict, unit: str, key_path: Path, pki: Path, env_path: Path) -> list[str]:
     """Put a kit in place on the unit. Returns what was written. Refuses a kit for another unit or key."""
     if not isinstance(kit, dict) or kit.get("urban_kit") != KIT_VERSION:
@@ -154,6 +193,14 @@ def install_kit(kit: dict, unit: str, key_path: Path, pki: Path, env_path: Path)
                          "enrol this unit's code again and download a new kit")
     if not str(kit.get("ca_pem", "")).startswith("-----BEGIN CERTIFICATE-----"):
         raise ValueError("the kit has no platform certificate")
+    lighting = kit.get("kind") == "lighting"
+    if lighting:
+        if not isinstance(kit.get("cabinet"), str) or not CABINET.fullmatch(kit["cabinet"]) or not LIGHT_DEVICE.fullmatch(unit):
+            raise ValueError("the kit of a lighting unit needs its cabinet (letters, digits, . _ -) and a unit id light-<cabinet>")
+        for field, limit in (("lon", 180), ("lat", 90)):
+            v = kit.get(field)
+            if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or not -limit <= v <= limit):
+                raise ValueError(f"the kit's {field} is not a coordinate")
     for field in ("platform", "server_name", "unit", "junction"):  # these land in the env file: one line each
         value = kit.get(field)
         if value is not None and (not isinstance(value, str) or any(ord(ch) < 32 or ord(ch) == 127 for ch in value)):
@@ -168,7 +215,9 @@ def install_kit(kit: dict, unit: str, key_path: Path, pki: Path, env_path: Path)
             crypto.load_public(kit[field])  # a key, not anything else
             (pki / name).write_text(kit[field] + "\n")
             written.append(str(pki / name))
-    if env_path.exists():
+    if lighting:
+        _lighting_env(kit, unit, env_path)
+    elif env_path.exists():
         lines = env_path.read_text(encoding="utf-8").splitlines()
         values = {"PLATFORM": kit["platform"], "SERVER_NAME": kit["server_name"]}
         out = [f"{k}={values.pop(k)}" if (k := line.split("=", 1)[0].strip()) in values else line for line in lines]
@@ -185,8 +234,8 @@ def install_kit(kit: dict, unit: str, key_path: Path, pki: Path, env_path: Path)
     except OSError:
         pass
     written.append(str(env_path))
-    if kit.get("kind") == "district":
-        return written  # a district has no junction of its own
+    if kit.get("kind") in ("district", "lighting"):
+        return written  # a district and a lighting cabinet have no junction of their own
     junction = env_path.parent / f"{unit}.junction.json"  # for the camera calibration page
     junction.write_text(json.dumps({"junction": kit.get("junction"), "name": title,
                                     "approaches": kit.get("approaches") or []}, ensure_ascii=False, indent=1),

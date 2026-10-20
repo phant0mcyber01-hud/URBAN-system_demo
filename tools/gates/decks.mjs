@@ -56,6 +56,13 @@ for (const [what, re] of [["step 2", /шаг\s*2/i], ["step 3", /шаг\s*3/i], 
   ["the district relay", /район/i], ["encryption", /шифр/i], ["hardening", /взлом/i], ["speed", /скорост|быстр/i]])
   if (!re.test(changesText)) problems.push(`team deck's changes slides do not name ${what}`);
 
+// step 4: street lighting runs on the same system (public, plainly); the team deck shows the module core
+if (!/освещени/i.test(pubAll) || !Object.values(pub).some((t) => /освещени[^.]{0,80}(работает|подключен)/i.test(t)))
+  problems.push("public deck does not say that street lighting now works on the same system");
+const teamAll = Object.values(team).join(" ");
+if (!/lighting/.test(teamAll) || !/Core\.send|ядр/i.test(teamAll) || !/модул/i.test(teamAll))
+  problems.push("team deck does not show the module core and the lighting module");
+
 if (problems.length) {
   for (const p of problems) console.log(`FAIL ${p}`);
   process.exit(1);

@@ -269,6 +269,7 @@ class Platform:
                 "l": h.get("leases"), "u": h.get("uptime"), "a": row.get("age"), "n": row.get("connects", 0),
                 "f": int(bool(row.get("first_seen"))),
                 "al": [[a["level"], a["text"]] for a in alerts], "lock": row.get("tls") in self.gateway.locked,
+                **({"cab": row["cabinet"]} if row.get("cabinet") else {}),  # a lighting unit: its cabinet
             }
         present = {row["junction"] if (row.get("kind") or "unit") == "unit" else row["id"] for row in rows}
         for key in [k for k in self.dev if k not in present]:  # removed from the registry

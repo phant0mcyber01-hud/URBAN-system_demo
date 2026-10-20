@@ -1,0 +1,11 @@
+# A street-lighting cabinet's screen follows its lighting program: the line "lighting" of the machine's own screen
+# is redrawn every 15 s from /run/urban/light/lighting.json. Started by urban-prepare for MODULE=lighting (the root
+# is read-only, so it cannot be "enabled"). The redraw itself is urban-lighting-screen.service.
+[Unit]
+Description=URBAN OS: redraw the lighting cabinet's screen line
+
+[Timer]
+OnActiveSec=5s
+OnUnitActiveSec=15s
+AccuracySec=1s
+Unit=urban-lighting-screen.service

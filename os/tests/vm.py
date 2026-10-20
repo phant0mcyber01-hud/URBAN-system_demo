@@ -9,6 +9,9 @@
     python3 vm.py roles                 the pilot's district server and control centre on a bigger disk
     python3 vm.py encrypted             with a TPM the data partition becomes LUKS2 (key in the TPM); without, plain
     python3 vm.py light                 a light unit (VISION=off) in 1 GB of memory
+    python3 vm.py lighting              a street-lighting cabinet (MODULE=lighting) and its centre: enrol, an operator's
+                                        override reaches the cabinet and its screen, a foreign cabinet is refused, the
+                                        cabinet returns to its schedule by itself when the centre's listener stops
     python3 vm.py chain                 unit -> district -> centre: three machines, the relay, the district's reports
     python3 vm.py ota                   over the air: the centre releases version 2, the district and the unit install it
                                         by themselves; the unit's root helper refuses what it must refuse
@@ -79,7 +82,7 @@ DISK_BUS = {
 class VM:
     def __init__(self, name, version="1", unit="edge-J-07", serial="URB-TEST", image=None, key=KEY,
                  add_key=True, bus="virtio", nic="virtio-net-pci", role=None, host=None, grow_mb=0, forward=(),
-                 listen="127.0.0.1", vnc=None, ssh_port=2222, mem=2048, tpm=True, center=None, vision=None):
+                 listen="127.0.0.1", vnc=None, ssh_port=2222, mem=2048, tpm=True, center=None, vision=None, module=None):
         os.makedirs(LOGS, exist_ok=True)
         self.name, self.disk, self.key, self.bus, self.nic = name, f"/tmp/{name}.img", key, bus, nic
         self.forward = forward  # more (host port, guest port) pairs than SSH
@@ -96,7 +99,8 @@ class VM:
         if unit:  # the installer's step: the unit id and serial on the ESP
             with open("/tmp/urban-unit.txt", "w", newline="\r\n") as f:  # written on a Windows laptop: CRLF
                 f.write(f"UNIT={unit}\nSERIAL={serial}\n" + (f"ROLE={role}\n" if role else "") + (f"HOST={host}\n" if host else "")
-                        + (f"CENTER={center}\n" if center else "") + (f"VISION={vision}\n" if vision else ""))
+                        + (f"CENTER={center}\n" if center else "") + (f"VISION={vision}\n" if vision else "")
+                        + (f"MODULE={module}\n" if module else ""))
             sh(f"mcopy -o -i {self.disk}@@{esp * 512} /tmp/urban-unit.txt ::/urban-unit.txt")
         if not os.path.exists(KEY):  # a maintenance key on the data partition, for the scenarios only
             sh(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", KEY])
@@ -385,6 +389,10 @@ def roles_in(slot, listing):
         "the district's link to the centre": "etc/systemd/system/urban-district@.service",
         "the update helper's path unit (OTA updates)": "etc/systemd/system/urban-update.path",
         "the update helper's service (OTA updates)": "etc/systemd/system/urban-update.service",
+        "the street-lighting cabinet's service (module lighting)": "etc/systemd/system/urban-lighting@.service",
+        "the cabinet screen's redraw timer (module lighting)": "etc/systemd/system/urban-lighting-screen.timer",
+        "the cabinet screen's redraw service (module lighting)": "etc/systemd/system/urban-lighting-screen.service",
+        "the lighting program (module lighting)": "opt/urban/backend/urban/modules/lighting/__main__.py",
         "cryptsetup (the data partition is LUKS2)": "usr/sbin/cryptsetup",
         "systemd-cryptsetup": "usr/lib/systemd/systemd-cryptsetup",
         "systemd-cryptenroll": "usr/bin/systemd-cryptenroll",
@@ -415,7 +423,8 @@ def roles_in(slot, listing):
     for role in ("unit)", "district)", "center|district,center"):
         if role not in prepare:
             raise Fail(f"urban-prepare does not know the role {role}")
-    for need in ("urban-relay.service", "urban-district@$UNIT.service", "VISION", "update-inbox", "urban-update.path"):
+    for need in ("urban-relay.service", "urban-district@$UNIT.service", "VISION", "update-inbox", "urban-update.path",
+                 "MODULE", "urban-lighting@$UNIT.service", "/run/urban/light"):
         if need not in prepare:
             raise Fail(f"urban-prepare does not start or open {need}")
     if "<html" not in open("/tmp/sq2/opt/urban/web/dist/index.html").read().lower():
@@ -1537,6 +1546,253 @@ def chain():
                 os.remove(vm.disk)
 
 
+# ---------------------------------------------------------------- street lighting
+
+class CentreApi:
+    """The centre's HTTPS API as an administrator uses it. The first admin's password is in the platform's journal;
+    a session is made on demand and again after a 401 (the platform was restarted: its sessions are in memory)."""
+
+    def __init__(self, centre, ctx, port=2443):
+        self.ctx, self.port, self.token = ctx, port, None
+        self.password = admin_password(centre, "/tmp/lighting-admin.txt")
+        if not self.password:
+            raise Fail("the centre's first admin password is not in its journal")
+
+    def _http(self, method, path, body=None):
+        import urllib.error
+        import urllib.request
+        headers = {"Content-Type": "application/json", **({"Authorization": f"Bearer {self.token}"} if self.token else {})}
+        req = urllib.request.Request(f"https://127.0.0.1:{self.port}{path}", method=method, headers=headers,
+                                     data=json.dumps(body).encode() if body is not None else None)
+        try:
+            with urllib.request.urlopen(req, context=self.ctx, timeout=30) as r:
+                raw = r.read()
+                return r.status, json.loads(raw) if raw else None
+        except urllib.error.HTTPError as err:
+            raw = err.read().decode("utf-8", "replace")
+            try:
+                return err.code, json.loads(raw)
+            except ValueError:
+                return err.code, raw
+
+    def login(self):
+        self.token = None
+        code, data = self._http("POST", "/api/login", {"name": "admin", "password": self.password})
+        if code != 200 or not isinstance(data, dict) or not data.get("token"):
+            raise Fail(f"signing in to the centre as admin failed: {code} {str(data)[:200]}")
+        if data.get("role") != "admin" or data.get("mfa_setup"):
+            raise Fail(f"the admin session has no rights to act (MFA_ROLES was meant to be empty): {data}")
+        self.token = data["token"]
+
+    def call(self, method, path, body=None):
+        if not self.token:
+            self.login()
+        code, data = self._http(method, path, body)
+        if code == 401:
+            self.login()
+            code, data = self._http(method, path, body)
+        return code, data
+
+    def cabinet(self, name="C-01"):
+        """This cabinet's row of GET /api/lighting/state, or None (the platform not up yet counts as no row)."""
+        try:
+            code, data = self.call("GET", "/api/lighting/state")
+        except Exception:  # connection refused while the platform restarts
+            return None
+        if code != 200 or not isinstance(data, dict):
+            return None
+        return next((r for r in data.get("cabinets", []) if name in (r.get("cabinet"), r.get("id"))), None)
+
+
+def light_status(vm):
+    """The cabinet program's own state file, as the cabinet's screen reads it ({} while there is none)."""
+    r = vm.ssh("cat /run/urban/light/lighting.json", check=False)
+    try:
+        data = json.loads(r.stdout)
+        return data if isinstance(data, dict) else {}
+    except ValueError:
+        return {}
+
+
+def wait_light(vm, what, ok, timeout):
+    """Poll the cabinet's state file until ok(state) holds; returns (state, seconds waited)."""
+    start = time.time()
+    end, st = start + timeout, {}
+    while time.time() < end:
+        st = light_status(vm)
+        if st and ok(st):
+            return st, time.time() - start
+        time.sleep(3)
+    raise Fail(f"{what}: not within {timeout} s; the cabinet's state is {json.dumps(st, sort_keys=True)[:400]}")
+
+
+def wait_screen(vm, pattern, timeout):
+    """The cabinet's own screen text (what getty draws above the login prompt) matches pattern; returns that line."""
+    end, text = time.time() + timeout, ""
+    while time.time() < end:
+        text = vm.ssh("cat /run/urban/console.issue", check=False).stdout
+        m = re.search(pattern, text, re.M)
+        if m:
+            return m.group(0).strip()
+        time.sleep(3)
+    raise Fail(f"the cabinet's screen never showed {pattern!r}:\n{text}")
+
+
+def lighting():
+    """A street-lighting cabinet (URBAN OS, MODULE=lighting, light-C-01) and its control centre (role center), each its
+    own machine; the cabinet reaches the centre's device listener directly (no district).
+      a. the centre lists C-01 online in its own schedule mode
+      b. an operator's override through the centre's API reaches the cabinet (state file) and its screen
+      c. a command for a cabinet the centre does not know is refused by the API; the cabinet is left as it was
+      d. with the centre's platform (and so its device listener) stopped, the cabinet goes back to its schedule by
+         itself within 180 s, and joins the centre again when it is back."""
+    centre = VM("lighting-center", unit="center", serial="PILOT-1", role="center", host="urban-center", grow_mb=2048,
+                forward=[(2443, 443), (28443, 8443)], ssh_port=2222)
+    cabinet = VM("lighting-cabinet", unit="light-C-01", serial="LGT-1", module="lighting", ssh_port=2223, mem=1024)
+    unit = "light-C-01"
+    try:
+        for vm in (centre, cabinet):
+            vm.start()
+        centre.booted("1", "A")
+        cabinet.wait(rf"URBAN-ROLE role=unit name={unit} module=lighting vision=off")
+        line = cabinet.booted("1", "A")
+        conf = cabinet.ssh("cat /var/lib/urban/etc/unit.conf").stdout
+        if "MODULE=lighting" not in conf:
+            raise Fail(f"unit.conf of the cabinet has no MODULE=lighting:\n{conf}")
+        screen = cabinet.ssh("cat /run/urban/console.issue").stdout
+        if "street-lighting cabinet" not in screen:
+            raise Fail(f"the cabinet's screen does not say what it is:\n{screen}")
+        for service in (f"urban-edge@{unit}", f"urban-vision@{unit}"):
+            if cabinet.ssh(f"systemctl is-active {service}", check=False).stdout.strip() == "active":
+                raise Fail(f"{service} runs on a lighting cabinet")
+        got = [g.strip() for g in cabinet.ssh("stat -c '%U:%G %a' /run/urban /run/urban/light").stdout.split(chr(10)) if g.strip()]
+        if got != ["root:root 755", "urban:urban 755"]:
+            raise Fail(f"cabinet: /run/urban and /run/urban/light are {got!r}, want root:root 755 and urban:urban 755")
+
+        ctx = centre_ca(centre)
+        health(ctx)
+        # A TEST SETTING, not the product's default: no second factor for any role, so that the admin the centre made
+        # at its first start can act through the API in this scenario (MFA_ROLES empty). Authentication is not what is
+        # tested here (the accounts have their own tests); the signed command path to the cabinet is.
+        centre.ssh("echo 'MFA_ROLES=' >> /var/lib/urban/etc/platform.env && systemctl restart urban-platform")
+        health(ctx)
+        api = CentreApi(centre, ctx)
+
+        # enrol the cabinet the way the administrator does, by the centre's CLI
+        code = cabinet.ssh("urban-unit code").stdout.strip()
+        if not code.startswith(f"URBAN1:{unit}:"):
+            raise Fail(f"the cabinet printed no enrolment code for {unit}: {code!r}")
+        public = code.split(":")[3]
+        out = centre.ssh(f"{PROVISION} enroll-lighting {unit} --cabinet C-01 --public {public} --serial LGT-1").stdout
+        kit = centre.ssh(f"{PROVISION} kit {unit}").stdout
+        if '"urban_kit"' not in kit:
+            raise Fail(f"no kit for {unit}: {kit[-300:]} (enrol said: {out[-200:]})")
+        with open("/tmp/kit-light.json", "w") as f:
+            f.write(kit)
+        cabinet.put("/tmp/kit-light.json", f"{STAGE}/kit.json")
+        r = cabinet.ssh(f"urban-unit setup {STAGE}/kit.json", check=False)
+        if r.returncode != 0:
+            raise Fail(f"urban-unit setup on the cabinet: {(r.stderr or r.stdout).strip()[-300:]}")
+        # the kit names the centre by its certificate name (urban-center), which no VM resolves: the cabinet is pointed
+        # at the centre's forwarded device port (10.0.2.2:28443); the certificate is still checked for urban-center
+        cabinet.ssh(f"sed -i 's|^PLATFORM=.*|PLATFORM=10.0.2.2:28443|' /etc/urban/edge-{unit}.env && "
+                    f"systemctl restart urban-lighting@{unit}")
+        time.sleep(5)
+        if cabinet.ssh(f"systemctl is-active urban-lighting@{unit}", check=False).stdout.strip() != "active":
+            log = cabinet.ssh(f"journalctl -u urban-lighting@{unit} --no-pager -n 15 -o cat", check=False).stdout
+            raise Fail(f"urban-lighting@{unit} is not running after the kit:\n{log}")
+        if cabinet.ssh(f"systemctl is-active urban-edge@{unit}", check=False).stdout.strip() == "active":
+            raise Fail("the junction unit's service runs on a lighting cabinet after setup")
+        exposure = cabinet.ssh(f"systemd-analyze security --no-pager urban-lighting@{unit}.service | "
+                               "sed -n 's/.*Overall exposure level for [^:]*: \\([0-9.]*\\).*/\\1/p'").stdout.strip()
+        if not exposure or float(exposure) > EXPOSURE_MAX:
+            raise Fail(f"urban-lighting@ is exposed at {exposure or '?'} (want {EXPOSURE_MAX} or less)")
+
+        # (a) the centre sees it, on its own schedule
+        end, row = time.time() + 420, None
+        while time.time() < end:
+            row = api.cabinet("C-01")
+            if row and row.get("online"):
+                break
+            time.sleep(5)
+        else:
+            log = cabinet.ssh(f"journalctl -u urban-lighting@{unit} --no-pager -n 15 -o cat", check=False).stdout
+            raise Fail(f"the centre never shows C-01 online; its row: {row}\ncabinet's journal:\n{log}")
+        if row.get("mode") != "schedule":
+            raise Fail(f"the centre shows C-01 in mode {row.get('mode')!r}, not schedule: {row}")
+        print(f"   OK (a) GET /api/lighting/state as admin: C-01 online, mode schedule, level {row.get('level')}, "
+              f"lamps {row.get('lamps')} ({row.get('failed')} failed)", flush=True)
+
+        # (b) an operator's override reaches the cabinet and its screen
+        code, data = api.call("POST", "/api/lighting/override",
+                              {"cabinets": ["C-01"], "level": 40, "minutes": 10, "reason": "test"})
+        if code != 200:
+            raise Fail(f"POST /api/lighting/override answered {code}: {str(data)[:300]}")
+        st, waited = wait_light(cabinet, "the override at the cabinet",
+                                lambda s: s.get("mode") == "override" and s.get("level") == 40, 120)
+        if st.get("last_refused"):
+            raise Fail(f"the cabinet refused something while it obeyed: {st.get('last_refused')}")
+        seen = wait_screen(cabinet, r"lighting\s+C-01: mode override, level 40%.*", 90)
+        print(f"   OK (b) override C-01 level 40 for 10 min: the cabinet's state says mode override level 40 after "
+              f"{waited:.0f} s; its screen: {seen!r}", flush=True)
+
+        # (c) a cabinet the centre does not know is refused at the API; C-01 stays as it was
+        before = light_status(cabinet)
+        code, data = api.call("POST", "/api/lighting/override",
+                              {"cabinets": ["C-99"], "level": 10, "minutes": 5, "reason": "test"})
+        if not (400 <= code < 500) or code in (401, 403):
+            raise Fail(f"an override for the unknown cabinet C-99 answered {code} (want a 4xx refusal other than "
+                       f"401/403): {str(data)[:300]}")
+        time.sleep(20)  # several reports of the cabinet
+        after = light_status(cabinet)
+        if after.get("mode") != "override" or after.get("level") != 40 or after.get("last_refused"):
+            raise Fail(f"the cabinet changed after a command for C-99: before {before}, after {after}")
+        row = api.cabinet("C-01")
+        if not row or (row.get("override") or {}).get("level") != 40:
+            raise Fail(f"the centre's override of C-01 changed after the C-99 request: {row}")
+        if api.cabinet("C-99"):
+            raise Fail("the centre lists a cabinet C-99 that was never enrolled")
+        print(f"   OK (c) override for C-99 refused with {code} {str(data)[:80]!r}; C-01 still mode override level 40, "
+              f"nothing refused by the cabinet", flush=True)
+
+        # (d) the centre's device listener stops: the cabinet returns to its schedule by itself
+        centre.ssh("systemctl stop urban-platform")
+        t0 = time.time()
+        wait_light(cabinet, "the cabinet's return to its schedule", lambda s: s.get("mode") == "schedule", 180)
+        waited = time.time() - t0
+        seen = wait_screen(cabinet, r"lighting\s+C-01: mode schedule.*", 90)
+        print(f"   OK (d) urban-platform stopped: the cabinet is back to mode schedule after {waited:.0f} s by itself "
+              f"(limit 180 s); its screen: {seen!r}", flush=True)
+        centre.ssh("systemctl start urban-platform")
+        health(ctx)
+        api.token = None  # the platform's sessions were in memory
+        end = time.time() + 420
+        while time.time() < end:
+            row = api.cabinet("C-01")
+            if row and row.get("online"):
+                break
+            time.sleep(5)
+        else:
+            raise Fail("the cabinet did not join the centre again after the platform was started")
+        print("   OK (e) the platform started again: C-01 is online at the centre again", flush=True)
+
+        state = cabinet.ssh(f"systemctl is-active urban-lighting@{unit}", check=False).stdout.strip()
+        if state != "active":
+            raise Fail(f"urban-lighting@{unit} is {state} at the end")
+        power_alive(cabinet, "cabinet")
+        power_alive(centre, "centre")
+        for vm, name in ((centre, "center"), (cabinet, "cabinet")):
+            vm.screendump(f"{LOGS}/lighting-{name}-screen.ppm")
+        print(f"   {unit}: {line[line.index('URBAN-OS-CHECK'):][:90]}; systemd exposure of urban-lighting@ {exposure}",
+              flush=True)
+        print("LIGHTING CHECK PASSED", flush=True)
+    finally:
+        for vm in (centre, cabinet):
+            vm.stop()
+            if os.path.exists(vm.disk):
+                os.remove(vm.disk)
+
+
 # ---------------------------------------------------------------- over the air
 
 OTA_TIMEOUT = 5400 if os.environ.get("URBAN_KVM") != "1" else 1500  # a package of hundreds of MB crosses two emulated hops
@@ -1958,6 +2214,8 @@ if __name__ == "__main__":
             measure(sys.argv[2] if len(sys.argv) > 2 else "now")
         elif what == "chain":
             chain()
+        elif what == "lighting":
+            lighting()
         elif what == "ota":
             ota()
         elif what == "demo":

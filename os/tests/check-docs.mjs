@@ -78,4 +78,18 @@ if (/обновлени/i.test(todo[0]) && /платформ|центр/i.test(t
   fail("the «Не сделано» paragraph of CONTEXT.md still lists updates from the centre as missing");
 for (const must of ["urban-center release", "Обновления из центра"])
   if (!context.includes(must)) fail(`CONTEXT.md does not record ${JSON.stringify(must)} (step 3)`);
+
+// step 4: the City OS core and its modules, street lighting the second
+const modPath = join(ROOT, "docs", "city-os-modules.md");
+if (!existsSync(modPath)) fail("docs/city-os-modules.md is missing");
+const mod = readFileSync(modPath, "utf8");
+for (const must of ["Core.send", "device_kind", "MODULES", "/api/modules", "enroll-lighting", "MODULE=lighting",
+  "urban-lighting@", "python -m urban.modules.lighting", "аренда", "расписани", "## Как написать модуль"]) {
+  if (!mod.includes(must)) fail(`docs/city-os-modules.md never says ${JSON.stringify(must)}`);
+}
+const readme = readFileSync(join(ROOT, "README.md"), "utf8");
+if (!/уличное освещение/i.test(readme) || !readme.includes("docs/city-os-modules.md"))
+  fail("README.md does not mention the street lighting module and docs/city-os-modules.md");
+for (const must of ["Ядро и модули", "уличн", "docs/city-os-modules.md"])
+  if (!context.includes(must)) fail(`CONTEXT.md does not record ${JSON.stringify(must)} (step 4)`);
 console.log("DOCS CHECK PASSED");

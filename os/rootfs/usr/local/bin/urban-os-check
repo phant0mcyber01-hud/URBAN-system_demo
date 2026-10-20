@@ -36,6 +36,7 @@ passwd -S root | grep -q ' L ' || fail+=("root has a usable password")
 systemctl is-active --quiet urban-prepare || fail+=("urban-prepare failed")
 unit=$(sed -n 's/^UNIT=//p' /var/lib/urban/etc/unit.conf 2>/dev/null)
 role=$(sed -n 's/^ROLE=//p' /var/lib/urban/etc/unit.conf 2>/dev/null); role=${role:-unit}
+module=$(sed -n 's/^MODULE=//p' /var/lib/urban/etc/unit.conf 2>/dev/null)  # lighting: a street-lighting cabinet
 if [ -z "$unit" ]; then
   unit=none
 elif [ "$role" = unit ]; then
@@ -65,6 +66,7 @@ service_check() {  # $1 unit, $2 what
 }
 python_ok urban.edge.__main__ urban.node.power urban.node.district urban.platform || fail+=("URBAN software does not start")
 systemctl cat urban-edge@check.service >/dev/null 2>&1 || fail+=("urban-edge@ service missing")
+systemctl cat urban-lighting@check.service urban-lighting-screen.timer urban-lighting-screen.service >/dev/null 2>&1 || fail+=("lighting services missing")
 systemctl cat urban-relay.service urban-district@check.service >/dev/null 2>&1 || fail+=("district services missing")
 if [ "$role" = district ]; then
   [ -f "/var/lib/urban/etc/pki/edge/$unit.key" ] || fail+=("district $unit has no key")
@@ -79,7 +81,13 @@ case ",$role," in *,unit,*|*,district,*)
     [ "$(stat -c %U:%a /var/lib/urban/update-inbox 2>/dev/null)" = urban:700 ] || warn+=("the update inbox is missing")
   fi ;;
 esac
-if [ "$role" = unit ] && [ -f "/var/lib/urban/etc/edge-$unit.env" ]; then
+if [ "$role" = unit ] && [ "$module" = lighting ]; then
+  # a street-lighting cabinet runs its lighting program instead of the junction unit (and has no cameras)
+  python_ok urban.modules.lighting.__main__ || fail+=("the lighting software does not start")
+  if [ -f "/var/lib/urban/etc/edge-$unit.env" ]; then
+    service_check "urban-lighting@$unit.service" "the cabinet service urban-lighting@$unit"
+  fi
+elif [ "$role" = unit ] && [ -f "/var/lib/urban/etc/edge-$unit.env" ]; then
   service_check "urban-edge@$unit.service" "the unit service urban-edge@$unit"
 fi
 case ",$role," in *,center,*)
@@ -91,7 +99,7 @@ esac
 install -d /run/urban
 if [ ${#fail[@]} -eq 0 ]; then
   note=""; [ ${#warn[@]} -gt 0 ] && note=" warn=$(IFS=';'; echo "${warn[*]}" | tr ' ' '_')"
-  echo "URBAN-OS-CHECK OK version=$version slot=$slot root=ro data=rw,$crypt firewall=on watchdog=$wd unit=$unit role=$role$note"
+  echo "URBAN-OS-CHECK OK version=$version slot=$slot root=ro data=rw,$crypt firewall=on watchdog=$wd unit=$unit role=$role${module:+ module=$module}$note"
   echo "OK - read-only system, data writable, firewall on, watchdog $wd${warn:+; WARNING: $(IFS=';'; echo "${warn[*]}")}" > /run/urban/os-check
   echo "$crypt" > /run/urban/data-crypt
   /usr/local/bin/urban-console

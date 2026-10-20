@@ -82,6 +82,7 @@ export function inputsDigest() {
     ...walk(join(ROOT, "os", "build"), []), ...walk(join(ROOT, "os", "rootfs"), []),
     ...walk(join(ROOT, "backend", "urban"), []), join(ROOT, "backend", "pyproject.toml"),
     join(ROOT, "deploy", "urban-edge@.service"), join(ROOT, "deploy", "urban-vision@.service"),
+    join(ROOT, "deploy", "urban-lighting@.service"),
     join(ROOT, "data", "models", "yolox_nano.onnx"), join(OUT, "keys", "ca.pem"),
     ...walk(join(ROOT, "web", "dist"), []),
   ];

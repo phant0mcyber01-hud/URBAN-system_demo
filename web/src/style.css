@@ -319,3 +319,40 @@ input.num:focus { border-color: var(--accent); outline: none; }
 #enrol .fp { font: 500 22px var(--mono); letter-spacing: .08em; margin: 6px 0 4px; user-select: all; color: var(--accent);
              text-shadow: 0 0 12px var(--accent-glow); }
 #enrol .err { color: var(--bad); }
+
+/* ---- modules: the switch above the sections, and the street-lighting panel ----------------------------- */
+#modsw { margin: 0 0 12px; }
+.modsw-box { display: grid; gap: 0; border: 1px solid var(--line-2); background: var(--surface-2); }
+.modsw-box button { background: none; border: 0; border-bottom: 1px solid var(--line); padding: 8px 10px; text-align: left; cursor: pointer;
+                    color: var(--text-2); font: 600 11px var(--display); letter-spacing: .1em; text-transform: uppercase; }
+.modsw-box button:last-child { border-bottom: 0; }
+.modsw-box button:hover { background: var(--surface-3); color: var(--text); }
+.modsw-box button.sel { color: var(--accent); background: var(--accent-weak); box-shadow: inset 2px 0 0 var(--accent); }
+.lt-cab { position: relative; }
+.lt-cab.alert { box-shadow: inset 3px 0 0 var(--warn); background: var(--warn-weak); padding-left: 10px; }
+.lt-cab.focus { outline: 1px solid var(--line-3); outline-offset: -1px; }
+.lt-cab .meta { flex-wrap: wrap; justify-content: flex-start; gap: 2px 14px; margin-top: 3px; color: var(--text-2); font-size: 12px; }
+.lt-cab .lt-mode.ov { color: var(--accent); }
+.lt-cab input[type=checkbox] { accent-color: var(--accent); vertical-align: -2px; margin-right: 4px; }
+.lt-cab b { font-family: var(--mono); font-weight: 500; color: var(--accent); }
+.lt-alert { margin-top: 3px; }
+.lt-fly { margin-top: 6px; background: none; border: 1px solid var(--line-2); padding: 2px 8px; cursor: pointer; color: var(--text-2);
+          font: 600 10px var(--display); letter-spacing: .1em; text-transform: uppercase; }
+.lt-fly:hover { border-color: var(--line-3); color: var(--accent); }
+.lt-form { display: grid; gap: 10px; }
+.lt-form label { display: grid; gap: 5px; color: var(--text-3); font: 500 10.5px var(--display); letter-spacing: .1em; text-transform: uppercase; }
+.lt-form output { font-family: var(--mono); color: var(--text); }
+.lt-form input[type=range] { width: 100%; accent-color: var(--accent); }
+.lt-form input:not([type=range]) { background: var(--field); border: 1px solid var(--line-2); border-radius: 0; padding: 8px 10px; width: 100%;
+                                    color: var(--text); font: 13px var(--sans); letter-spacing: 0; text-transform: none; }
+.lt-form input:not([type=range]):focus { outline: 0; border-color: var(--accent); }
+.lt-form .btns { margin-top: 0; }
+.lt-form .btns button, .lt-fly { border-radius: 0; }
+.lt-safety { margin-top: 14px; color: var(--text-2); }
+@media (max-width: 900px) {
+  #rail { display: flex; align-items: center; gap: 10px; }
+  #modsw { margin: 0; flex: none; }
+  .modsw-box { display: flex; }
+  .modsw-box button { white-space: nowrap; border-bottom: 0; border-right: 1px solid var(--line); padding: 6px 10px; }
+  .modsw-box button:last-child { border-right: 0; }
+}

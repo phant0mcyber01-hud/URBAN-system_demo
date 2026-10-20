@@ -6,6 +6,8 @@
                                                     a real unit: its public key, printed by `python -m urban.edge --keygen`
     python -m urban.provision enroll-district district-1 --address 10.1.0.2 --public <hex> [--serial ...]
                                                     a district server: its key and the address its units connect to
+    python -m urban.provision enroll-lighting light-C-01 --cabinet C-01 --public <hex> [--serial ...] [--lon .. --lat ..]
+                                                    the unit of a street-lighting cabinet (the lighting module)
     python -m urban.provision assign edge-J-21 --district district-1   (or --direct)
                                                     route a unit through a district: its next kit points there
     python -m urban.provision kit edge-J-21         the device's kit as JSON (what the UI's "download kit" gives)
@@ -41,6 +43,13 @@ def main():
     district.add_argument("--address", required=True, help="host name or IP (host[:port]) its units connect to")
     district.add_argument("--public", required=True, help="the district's public key (hex)")
     district.add_argument("--serial", default="", help="serial number printed on the box")
+    light = sub.add_parser("enroll-lighting", help="enrol the unit of a street-lighting cabinet")
+    light.add_argument("device", help="light-<cabinet>, e.g. light-C-01")
+    light.add_argument("--cabinet", required=True, help="cabinet id, e.g. C-01")
+    light.add_argument("--public", required=True, help="the unit's public key (hex)")
+    light.add_argument("--serial", default="", help="serial number printed on the box")
+    light.add_argument("--lon", type=float, help="longitude of the cabinet (for its astronomical schedule)")
+    light.add_argument("--lat", type=float, help="latitude of the cabinet")
     assign = sub.add_parser("assign", help="route a unit through a district server, or directly")
     assign.add_argument("device", help="edge-<junction>")
     assign.add_argument("--district", help="district-<name>")
@@ -70,6 +79,15 @@ def main():
         except ValueError as err:
             raise SystemExit(str(err))
         print(f"enrolled district {rec['id']} at {rec['address']} ({rec['serial']}), key {crypto.fingerprint(rec['public_key'])}")
+        return
+    if args.cmd == "enroll-lighting":
+        try:
+            rec = Registry(c.PKI / "devices.json").enroll_lighting(args.device, args.cabinet, args.public, args.serial,
+                                                                   args.lon, args.lat)
+        except ValueError as err:
+            raise SystemExit(str(err))
+        print(f"enrolled lighting {rec['id']} for cabinet {rec['cabinet']} ({rec['serial']}), key {crypto.fingerprint(rec['public_key'])}")
+        print("compare this fingerprint with the one the unit printed; a running platform picks it up within seconds")
         return
     if args.cmd == "assign":
         if bool(args.district) == bool(args.direct):
@@ -102,7 +120,8 @@ def main():
         return
     if args.cmd == "list":
         for d in Registry(c.PKI / "devices.json").devices.values():
-            where = d.get("address") if kind_of(d) == "district" else (d.get("junction") or "-")
+            where = (d.get("address") if kind_of(d) == "district"
+                     else f"cabinet {d.get('cabinet')}" if kind_of(d) == "lighting" else (d.get("junction") or "-"))
             via = f" via {d['district']}" if d.get("district") else ""
             print(f"{d['id']:16} {kind_of(d):8} {where:16} {d['status']:8} {d.get('serial', ''):12} "
                   f"{crypto.fingerprint(d['public_key'])}{via}")

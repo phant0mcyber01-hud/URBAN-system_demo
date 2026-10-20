@@ -9,7 +9,7 @@ OUT=/run/urban/console.issue
 install -d /run/urban
 conf() { sed -n "s/^$1=//p" "$D/etc/unit.conf" 2>/dev/null; }
 unit=$(conf UNIT); serial=$(conf SERIAL); role=$(conf ROLE); role=${role:-unit}; host=$(conf HOST)
-center=$(conf CENTER); vision=$(conf VISION)
+center=$(conf CENTER); vision=$(conf VISION); module=$(conf MODULE)
 crypt=$(cat /run/urban/data-crypt 2>/dev/null)
 relay=$(cat /run/urban/relay.txt 2>/dev/null)  # written by urban-relay as the screen shows it
 fingerprint=$(sed -n 's/^fingerprint: *\([0-9A-F-]*\).*/\1/p' "$D/etc/enrolment.txt" 2>/dev/null)
@@ -20,8 +20,28 @@ version=$(sed -n 's/^VERSION=//p' /etc/urban-os-release)
 slot=$(sed -n 's/.*rauc\.slot=\([AB]\).*/\1/p' /proc/cmdline)
 power=$(cat /run/urban/power.txt 2>/dev/null)  # written by the power manager as the screen shows it
 update=$(cat /run/urban/update.txt 2>/dev/null)  # written by the update helper (urban-unit apply-update)
+# A street-lighting cabinet's own state (urban-lighting@, user urban, writes /run/urban/light/lighting.json).
+# That file belongs to the sandboxed program: it is read as untrusted text, never through a link, and only
+# letters, digits and . _ - of it ever reach the screen.
+lightline=""
+if [ "$module" = lighting ]; then
+  lf=/run/urban/light/lighting.json
+  if [ -f "$lf" ] && [ ! -L "$lf" ]; then
+    lj=$(head -c 2048 "$lf" 2>/dev/null | tr -d '\n')
+    ljv() { printf '%s' "$lj" | sed -n "s/.*\"$1\": *\"\{0,1\}\([A-Za-z0-9._-]\{1,16\}\)\"\{0,1\}[,} ].*/\1/p" | head -n 1; }
+    lage=$(( $(date +%s) - $(stat -c %Y "$lf" 2>/dev/null || echo 0) ))
+    lmode=$(ljv mode); llevel=$(ljv level); llamps=$(ljv lamps); lfailed=$(ljv failed); lcab=$(ljv cabinet); llink=$(ljv link)
+    if [ -n "$lmode" ] && [ "$lage" -le 60 ]; then
+      lightline="${lcab:-cabinet}: mode ${lmode}, level ${llevel:-?}%, lamps ${llamps:-?}, failed ${lfailed:-?}, centre ${llink:-?}"
+    elif [ -n "$lmode" ]; then
+      lightline="no fresh state (the program wrote last ${lage} s ago)"
+    fi
+  fi
+  lightline=${lightline:-waiting for the lighting program}
+fi
 case "$role" in
-  unit) what="junction unit"; [ "$vision" = off ] && what="junction unit, light (no cameras)" ;;
+  unit) what="junction unit"; [ "$vision" = off ] && what="junction unit, light (no cameras)"
+        [ "$module" = lighting ] && what="street-lighting cabinet (module lighting)" ;;
   district) what="district server" ;;
   center) what="control centre" ;;
   district,center) what="district server and control centre" ;;
@@ -36,7 +56,11 @@ esac
   if [ -n "$unit" ] && [ "$role" = unit ]; then
     printf "  key           %s\n" "${fingerprint:-making it now...}"
     printf "  enrolment     %s\n" "${code:-}"
-    printf "                (paste it in the platform: Devices -> Enrol a unit; compare the key above)\n"
+    if [ "$module" = lighting ]; then
+      printf "                (the centre enrols it: urban.provision enroll-lighting %s --cabinet <id> --public <key>)\n" "$unit"
+    else
+      printf "                (paste it in the platform: Devices -> Enrol a unit; compare the key above)\n"
+    fi
   elif [ -n "$unit" ] && [ "$role" = district ]; then
     printf "  key           %s\n" "${fingerprint:-making it now...}"
     printf "  enrolment     %s\n" "${code:-}"
@@ -50,6 +74,7 @@ esac
     echo "  name          NOT SET: write UNIT=, SERIAL= and ROLE= into urban-unit.txt"
     echo "                on the URBAN-ESP partition of this disk, then restart"
   fi
+  [ -z "$lightline" ] || printf "  lighting      %s\n" "$lightline"
   printf "  system        URBAN OS %s, slot %s\n" "$version" "$slot"
   printf "  self-check    %s\n" "$check"
   printf "  health        %s\n" "$health"

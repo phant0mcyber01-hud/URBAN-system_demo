@@ -16,6 +16,7 @@
 | `env.example` | `.env` сервера: адреса, имя хоста для устройств, режим `field` |
 | `urban.service` | служба платформы (systemd) |
 | `urban-edge@.service` | служба одного блока URBAN Edge на его вычислителе; параметры в `/etc/urban/edge-<id>.env` |
+| `urban-lighting@.service` | служба одного шкафа уличного освещения (модуль `lighting`, устройство `light-<шкаф>`); параметры в `/etc/urban/edge-<id>.env`, состояние в `/run/urban/light/lighting.json` |
 | `nginx-urban.conf` | HTTPS для операторов, WebSocket, лимит на `/api/login` |
 | `backup.sh` | резервная копия истории (SQLite), учётных записей и реестра устройств |
 

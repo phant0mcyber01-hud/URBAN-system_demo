@@ -9,6 +9,7 @@ platform runs.
 import datetime
 import ipaddress
 import json
+import math
 import os
 import secrets
 from pathlib import Path
@@ -19,10 +20,11 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from . import crypto, trust
-from .enrolment import DEVICE, check_address
+from .enrolment import CABINET, DEVICE, LIGHT_DEVICE, SERIAL, check_address
 
 ACTIVE, REVOKED = "active", "revoked"
-UNIT, DISTRICT = "unit", "district"  # kinds of record: a junction's unit, or a district server units connect through
+UNIT, DISTRICT, LIGHTING = "unit", "district", "lighting"  # kinds of record: a junction's unit, a district server
+# units connect through, or the unit in a street-lighting cabinet (the lighting module, urban/modules/lighting)
 
 
 def device_id(junction_id: str) -> str:
@@ -109,6 +111,43 @@ class Registry:
             rec.pop("first_seen", None)
         rec.update({"id": device, "kind": DISTRICT, "junction": None, "tls": None, "name": "", "address": address,
                     "public_key": public.strip().lower(), "status": ACTIVE,
+                    "serial": serial or rec.get("serial") or f"URB-{secrets.token_hex(3).upper()}",
+                    "enrolled": datetime.date.today().isoformat()})
+        self.devices[device] = rec
+        self._save()
+        return rec
+
+    def enroll_lighting(self, device: str, cabinet: str, public: str, serial: str = "",
+                        lon: float | None = None, lat: float | None = None) -> dict:
+        """Enrol the unit of a street-lighting cabinet: id light-<name>, the cabinet it controls (one active unit per
+        cabinet) and optionally where the cabinet stands (the unit's astronomical schedule needs it). A lighting
+        record is nobody's junction and goes through no district server. A known device gets the new key."""
+        crypto.load_public(public)
+        if not isinstance(device, str) or not LIGHT_DEVICE.fullmatch(device):
+            raise ValueError("lighting unit id must look like light-<cabinet> (letters, digits, . _ -)")
+        if not isinstance(cabinet, str) or not CABINET.fullmatch(cabinet):
+            raise ValueError("cabinet is letters, digits, . _ - (up to 40), e.g. C-01")
+        if not isinstance(serial, str) or not SERIAL.fullmatch(serial):
+            raise ValueError("serial: letters, digits, . _ - (up to 40)")
+        for name, value, limit in (("lon", lon, 180), ("lat", lat, 90)):
+            if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))
+                                      or not math.isfinite(value) or abs(value) > limit):
+                raise ValueError(f"{name} must be a number within +-{limit}")
+        if (lon is None) != (lat is None):
+            raise ValueError("give both --lon and --lat, or neither")
+        self._reload()
+        self._check_key(device, public)
+        for other in self.devices.values():
+            if (other["id"] != device and kind_of(other) == LIGHTING and other.get("cabinet") == cabinet
+                    and other["status"] == ACTIVE):
+                raise ValueError(f"cabinet {cabinet} already has unit {other['id']}; revoke and remove it first")
+        rec = self.devices.get(device, {})
+        if rec and kind_of(rec) != LIGHTING:
+            raise ValueError(f"{device} is already enrolled as a {kind_of(rec)}")
+        if rec.get("public_key") != public.strip().lower():
+            rec.pop("first_seen", None)
+        rec.update({"id": device, "kind": LIGHTING, "cabinet": cabinet, "lon": lon, "lat": lat, "junction": None,
+                    "tls": None, "name": "", "public_key": public.strip().lower(), "status": ACTIVE,
                     "serial": serial or rec.get("serial") or f"URB-{secrets.token_hex(3).upper()}",
                     "enrolled": datetime.date.today().isoformat()})
         self.devices[device] = rec
@@ -305,6 +344,24 @@ def provision(junctions: list[dict], pki: Path, host: str | None = None, demo_de
                           "serial": f"URB-{secrets.token_hex(3).upper()}",  # what is printed on the box
                           "enrolled": datetime.date.today().isoformat()}
         created = True
+    # the demo twin also has a few street-lighting cabinets (City OS module lighting), next to its first junctions
+    placed = [j for j in junctions if isinstance(j.get("lon"), (int, float)) and isinstance(j.get("lat"), (int, float))]
+    for n, j in enumerate(placed[:DEMO_CABINETS], start=1):
+        cabinet = f"C-{n:02d}"
+        ident = f"light-{cabinet}"
+        if ident in devices and (pki / "edge" / f"{ident}.key").exists():
+            continue
+        key = crypto.new_key()
+        (pki / "edge" / f"{ident}.key").write_text(crypto.private_hex(key))
+        devices[ident] = {"id": ident, "kind": "lighting", "cabinet": cabinet,
+                          "lon": round(j["lon"] + 0.0006, 6), "lat": round(j["lat"] + 0.0004, 6),
+                          "junction": None, "tls": None, "name": "", "public_key": crypto.public_hex(key),
+                          "status": ACTIVE, "serial": f"LGT-{secrets.token_hex(3).upper()}",
+                          "enrolled": datetime.date.today().isoformat()}
+        created = True
     if created:
         save(path, devices)
     return created
+
+
+DEMO_CABINETS = 4  # street-lighting cabinets the demo twin gets

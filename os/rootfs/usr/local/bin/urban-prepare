@@ -5,6 +5,8 @@
 #
 # One OS, three roles (urban-unit.txt on the ESP, read once at first boot):
 #   unit      a junction's box: makes its key, shows its enrolment code, runs the unit once it has its kit
+#             (MODULE=lighting: a street-lighting cabinet, UNIT=light-<cabinet>: the same key and code, and the
+#             lighting program instead of the junction's)
 #   district  a district's server: its relay carries the junction units' connections to the centre (CENTER=),
 #             it reports the queues of the district's cameras to the centre as a device of its own
 #   center    the control centre: the platform and its interface over HTTPS
@@ -17,6 +19,7 @@ install -d -m 750 -o urban -g urban "$D/etc/pki" "$D/etc/pki/edge"
 install -d -m 700 "$D/ssh"
 install -d -m 755 -o root -g root /run/urban  # root's live state (tmpfiles.d/urban.conf says the same)
 install -d -m 755 -o urban-vision -g urban /run/urban/q  # the only place vision writes: its queue lengths
+install -d -m 755 -o urban -g urban /run/urban/light  # the only place the lighting program writes: its state (a screen line)
 install -d -m 700 "$D/update"  # update bundles are staged here: the root is read-only, /tmp is small
 [ -f "$D/ssh/ssh_host_ed25519_key" ] || ssh-keygen -q -t ed25519 -N '' -f "$D/ssh/ssh_host_ed25519_key" -C urban-edge
 
@@ -58,19 +61,30 @@ if [ ! -f "$D/etc/unit.conf" ] && [ -f /boot/efi/urban-unit.txt ]; then
   host=$(value HOST /boot/efi/urban-unit.txt)
   center=$(tr -d '\r' < /boot/efi/urban-unit.txt | sed -n 's/^[[:space:]]*CENTER[[:space:]]*=[[:space:]]*\([A-Za-z0-9.-]*\(:[0-9][0-9]*\)\{0,1\}\)[[:space:]]*$/\1/p' | tail -n 1)
   vision=$(value VISION /boot/efi/urban-unit.txt | tr 'A-Z' 'a-z')
+  module=$(value MODULE /boot/efi/urban-unit.txt | tr 'A-Z' 'a-z')
+  # a city service other than traffic (the default): only a unit can carry one
+  case "$module" in ""|traffic) module="" ;; lighting) ;; *) echo "URBAN-MODULE refused: MODULE=$module (traffic or lighting)"; module=refused ;; esac
   # each role has its own kind of name; the template's placeholder is no name at all
   case "$role" in
-    unit) ok='^edge-[A-Za-z0-9._-]+$' ;;
+    unit) ok='^edge-[A-Za-z0-9._-]+$'; [ "$module" != lighting ] || ok='^light-[A-Za-z0-9._-]+$' ;;
     district) ok='^district-[A-Za-z0-9._-]+$' ;;
     center|district,center|center,district) ok='^center(-[A-Za-z0-9._-]+)?$'; role=${role/center,district/district,center} ;;
     *) ok='^$'; echo "URBAN-ROLE refused: ROLE=$role (unit, district, center or district,center)" ;;
   esac
-  if [ -n "$unit" ] && [[ "$unit" =~ $ok ]] && [ "$unit" != "edge-J-00" ]; then
+  if [ "$module" = lighting ] && [ "$role" != unit ]; then
+    echo "URBAN-ROLE refused: MODULE=lighting is for a unit (ROLE=unit), not for ROLE=$role"
+  elif [ "$module" = refused ]; then
+    echo "URBAN-ROLE refused: MODULE in urban-unit.txt is not a known city service"
+  elif [ -n "$unit" ] && [[ "$unit" =~ $ok ]] && [ "$unit" != "edge-J-00" ]; then
     case "$center" in ""|*:*) ;; *) center="$center:8443" ;; esac  # the centre's device listener: 8443 unless said
     printf "UNIT=%s\nSERIAL=%s\nROLE=%s\nHOST=%s\nCENTER=%s\n" "$unit" "$serial" "$role" "$host" "$center" > "$D/etc/unit.conf"
-    if [ "$role" = unit ] && [ "$vision" = off ]; then echo "VISION=off" >> "$D/etc/unit.conf"; fi
+    if [ "$role" = unit ] && [ "$module" = lighting ]; then
+      { echo "MODULE=lighting"; echo "VISION=off"; } >> "$D/etc/unit.conf"  # a cabinet has no cameras, ever
+    elif [ "$role" = unit ] && [ "$vision" = off ]; then
+      echo "VISION=off" >> "$D/etc/unit.conf"
+    fi
   elif [ -n "$unit" ] && [ "$unit" != "edge-J-00" ]; then
-    echo "URBAN-ROLE refused: the name $unit does not fit the role $role (edge-..., district-..., center...)"
+    echo "URBAN-ROLE refused: the name $unit does not fit the role $role (edge-..., light-... with MODULE=lighting, district-..., center...)"
   fi
 fi
 
@@ -85,8 +99,9 @@ ROLE=$(sed -n 's/^ROLE=//p' "$D/etc/unit.conf"); ROLE=${ROLE:-unit}  # units set
 HOST=$(sed -n 's/^HOST=//p' "$D/etc/unit.conf")
 CENTER=$(sed -n 's/^CENTER=//p' "$D/etc/unit.conf")
 VISION=$(sed -n 's/^VISION=//p' "$D/etc/unit.conf")
+MODULE=$(sed -n 's/^MODULE=//p' "$D/etc/unit.conf")
 hostname "$UNIT"  # /etc/hostname is read-only; the name is this machine's own
-echo "URBAN-ROLE role=$ROLE name=$UNIT${VISION:+ vision=$VISION}${CENTER:+ center=$CENTER}"
+echo "URBAN-ROLE role=$ROLE name=$UNIT${MODULE:+ module=$MODULE}${VISION:+ vision=$VISION}${CENTER:+ center=$CENTER}"
 
 # The inbox for updates the control centre delivers (roles unit and district): the sandboxed client (user urban)
 # downloads the package here and writes request.json; urban-update.service (root) takes the package out of it and
@@ -157,7 +172,15 @@ case ",$ROLE," in *,district,*)
     echo "URBAN-DISTRICT starting urban-district@$UNIT"
   fi ;;
 esac
-if [ "$ROLE" = unit ] && [ -f "$D/etc/edge-$UNIT.env" ]; then
+if [ "$ROLE" = unit ] && [ "$MODULE" = lighting ]; then
+  # a street-lighting cabinet: its own program (obeys the centre's signed commands, otherwise its schedule), no
+  # junction controller and no cameras. The screen line is redrawn from its state by urban-lighting-screen.timer.
+  if [ -f "$D/etc/edge-$UNIT.env" ]; then
+    systemctl start --no-block "urban-lighting@$UNIT.service"
+    echo "URBAN-LIGHTING starting urban-lighting@$UNIT"
+  fi
+  systemctl start --no-block urban-lighting-screen.timer
+elif [ "$ROLE" = unit ] && [ -f "$D/etc/edge-$UNIT.env" ]; then
   systemctl start --no-block "urban-edge@$UNIT.service"
   if [ -f "$D/etc/cameras.json" ] && [ "$VISION" != off ]; then systemctl start --no-block "urban-vision@$UNIT.service"; fi
   echo "URBAN-UNIT starting urban-edge@$UNIT${VISION:+ (light: no vision)}"
