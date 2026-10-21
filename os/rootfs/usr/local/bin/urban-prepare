@@ -28,10 +28,17 @@ if [ ! -f "$D/etc/.grown" ]; then
   echo "URBAN-DATA $(df -m --output=size "$D" | tail -n 1 | tr -d ' ') MiB"
 fi
 
-# Maintenance keys the installer put on the ESP (FAT: a Windows laptop can write it). Public keys only, each
-# one checked; they are added to the data partition and the file is renamed, so a key removed later over SSH
-# does not come back at the next boot. Whoever holds the disk could do the same - the disk is the trust boundary.
-if [ -f /boot/efi/maintenance.pub ]; then
+# Maintenance keys the installer put on the ESP (FAT: a Windows laptop can write it), read ONLY before this machine
+# has its identity (no unit.conf yet: the very first boot). The ESP is not signed, so after that anyone holding the
+# disk could drop a key there and get root over SSH: from then on the file is ignored (logged, renamed). Keys are
+# changed afterwards over SSH, in authorized_keys on the data partition. Public keys only, each one checked; they are
+# added to the data partition and the file is renamed, so a key removed later over SSH does not come back.
+if [ -f /boot/efi/maintenance.pub ] && [ -f "$D/etc/unit.conf" ]; then
+  # a FAT error must not stop this script (the role's services would never start): the file is ignored all the same
+  mv -f /boot/efi/maintenance.pub /boot/efi/maintenance.pub.ignored \
+    || echo "URBAN-MAINTENANCE-KEYS could not rename maintenance.pub to maintenance.pub.ignored on the ESP"
+  echo "URBAN-MAINTENANCE-KEYS ignored: the unit already has its identity"
+elif [ -f /boot/efi/maintenance.pub ]; then
   touch "$D/ssh/authorized_keys"; chmod 600 "$D/ssh/authorized_keys"
   added=0
   while read -r line; do
@@ -40,7 +47,9 @@ if [ -f /boot/efi/maintenance.pub ]; then
     printf '%s\n' "$line" | ssh-keygen -l -f - >/dev/null 2>&1 || continue
     grep -qxF "$line" "$D/ssh/authorized_keys" || { printf '%s\n' "$line" >> "$D/ssh/authorized_keys"; added=$((added + 1)); }
   done < <(tr -d '\r' < /boot/efi/maintenance.pub; echo)  # the echo: a last line without a newline still counts
-  mv -f /boot/efi/maintenance.pub /boot/efi/maintenance.pub.imported
+  # not renamed: at the next boot the unit has its identity and the file is ignored (the keys are already imported)
+  mv -f /boot/efi/maintenance.pub /boot/efi/maintenance.pub.imported \
+    || echo "URBAN-MAINTENANCE-KEYS could not rename maintenance.pub to maintenance.pub.imported on the ESP"
   echo "URBAN-MAINTENANCE-KEYS added=$added total=$(grep -c . "$D/ssh/authorized_keys")"
 fi
 
@@ -137,7 +146,7 @@ case "$ROLE" in unit|district)  # a unit and a district have a key of their own 
     if [ -e /sys/class/tpm/tpm0 ]; then
       for _ in $(seq 1 50); do [ -c /dev/tpmrm0 ] && break; sleep 0.2; done
     fi
-    /opt/urban/.venv/bin/python -m urban.edge --keygen --unit "$UNIT" --serial "$SERIAL" --pki "$D/etc/pki" --tpm auto > "$D/etc/enrolment.txt"
+    /opt/urban/.venv/bin/python -I -m urban.edge --keygen --unit "$UNIT" --serial "$SERIAL" --pki "$D/etc/pki" --tpm auto > "$D/etc/enrolment.txt"
   fi
   # the key folder / file belongs to the service's user alone (urban); the blobs and the file are private to it
   if [ -d "$TPMKEY" ]; then

@@ -14,17 +14,19 @@ if systemctl is-active --quiet urban-os-check; then
     grub-editenv "$ENV" set "${slot}_OK=1" "${slot}_TRY=0"  # RAUC unreachable: keep the boot state right by hand
     echo "URBAN-HEALTH good slot=$slot (marked without RAUC)"
   fi
+  grub-editenv "$ENV" set "${slot}_FAIL=0" || true  # GRUB counts a slot's failed tries (retries without a good mark): this one came up
   tell "good - this system is marked working"
   exit 0
 fi
 if grub-editenv "$ENV" list | grep -qx "${other}_OK=1"; then
   rauc status mark-bad booted >/dev/null 2>&1 || grub-editenv "$ENV" set "${slot}_OK=0" "${slot}_TRY=0"
+  grub-editenv "$ENV" set "${slot}_FAIL=0" || true
   echo "URBAN-HEALTH bad slot=$slot: rebooting into slot $other"
   tell "BAD - going back to the previous system (slot $other)"
   sleep 3
   systemctl reboot
 else
-  grub-editenv "$ENV" set "${slot}_TRY=0"  # the only system there is: it must stay bootable
+  grub-editenv "$ENV" set "${slot}_TRY=0" "${slot}_FAIL=0"  # the only system there is: it came up, so it must stay bootable
   install -d /run/urban
   echo "self-check failed and there is no other good slot" > /run/urban/degraded
   echo "URBAN-HEALTH degraded slot=$slot: no other good slot, staying up"

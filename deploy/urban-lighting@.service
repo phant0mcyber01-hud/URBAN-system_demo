@@ -19,7 +19,10 @@ WorkingDirectory=/opt/urban
 # CABINET means "the id after light-"; LON and LAT default to Fergana, the pilot city (the program's own default).
 Environment=ADAPTER=emulated CABINET= LON=71.78 LAT=40.39 EXTRA=
 EnvironmentFile=/etc/urban/edge-%i.env
-ExecStart=/opt/urban/.venv/bin/python -m urban.modules.lighting --unit %i --platform ${PLATFORM} --server-name ${SERVER_NAME} \
+# the env file is data the unit's own user can write: it must not be a way to inject code into the interpreter or
+# the loader (python -I below ignores PYTHON* as well)
+UnsetEnvironment=PYTHONPATH PYTHONHOME LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GCONV_PATH OPENSSL_CONF OPENSSL_MODULES
+ExecStart=/opt/urban/.venv/bin/python -I -m urban.modules.lighting --unit %i --platform ${PLATFORM} --server-name ${SERVER_NAME} \
     --pki /etc/urban/pki --adapter ${ADAPTER} --cabinet "${CABINET}" --lon ${LON} --lat ${LAT} \
     --status /run/urban/light/lighting.json $EXTRA
 Restart=always

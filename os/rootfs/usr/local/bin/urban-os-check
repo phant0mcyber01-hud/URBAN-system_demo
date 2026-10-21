@@ -27,6 +27,22 @@ else
   fail+=("firewall not loaded")
 fi
 
+# The signed boot chain, reported and never failed on: a machine whose firmware has not been given the URBAN keys (Secure
+# Boot off) must still run, the screen says plainly that it does. Secure Boot: the last byte of the firmware variable.
+# Verity: the root is the dm-verity device the initramfs opened from the slot's signed root hash.
+sb=off
+sbvar=/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c
+if [ -r "$sbvar" ] && [ "$(tail -c1 "$sbvar" 2>/dev/null | od -An -tu1 | tr -d ' ')" = 1 ]; then sb=on; fi
+# a warning, not a failure: with Secure Boot off the firmware runs any boot loader on the ESP, which an update cannot fix
+[ "$sb" = on ] || warn+=("secure boot is off")
+verity=off
+rootdev=$(findmnt -n -o SOURCE / 2>/dev/null)
+if grep -q ' urban\.verity=' /proc/cmdline && [ -b /dev/mapper/urban-root ] && [ -n "$rootdev" ] \
+   && [ "$(readlink -f "$rootdev")" = "$(readlink -f /dev/mapper/urban-root)" ] \
+   && veritysetup status urban-root 2>/dev/null | grep -qi 'type: *VERITY'; then
+  verity=on
+fi
+
 wd=$(systemctl show -p RuntimeWatchdogUSec --value)
 if [ ! -e /dev/watchdog0 ] || [ -z "$wd" ] || [ "$wd" = 0 ] || [ "$wd" = infinity ]; then fail+=("watchdog not armed ($wd)"); fi
 
@@ -103,13 +119,15 @@ esac
 install -d /run/urban
 if [ ${#fail[@]} -eq 0 ]; then
   note=""; [ ${#warn[@]} -gt 0 ] && note=" warn=$(IFS=';'; echo "${warn[*]}" | tr ' ' '_')"
-  echo "URBAN-OS-CHECK OK version=$version slot=$slot root=ro data=rw,$crypt firewall=on watchdog=$wd unit=$unit role=$role${module:+ module=$module}$note"
+  echo "URBAN-OS-CHECK OK version=$version slot=$slot root=ro data=rw,$crypt firewall=on watchdog=$wd secureboot=$sb verity=$verity unit=$unit role=$role${module:+ module=$module}$note"
   echo "OK - read-only system, data writable, firewall on, watchdog $wd${warn:+; WARNING: $(IFS=';'; echo "${warn[*]}")}" > /run/urban/os-check
   echo "$crypt" > /run/urban/data-crypt
+  echo "secureboot=$sb verity=$verity" > /run/urban/boot-state
   /usr/local/bin/urban-console
   exit 0
 fi
-echo "URBAN-OS-CHECK FAIL version=$version slot=$slot: $(IFS=';'; echo "${fail[*]}")"
+echo "secureboot=$sb verity=$verity" > /run/urban/boot-state
+echo "URBAN-OS-CHECK FAIL version=$version slot=$slot: $(IFS=';'; echo "${fail[*]}") (secureboot=$sb verity=$verity)"
 echo "FAILED - $(IFS=';'; echo "${fail[*]}")" > /run/urban/os-check
 /usr/local/bin/urban-console
 exit 1

@@ -14,6 +14,9 @@
                                         cabinet returns to its schedule by itself when the centre's listener stops
     python3 vm.py hardened [lighting]   an intruder on a junction unit (or a lighting cabinet): root, the hijacked service,
                                         the device key inside the TPM and useless when copied to another machine
+    python3 vm.py secureboot            Secure Boot enforced: the unit boots with URBAN's keys; a boot loader not signed by
+                                        them is refused by the firmware; a changed boot config is not executed; one changed
+                                        byte in a slot makes it fail and the unit falls back to the other slot
     python3 vm.py chain                 unit -> district -> centre: three machines, the relay, the district's reports
     python3 vm.py ota                   over the air: the centre releases version 2, the district and the unit install it
                                         by themselves; the unit's root helper refuses what it must refuse
@@ -24,7 +27,8 @@
                                         a unit image as shipped: identity and maintenance key from its ESP only
 
 Each scenario starts from a fresh copy of the built image, with a software TPM (swtpm) unless told otherwise,
-as a real mini-PC has one. The serial console is kept in /out/logs/;
+as a real mini-PC has one, and with Secure Boot enforced (URBAN's keys enrolled in the firmware; VM(secure_boot=False)
+is the control). The serial console is kept in /out/logs/;
 only the lines that matter are printed. The last line is the verdict the gate looks for.
 """
 import base64
@@ -46,7 +50,8 @@ LOGS = f"{OUT}/logs"
 KEY = "/tmp/vm-key"
 STAGE = "/var/lib/urban/update"  # bundles are staged on the data partition: /tmp is a small tmpfs
 BOOT_TIMEOUT = 1500 if os.environ.get("URBAN_KVM") != "1" else 300  # seconds; emulation without KVM is slow
-SHOW = re.compile(r"URBAN-|Kernel panic|watchdog|Emergency|Failed to start|rauc|end Kernel")
+SHOW = re.compile(r"URBAN-|Kernel panic|watchdog|Emergency|Failed to start|rauc|end Kernel|Secure ?boot|Access Denied"
+                  r"|Security Violation|failed to load Boot|bad signature|verity|not syncing")
 
 
 class Fail(Exception):
@@ -84,8 +89,10 @@ DISK_BUS = {
 class VM:
     def __init__(self, name, version="1", unit="edge-J-07", serial="URB-TEST", image=None, key=KEY,
                  add_key=True, bus="virtio", nic="virtio-net-pci", role=None, host=None, grow_mb=0, forward=(),
-                 listen="127.0.0.1", vnc=None, ssh_port=2222, mem=2048, tpm=True, center=None, vision=None, module=None):
+                 listen="127.0.0.1", vnc=None, ssh_port=2222, mem=2048, tpm=True, center=None, vision=None, module=None,
+                 secure_boot=True):
         os.makedirs(LOGS, exist_ok=True)
+        self.secure_boot = secure_boot  # firmware with URBAN's keys enrolled and Secure Boot enforced; False: the control
         self.name, self.disk, self.key, self.bus, self.nic = name, f"/tmp/{name}.img", key, bus, nic
         self.forward = forward  # more (host port, guest port) pairs than SSH
         self.listen, self.vnc = listen, vnc  # where those ports listen; VNC display number for the screen, or none
@@ -115,6 +122,7 @@ class VM:
         if grow_mb:  # a disk bigger than the image, as every real one is
             sh(["truncate", "-s", f"+{grow_mb}M", self.disk])
         self.lines, self.mark, self.proc = [], 0, None
+        self.boots = []  # len(self.lines) at each power-on of the machine (cold starts after guest reboots included)
         self._stopping = self._cycling = False  # set while the harness itself switches the machine off
         self._restarting = False  # set while a guest reboot is being turned into a cold start (old QEMU gone, new not yet)
         self._restart_error = None  # why that cold start failed, if it did
@@ -146,15 +154,37 @@ class VM:
         return ["-chardev", f"socket,id=chrtpm,path={sock}", "-tpmdev", "emulator,id=tpm0,chardev=chrtpm",
                 "-device", "tpm-tis,tpmdev=tpm0"]
 
+    def _firmware(self) -> tuple[list[str], list[str]]:
+        """(machine flags, pflash drives). Secure Boot on: the SMM-capable OVMF build, its variable store protected
+        (writable only from SMM) and filled with URBAN's PK/KEK/db and Secure Boot enabled (built into the volume as
+        ovmf-vars-urban.fd). Off: the plain build with an empty variable store, as before."""
+        vars_ = f"/tmp/{self.name}-vars.fd"  # firmware variables of this machine, like a real board's NVRAM
+        if self.secure_boot:
+            if not os.path.exists(vars_):
+                if not os.path.exists(f"{OUT}/ovmf-vars-urban.fd"):
+                    raise Fail(f"{OUT}/ovmf-vars-urban.fd is missing: the image build must enrol URBAN's keys for Secure Boot")
+                shutil.copyfile(f"{OUT}/ovmf-vars-urban.fd", vars_)
+            code = "/usr/share/OVMF/OVMF_CODE_4M.secboot.fd"
+            # smm=on: the secboot build refuses to run without System Management Mode; the pflash must then be marked
+            # secure (only SMM code writes the variables); S3 sleep is off because a build with SMM does not support it
+            machine = ["-machine", "q35,smm=on", "-global", "driver=cfi.pflash01,property=secure,value=on",
+                       "-global", "ICH9-LPC.disable_s3=1"]
+        else:
+            if not os.path.exists(vars_):
+                shutil.copy("/usr/share/OVMF/OVMF_VARS_4M.fd", vars_)
+            code = "/usr/share/OVMF/OVMF_CODE_4M.fd"
+            machine = ["-machine", "q35"]
+        drives = ["-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={code}",
+                  "-drive", f"if=pflash,format=raw,unit=1,file={vars_}"]
+        return machine, drives
+
     def start(self):
         accel = ["-enable-kvm", "-cpu", "host"] if os.environ.get("URBAN_KVM") == "1" else ["-cpu", "max"]
-        vars_ = f"/tmp/{self.name}-vars.fd"  # firmware variables of this machine, like a real board's NVRAM
-        if not os.path.exists(vars_):
-            shutil.copy("/usr/share/OVMF/OVMF_VARS_4M.fd", vars_)
+        machine, firmware = self._firmware()
+        self.boots.append(len(self.lines))
         self.proc = subprocess.Popen(
-            ["qemu-system-x86_64", "-machine", "q35", "-m", str(self.mem), "-smp", "2", *accel,
-             "-drive", "if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd",
-             "-drive", f"if=pflash,format=raw,unit=1,file={vars_}",
+            ["qemu-system-x86_64", *machine, "-m", str(self.mem), "-smp", "2", *accel,
+             *firmware,
              *DISK_BUS[self.bus](self.disk),
              *(self._tpm() if self.tpm else []),
              "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{self.ssh_port}-:22"
@@ -235,9 +265,14 @@ class VM:
     def put(self, src, dst):
         remote_put(self.ssh_port, self.key, src, dst)
 
-    def install(self, bundle):
-        """rauc install on the unit; on failure the reason from RAUC's own log."""
-        r = self.ssh(f"rauc install {bundle}", check=False)
+    def install(self, bundle, timeout=2400):
+        """rauc install on the unit; on failure (or when it does not finish in time) the reason from RAUC's own log.
+        The bundle's hook reads the whole written slot back against its root hash (veritysetup verify): slow when emulated."""
+        try:
+            r = self.ssh(f"rauc install {bundle}", check=False, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            log = self.ssh("journalctl -u rauc --no-pager -n 25 -o cat", check=False).stdout
+            raise Fail(f"rauc install did not finish within {timeout} s\n" + log)
         if r.returncode != 0:
             log = self.ssh("journalctl -u rauc --no-pager -n 25 -o cat", check=False).stdout
             raise Fail("rauc install failed: " + r.stderr.strip() + "\n" + log)
@@ -269,6 +304,22 @@ class VM:
             self.swtpm.wait()
         self.start()
         self._cycling = False  # the old QEMU's reader restarts nothing: it is no longer self.proc
+
+    def cut_power(self):
+        """The plug pulled (no clean shutdown): QEMU and the software TPM end, the disk, firmware variables and TPM state
+        stay as they are, and nothing restarts the machine until power_on(). The disk can then be edited from outside."""
+        self._cycling = True
+        if self.proc and self.proc.poll() is None:
+            self.proc.kill()
+        if self.proc:
+            self.proc.wait()
+        if self.swtpm and self.swtpm.poll() is None:
+            self.swtpm.kill()
+            self.swtpm.wait()
+
+    def power_on(self):
+        self.start()
+        self._cycling = False
 
     def stop(self):
         self._stopping = True
@@ -320,9 +371,13 @@ def image():
         raise Fail("slot B is not empty in a fresh image")
     esp = parts["esp"]["start"] * 512
     files = sh(f"mdir -/ -b -i {disk}@@{esp} ::/").stdout
-    for need in ("::/EFI/BOOT/BOOTX64.EFI", "::/EFI/BOOT/grub.cfg", "::/EFI/BOOT/grubenv", "::/urban-unit.txt"):
+    for need in ("::/EFI/BOOT/BOOTX64.EFI", "::/EFI/BOOT/grub.cfg", "::/EFI/BOOT/grub.cfg.sig", "::/EFI/BOOT/grubenv",
+                 "::/EFI/URBAN/slot-A.cfg", "::/EFI/URBAN/slot-A.cfg.sig", "::/EFI/URBAN/slot-A.sha256",
+                 "::/EFI/URBAN/slot-A.sha256.sig", "::/urban-unit.txt"):
         if need not in files:
             raise Fail(f"ESP lacks {need}")
+    if "slot-B.cfg" in files:
+        raise Fail("a fresh image already has a boot file for slot B")
     env = sh(f"mtype -i {disk}@@{esp} ::/EFI/BOOT/grubenv").stdout
     if "A_OK=1" not in env or "B_OK=0" not in env:
         raise Fail(f"boot state is not 'slot A good, slot B empty': {env!r}")
@@ -337,8 +392,158 @@ def image():
     info = sh(["rauc", "--conf", "/tmp/verify.conf", "info", "--output-format=json", f"{OUT}/urban-edge-1.raucb"]).stdout
     if json.loads(info).get("compatible") != "urban-edge-x86_64":
         raise Fail("the update bundle is not for urban-edge-x86_64")
+    plain = sh(["rauc", "--conf", "/tmp/verify.conf", "info", f"{OUT}/urban-edge-1.raucb"]).stdout
+    # rauc info names the image's hook but not the hook file: look inside the (signature-checked) bundle for it
+    shutil.rmtree("/tmp/bundle-x", ignore_errors=True)
+    sh(["rauc", "--conf", "/tmp/verify.conf", "extract", f"{OUT}/urban-edge-1.raucb", "/tmp/bundle-x"])
+    manifest = open("/tmp/bundle-x/manifest.raucm").read() if os.path.exists("/tmp/bundle-x/manifest.raucm") else ""
+    if ("post-install" not in plain or not re.search(r"^filename=hook\.sh$", manifest, re.M)
+            or not os.access("/tmp/bundle-x/hook.sh", os.X_OK)
+            or not all(os.path.exists(f"/tmp/bundle-x/{n}") for n in ("slot.cfg", "slot.cfg.sig", "slot.sha256", "slot.sha256.sig"))):
+        raise Fail("the update bundle has no post-install hook (hook.sh) with its signed slot file: an installed slot "
+                   "would get no signed boot file")
+    shutil.rmtree("/tmp/bundle-x", ignore_errors=True)
     contents()
+    signed_chain(disk, parts, esp)
     print("IMAGE LAYOUT VERIFIED", flush=True)
+
+
+def flip_byte(src, dst, pos):
+    """A copy of src with one byte of it changed."""
+    shutil.copyfile(src, dst)
+    with open(dst, "r+b") as f:
+        f.seek(pos)
+        b = f.read(1)
+        f.seek(pos)
+        f.write(bytes([b[0] ^ 0xFF]))
+
+
+def signed_chain(disk, parts, esp):
+    """The boot chain is signed through, and every check has its control that must fail:
+    BOOTX64.EFI against the db certificate (not against another one), grub.cfg / the slot file / kernel / initrd against
+    the boot key (not when one byte is changed), the slot against the dm-verity root hash in its signed file (not when one
+    byte of the data or of the hash tree is changed), and the VMs' firmware variables hold our keys with Secure Boot on."""
+    keys, sb, work = f"{OUT}/keys", f"{OUT}/keys/sb", "/tmp/signed"
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+
+    def from_esp(path):
+        dst = f"{work}/{os.path.basename(path)}"
+        sh(f"mcopy -n -o -i {disk}@@{esp} ::{path} {dst}")
+        return dst
+
+    efi = from_esp("/EFI/BOOT/BOOTX64.EFI")
+    if sh(["sbverify", "--cert", f"{sb}/db.crt", efi], check=False).returncode != 0:
+        raise Fail("BOOTX64.EFI is not signed by our db certificate")
+    sh(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-sha256", "-days", "2", "-subj", "/CN=not URBAN",
+        "-keyout", f"{work}/other.key", "-out", f"{work}/other.crt"])
+    if sh(["sbverify", "--cert", f"{work}/other.crt", efi], check=False).returncode == 0:
+        raise Fail("control: BOOTX64.EFI verifies against a certificate that is not ours")
+    for other in ("PK", "KEK"):  # only db may sign boot code
+        if sh(["sbverify", "--cert", f"{sb}/{other}.crt", efi], check=False).returncode == 0:
+            raise Fail(f"control: BOOTX64.EFI verifies against the {other} certificate")
+    print("   boot loader: BOOTX64.EFI verifies against our db certificate, not against another one (nor PK, KEK)", flush=True)
+
+    # the boot key
+    gh = f"{work}/gnupg"
+    os.makedirs(gh, mode=0o700)
+    sh(["gpg", "--homedir", gh, "--batch", "--quiet", "--import", f"{keys}/boot.pub.gpg"])
+
+    def gpg_good(sig, f):
+        r = sh(["gpg", "--homedir", gh, "--batch", "--status-fd", "1", "--verify", sig, f], check=False)
+        return r.returncode == 0 and "GOODSIG" in r.stdout and "VALIDSIG" in r.stdout
+
+    slot = f"{OUT}/build/rootfs-1.img"
+    shutil.rmtree("/tmp/sq3", ignore_errors=True)
+    sh(["unsquashfs", "-q", "-n", "-d", "/tmp/sq3", slot, "boot/vmlinuz", "boot/vmlinuz.sig", "boot/initrd.img", "boot/initrd.img.sig"])
+    signed = {
+        "grub.cfg": (from_esp("/EFI/BOOT/grub.cfg"), from_esp("/EFI/BOOT/grub.cfg.sig")),
+        "slot-A.cfg": (from_esp("/EFI/URBAN/slot-A.cfg"), from_esp("/EFI/URBAN/slot-A.cfg.sig")),
+        "slot-A.sha256 (kernel and initrd hash list)": (from_esp("/EFI/URBAN/slot-A.sha256"), from_esp("/EFI/URBAN/slot-A.sha256.sig")),
+        "kernel (in the slot)": ("/tmp/sq3/boot/vmlinuz", "/tmp/sq3/boot/vmlinuz.sig"),
+        "initrd (in the slot)": ("/tmp/sq3/boot/initrd.img", "/tmp/sq3/boot/initrd.img.sig"),
+    }
+    for what, (f, sig) in signed.items():
+        if not gpg_good(sig, f):
+            raise Fail(f"the {what} has no valid signature of the boot key")
+        bad = f"{work}/tampered"
+        flip_byte(f, bad, os.path.getsize(f) // 2)
+        if gpg_good(sig, bad):
+            raise Fail(f"control: the {what} still verifies with one byte changed")
+        os.remove(bad)
+    if "set superusers" not in open(signed["grub.cfg"][0]).read():
+        raise Fail("grub.cfg carries no maintenance password")
+    print("   signatures: grub.cfg, slot-A.cfg, slot-A.sha256, kernel and initrd verify against the boot key; one changed byte fails each",
+          flush=True)
+
+    # the kernel and the initrd are the ones in the signed hash list (what GRUB's hashsum --check compares), and a list
+    # entry that does not fit them is seen
+    import hashlib
+    listed = {}
+    for line in open(signed["slot-A.sha256 (kernel and initrd hash list)"][0]).read().splitlines():
+        m = re.fullmatch(r"([0-9a-f]{64})  (boot/(?:vmlinuz|initrd\.img))", line)
+        if not m:
+            raise Fail(f"slot-A.sha256 has a line that is not 'sha256  boot/<file>': {line!r}")
+        listed[m.group(2)] = m.group(1)
+    if sorted(listed) != ["boot/initrd.img", "boot/vmlinuz"]:
+        raise Fail(f"slot-A.sha256 must list the kernel and the initrd: {sorted(listed)}")
+    for name, path in (("boot/vmlinuz", "/tmp/sq3/boot/vmlinuz"), ("boot/initrd.img", "/tmp/sq3/boot/initrd.img")):
+        got = hashlib.sha256(open(path, "rb").read()).hexdigest()
+        if got != listed[name]:
+            raise Fail(f"the {name} in the slot is not the one in the signed hash list ({got} against {listed[name]})")
+    print("   hash list: the kernel and the initrd in the slot are the files whose sha256 the signed list names", flush=True)
+
+    # the slot against the root hash in its signed file
+    cfg = open(signed["slot-A.cfg"][0]).read()
+    var = dict(re.findall(r"^set (URBAN_[A-Z]+)=(\S+)$", cfg, re.M))
+    roothash, offset = var.get("URBAN_ROOTHASH", ""), int(var.get("URBAN_HASHOFFSET", "0"))
+    size = os.path.getsize(slot)
+    if not re.fullmatch(r"[0-9a-f]{64}", roothash) or offset <= 0 or offset % 4096 or offset >= size or var.get("URBAN_VERSION") != "1":
+        raise Fail(f"slot-A.cfg is not a boot file of version 1 with a root hash and a hash offset: {cfg!r}")
+    if read_at(slot, 0, 4) != b"hsqs":
+        raise Fail("the slot image does not start with the squashfs")
+    if sh(["cmp", "-n", str(size), "-i", f"0:{parts['rootfs-a']['start'] * 512}", slot, disk], check=False).returncode != 0:
+        raise Fail("slot A on the disk is not the slot image")
+    verify = ["veritysetup", "verify", f"--hash-offset={offset}"]
+    r = sh(verify + [slot, slot, roothash], check=False)
+    if r.returncode != 0:
+        raise Fail(f"the slot does not verify against the root hash in slot-A.cfg: {r.stderr.strip() or r.stdout.strip()}")
+    copy = f"{work}/slot-tampered.img"
+    shutil.copyfile(slot, copy)
+    for what, pos in (("the system's data", offset // 3), ("the hash tree", offset + 3 * 4096 + 17)):
+        with open(copy, "r+b") as f:
+            f.seek(pos)
+            old = f.read(1)
+            f.seek(pos)
+            f.write(bytes([old[0] ^ 0x01]))
+        if sh(verify + [copy, copy, roothash], check=False).returncode == 0:
+            raise Fail(f"control: the slot still verifies with one byte of {what} changed")
+        with open(copy, "r+b") as f:
+            f.seek(pos)
+            f.write(old)
+    os.remove(copy)
+    print(f"   system: the slot verifies against root hash {roothash[:16]}... at offset {offset}; "
+          f"one changed byte of the data or of the tree fails", flush=True)
+
+    # the firmware variables of the test VMs
+    fd = f"{OUT}/ovmf-vars-urban.fd"
+    blob = open(fd, "rb").read()
+    for n in ("PK", "KEK", "db"):
+        der = subprocess.run(["openssl", "x509", "-in", f"{sb}/{n}.crt", "-outform", "DER"], check=True, capture_output=True).stdout
+        if der not in blob:
+            raise Fail(f"{fd} does not hold our {n} certificate")
+    r = sh(["virt-fw-vars", "--input", fd, "--print", "--verbose"])  # the certificate names need --verbose (on stderr)
+    shown = r.stdout + r.stderr
+    if "URBAN Secure Boot" not in shown or "Microsoft" in shown:
+        raise Fail(f"{fd} does not trust exactly our keys:\n{shown[:2000]}")
+    sh(["virt-fw-vars", "--input", fd, "--output-json", "/tmp/ovmf-vars.json"])
+    variables = json.load(open("/tmp/ovmf-vars.json")).get("variables", [])
+    enable = [v for v in variables if v.get("name") == "SecureBootEnable"]
+    if not enable:
+        raise Fail(f"{fd} has no SecureBootEnable variable (--secure-boot)")
+    if any(str(v.get("data", "")).lower() not in ("01", "1") for v in enable):
+        raise Fail(f"{fd}: SecureBootEnable is not 1: {enable}")
+    print("   firmware variables: ovmf-vars-urban.fd holds our PK, KEK and db only, Secure Boot enabled", flush=True)
 
 
 def contents():
@@ -365,6 +570,9 @@ def contents():
     for m in ("iTCO_wdt", "sp5100_tco", "i6300esb"):
         if m not in early:
             raise Fail(f"the watchdog driver {m} is not loaded before systemd starts")
+    for m in ("dm_mod", "dm_verity"):
+        if m not in early:
+            raise Fail(f"{m} is not in the initramfs: the verity root could not be opened")
     if "blacklist amdgpu" not in open("/tmp/sq/etc/modprobe.d/urban-console.conf").read():
         raise Fail("AMD graphics would take the console over and leave it black")
     initrd = open("/tmp/sq/boot/initrd.img", "rb").read()
@@ -406,6 +614,11 @@ def roles_in(slot, listing):
         "tpm2-tools: tpm2_sign (the device key signs in the TPM)": "usr/bin/tpm2_sign",
         "the device signer (file key or TPM key)": "opt/urban/backend/urban/devices/signer.py",
         "the rule that gives the TPM's resource manager to group tss": "etc/udev/rules.d/60-urban-tpm.rules",
+        "veritysetup (the root slot is a dm-verity device)": "usr/sbin/veritysetup",
+        "the initramfs hook that adds veritysetup and the dm-verity modules": "etc/initramfs-tools/hooks/urban-verity",
+        "the initramfs script that opens the root as a verity device": "etc/initramfs-tools/scripts/local-top/urban-verity",
+        "the signature of the kernel": "boot/vmlinuz.sig",
+        "the signature of the initrd": "boot/initrd.img.sig",
     }
     for what, path in need.items():
         if not re.search(r"(^|/)" + re.escape(path) + r"$", listing, re.M):
@@ -684,11 +897,20 @@ def unitimage(xz, sums, key, unit, serial):
             raise Fail(f"urban-unit setup: {(r.stderr or r.stdout).strip()[-300:]}")
         if not running(vm, unit):
             raise Fail(f"urban-edge@{unit} is not running after setup")
+        # the ESP is not signed: a key dropped there once the unit has its identity must not become a way in
+        vm.ssh("ssh-keygen -q -t ed25519 -N '' -C evil-esp-key -f /tmp/evil && mount -o remount,rw /boot/efi 2>/dev/null; "
+               "cp /tmp/evil.pub /boot/efi/maintenance.pub && sync")
         vm.reboot()
+        vm.wait(r"URBAN-MAINTENANCE-KEYS ignored: the unit already has its identity")
         vm.wait(rf"URBAN-UNIT starting urban-edge@{unit}")
         vm.booted("1", "A")
         if not running(vm, unit):
             raise Fail(f"urban-edge@{unit} did not come back after a reboot")
+        esp_now = vm.ssh("ls /boot/efi").stdout.split()
+        if "maintenance.pub" in esp_now or "maintenance.pub.ignored" not in esp_now:
+            raise Fail(f"a key file dropped on the ESP after the first boot was not retired: {esp_now}")
+        if vm.ssh("grep -c evil-esp-key /var/lib/urban/ssh/authorized_keys", check=False).stdout.strip() != "0":
+            raise Fail("a key dropped on the ESP after the first boot reached authorized_keys")
         print(f"   kit set up; urban-edge@{unit} runs, also after a reboot", flush=True)
         plan = json.loads(vm.ssh("cat /run/urban/power.json").stdout)
         if plan["roles"] != ["unit"] or plan["vision"]["threads"] > 2:
@@ -2526,6 +2748,303 @@ def update(kind):
         vm.stop()
 
 
+# ---------------------------------------------------------------- Secure Boot (step 6)
+
+SB_GUID = "8be4df61-93ca-11d2-aa0d-00e098032b8c"  # EFI global variable GUID, home of the SecureBoot variable
+SB_WINDOW = 600 if os.environ.get("URBAN_KVM") != "1" else 240  # seconds a machine that must not boot is watched
+OS_UP = re.compile(r"Linux version|URBAN-OS-CHECK|URBAN-HEALTH")  # the kernel or the unit's system has started
+# the firmware's refusal of the unit's own disk, e.g. (virtio disk = "UEFI Misc Device"; SATA/NVMe: "UEFI QEMU ...")
+#   BdsDxe: failed to load Boot0002 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x4,0x0): Access Denied
+# Only Access Denied / Security Violation counts, and never for the empty DVD drive or network boot: those say
+# "failed to load Boot000N ...: Not Found" on every start, refused or not
+DENIED = re.compile(r"(?i)failed to load Boot[0-9a-f]{4} \"(?!UEFI QEMU DVD-ROM|UEFI PXE|UEFI HTTP)[^\"]*\".*: "
+                    r"(Access Denied|Security Violation)\b")
+GRUB_ERROR = re.compile(r"(?i)bad signature|can't verify|no signature|error: ")
+VERITY_FAIL = re.compile(r"(?i)verity.*(corrupt|fail|error|invalid|mismatch)|Kernel panic|not syncing")
+EVIL = "URBAN-EVIL-CONFIG"
+
+
+def esp_get(disk, path, dst):
+    sh(f"mcopy -o -n -i {disk}@@{partitions(disk)['esp']['start'] * 512} ::{path} {dst}")
+
+
+def esp_put(disk, src, path):
+    sh(f"mcopy -o -i {disk}@@{partitions(disk)['esp']['start'] * 512} {src} ::{path}")
+
+
+def sha(path):
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+def drop(vm):
+    vm.stop()
+    if os.path.exists(vm.disk):
+        os.remove(vm.disk)
+
+
+def observe(vm, since, window, trigger=None, grace=0):
+    """What the machine prints from line `since` on, watched for `window` seconds: it ends early when the system comes
+    up (OS_UP), or `grace` seconds after the first line that matches `trigger` (the firmware's or GRUB's own verdict)."""
+    end, trig_end = time.time() + window, None
+    while time.time() < end:
+        tail = vm.lines[since:]
+        if any(OS_UP.search(l) for l in tail):
+            break
+        if trigger and trig_end is None and any(trigger.search(l) for l in tail):
+            trig_end = time.time() + grace
+        if trig_end and time.time() > trig_end:
+            break
+        if vm._restart_error:
+            raise Fail(vm._restart_error)
+        if vm.proc.poll() is not None and not vm._restarting and not vm._cycling:
+            time.sleep(3)
+            if vm.proc.poll() is not None and not vm._restarting and not vm._cycling:
+                raise Fail(f"QEMU of {vm.name} exited while it was being watched (log: {LOGS}/{vm.name}.log)")
+        time.sleep(2)
+    return vm.lines[since:]
+
+
+def sb_line(line, what, on=True):
+    """The self-check line says what the unit itself found: Secure Boot and the verified root."""
+    for need in (("secureboot=on", "verity=on") if on else ("secureboot=off",)):
+        if need not in line:
+            raise Fail(f"{what}: the self-check line lacks {need}: {line}")
+
+
+def sb_guest(vm, what):
+    """Secure Boot and the verified root as the running system sees them: the firmware's SecureBoot variable, the
+    kernel's own message, the command line, the root device, the verity device's status, the unit's screen."""
+    var = vm.ssh(f"od -An -tu1 /sys/firmware/efi/efivars/SecureBoot-{SB_GUID}").stdout.split()
+    if not var or var[-1] != "1":
+        raise Fail(f"{what}: the firmware's SecureBoot variable is {var}, not 1")
+    kern = vm.ssh("dmesg | grep -iE 'secure ?boot'", check=False).stdout
+    if not re.search(r"(?i)secure ?boot( mode)? enabled", kern):
+        raise Fail(f"{what}: the kernel does not say Secure Boot is enabled:\n{kern.strip()[:400]}")
+    cmdline = vm.ssh("cat /proc/cmdline").stdout
+    if "urban.verity=" not in cmdline:
+        raise Fail(f"{what}: no urban.verity on the kernel command line: {cmdline.strip()}")
+    src = vm.ssh("findmnt -n -o SOURCE /").stdout.strip()
+    if src != "/dev/mapper/urban-root":
+        raise Fail(f"{what}: the root is {src}, not /dev/mapper/urban-root")
+    status = vm.ssh("veritysetup status urban-root", check=False).stdout
+    if not re.search(r"status:\s+verified", status):
+        raise Fail(f"{what}: veritysetup does not say the root is verified:\n{status.strip()[:400]}")
+    screen = vm.ssh("cat /run/urban/console.issue").stdout
+    if "Secure Boot on, system verified" not in screen:
+        raise Fail(f"{what}: the unit's screen does not say 'Secure Boot on, system verified'")
+    return kern.strip().splitlines()[-1]
+
+
+def refused(vm, what, loader):
+    """The machine was just (re)started with `loader` as its boot loader: the firmware must refuse it and nothing of the
+    system may run. Returns the firmware's own words about it."""
+    tail = observe(vm, vm.boots[-1], SB_WINDOW, DENIED, 90)
+    up = [l for l in tail if OS_UP.search(l)]
+    if up:
+        raise Fail(f"{what}: {loader} was run by a machine with Secure Boot on: {up[0]}")
+    said = [l.strip() for l in tail if DENIED.search(l)]
+    if not said:  # no OS within the window alone could be a hang: only the firmware's own refusal counts
+        boot = [l.strip() for l in tail if re.search(r"(?i)BdsDxe|failed to load|access denied|security violation", l)]
+        shown = [l.strip() for l in tail if l.strip()][-8:]
+        raise Fail(f"{what}: the firmware never refused {loader} on the unit's disk (no 'failed to load Boot…' of the disk "
+                   f"ending in Access Denied or Security Violation); its boot messages: {boot[:12] or 'none'}; what it "
+                   f"printed last: {shown or 'nothing'} (log: {LOGS}/{vm.name}.log)")
+    return [l[DENIED.search(l).start():] for l in said]  # from "failed to load Boot…" on: the console's noise before it cut off
+
+
+def secureboot():
+    """Secure Boot enforced by the firmware with URBAN's keys, then GRUB's own signature check and the verity root. Four
+    facts, each with a control: (a) a unit boots with it, and the same image with Secure Boot off says so; (b) a boot
+    loader not signed by URBAN's db (unsigned, or signed by a foreign key) is refused, the original boots; (c) a boot
+    config changed on the ESP is not executed, restored it boots; (d) one changed byte in a slot makes that slot fail
+    and the unit comes back on the other slot by itself. One machine at a time."""
+    pristine = f"{OUT}/urban-edge-1.img"
+    cfgs = {}
+    for name in ("grub.cfg", "grub.cfg.sig"):
+        cfgs[name] = f"/tmp/sb-pristine-{name}"
+        esp_get(pristine, f"/EFI/BOOT/{name}", cfgs[name])
+
+    # ---- (a) a unit boots with Secure Boot ... and (c) a changed boot config, on the same machine
+    vm = VM("sb-unit")
+    try:
+        vm.start()
+        line = vm.booted("1", "A")
+        sb_line(line, "unit with Secure Boot")
+        kern = sb_guest(vm, "unit with Secure Boot")
+        print(f"   OK a) the unit boots with Secure Boot: SecureBoot variable 1, kernel '{kern.strip()[:70]}', "
+              f"urban.verity on the command line, root /dev/mapper/urban-root verified; {line[line.index('URBAN-OS-CHECK'):][:110]}",
+              flush=True)
+
+        guest_cfg = "/boot/efi/EFI/BOOT/grub.cfg"
+        if vm.ssh(f"sha256sum {guest_cfg}").stdout.split()[0] != sha(cfgs["grub.cfg"]):
+            raise Fail("c) control failed: the boot config on the unit's ESP is not the signed one from the image")
+        vm.ssh(f"mount -o remount,rw /boot/efi 2>/dev/null; printf '\\necho {EVIL}\\n' >> {guest_cfg} && sync")
+        if vm.ssh(f"sha256sum {guest_cfg}").stdout.split()[0] == sha(cfgs["grub.cfg"]):
+            raise Fail("c) the boot config could not be changed on the ESP, nothing to test")
+        n = len(vm.boots)
+        vm.reboot()
+        end = time.time() + 300
+        while len(vm.boots) == n and time.time() < end:
+            time.sleep(1)
+        if len(vm.boots) == n:
+            raise Fail("c) the unit did not restart after the reboot")
+        tail = observe(vm, vm.boots[-1], SB_WINDOW, GRUB_ERROR, 180)
+        if any(EVIL in l for l in tail):
+            raise Fail(f"c) the changed boot config was executed: {[l for l in tail if EVIL in l][0]}")
+        grub = [l.strip() for l in tail if GRUB_ERROR.search(l)]
+        came_up = [l for l in tail if "URBAN-OS-CHECK" in l]
+        if came_up:
+            outcome = f"the unit still came up ({came_up[0].strip()[:90]}) without running the change"
+            # it is running: put the signed files back through the machine itself, then reboot to prove the control
+            vm.wait_ssh()
+            vm.put(cfgs["grub.cfg"], guest_cfg)
+            vm.put(cfgs["grub.cfg.sig"], guest_cfg + ".sig")
+            vm.ssh("sync")
+            vm.mark = len(vm.lines)
+            vm.reboot()
+        else:
+            outcome = "GRUB did not boot anything" + (f" and said: {grub[0][:80]}" if grub else " (no GRUB message on the serial console)")
+            vm.cut_power()  # the cabinet is not reachable: the signed files go back on the ESP from outside
+            esp_put(vm.disk, cfgs["grub.cfg"], "/EFI/BOOT/grub.cfg")
+            esp_put(vm.disk, cfgs["grub.cfg.sig"], "/EFI/BOOT/grub.cfg.sig")
+            vm.mark = len(vm.lines)
+            vm.power_on()
+        line = vm.booted("1", "A")
+        sb_line(line, "unit with its boot config restored")
+        if vm.ssh(f"sha256sum {guest_cfg}").stdout.split()[0] != sha(cfgs["grub.cfg"]):
+            raise Fail("c) the restored boot config differs from the signed one")
+        print(f"   OK c) a boot config changed on the ESP without a new signature is not executed ('{EVIL}' never printed): "
+              f"{outcome}; restored, the unit boots again ({line[line.index('URBAN-OS-CHECK'):][:60]})", flush=True)
+    finally:
+        drop(vm)
+
+    # ---- (a) control: the same image with Secure Boot off
+    off = VM("sb-off", secure_boot=False)
+    try:
+        off.start()
+        line = off.booted("1", "A")
+        sb_line(line, "control without Secure Boot", on=False)
+        kern = off.ssh("dmesg | grep -iE 'secure ?boot'", check=False).stdout
+        if re.search(r"(?i)secure ?boot( mode)? enabled", kern):
+            raise Fail(f"control without Secure Boot: the kernel says it is enabled: {kern.strip()}")
+        print(f"   OK a) control: the same image on a firmware without our keys boots and says so: "
+              f"{line[line.index('secureboot='):][:40]}", flush=True)
+    finally:
+        drop(off)
+
+    # ---- (b) a boot loader not signed by URBAN's db is refused by the firmware
+    db = f"{OUT}/keys/sb/db.crt"
+    ldr = VM("sb-loader")
+    try:
+        work = "/tmp/sb-loader"
+        shutil.rmtree(work, ignore_errors=True)
+        os.makedirs(work)
+        esp_get(ldr.disk, "/EFI/BOOT/BOOTX64.EFI", f"{work}/signed.efi")
+        if sh(["sbverify", "--cert", db, f"{work}/signed.efi"], check=False).returncode != 0:
+            raise Fail("b) control failed: the boot loader on the ESP is not signed by URBAN's db certificate")
+        shutil.copy(f"{work}/signed.efi", f"{work}/unsigned.efi")
+        sh(["sbattach", "--remove", f"{work}/unsigned.efi"])
+        sh(f"openssl req -x509 -newkey rsa:2048 -nodes -keyout {work}/foreign.key -out {work}/foreign.crt -days 30 -subj /CN=not-urban-db")
+        sh(["sbsign", "--key", f"{work}/foreign.key", "--cert", f"{work}/foreign.crt", "--output", f"{work}/foreign.efi", f"{work}/unsigned.efi"])
+        for f in ("unsigned", "foreign"):
+            if sh(["sbverify", "--cert", db, f"{work}/{f}.efi"], check=False).returncode == 0:
+                raise Fail(f"b) the {f} test loader verifies against URBAN's db, the test is void")
+        said = {}
+        for f, what in (("unsigned", "a boot loader without a signature"), ("foreign", "a boot loader signed by a foreign key")):
+            esp_put(ldr.disk, f"{work}/{f}.efi", "/EFI/BOOT/BOOTX64.EFI")
+            if f == "unsigned":
+                ldr.start()
+            else:
+                ldr.power_on()
+            said[f] = refused(ldr, f"b) {what}", f"{f}.efi")
+            ldr.cut_power()
+        esp_put(ldr.disk, f"{work}/signed.efi", "/EFI/BOOT/BOOTX64.EFI")  # control: the original file, same machine
+        ldr.mark = len(ldr.lines)
+        ldr.power_on()
+        line = ldr.booted("1", "A")
+        sb_line(line, "b) control: the original signed boot loader")
+        print(f"   OK b) the firmware refuses a boot loader not signed by URBAN's db and the system never starts: "
+              f"unsigned -> '{said['unsigned'][0][:160]}'; foreign key -> '{said['foreign'][0][:160]}'; "
+              f"control: the original signed file boots on the same machine ({line[line.index('URBAN-OS-CHECK'):][:60]})", flush=True)
+    finally:
+        drop(ldr)
+
+    # ---- (d) one changed byte in a slot: that slot fails, the unit falls back to the other
+    vm = VM("sb-slot")
+    try:
+        vm.start()
+        vm.booted("1", "A")
+        vm.put(f"{OUT}/urban-edge-2.raucb", f"{STAGE}/update.raucb")
+        vm.install(f"{STAGE}/update.raucb")
+        vm.reboot()
+        line = vm.booted("2", "B")
+        sb_line(line, "d) slot B after the update")
+        sb_guest(vm, "d) slot B after the update")
+        cfg = vm.ssh("cat /boot/efi/EFI/URBAN/slot-A.cfg").stdout
+        mh = re.search(r"^set URBAN_ROOTHASH=([0-9a-f]{64})\s*$", cfg, re.M)
+        mo = re.search(r"^set URBAN_HASHOFFSET=(\d+)\s*$", cfg, re.M)
+        if not (mh and mo):
+            raise Fail(f"d) no URBAN_ROOTHASH / URBAN_HASHOFFSET in the signed slot file of slot A:\n{cfg[:400]}")
+        root_hash, offset = mh.group(1), int(mo.group(1))  # the hash tree starts at `offset` bytes, right after the squashfs
+        if offset % 4096 or offset < 2 * 4096:
+            raise Fail(f"d) the verity offset {offset} does not look like a byte offset of 4096-byte blocks")
+        dev = "/dev/disk/by-partlabel/rootfs-a"
+        verify = f"veritysetup verify --hash-offset={offset} --data-blocks={offset // 4096} {dev} {dev} {root_hash}"
+        r = vm.ssh(verify, check=False, timeout=1800)
+        if r.returncode != 0:
+            raise Fail(f"d) control failed: slot A does not verify against its signed root hash before the change: {(r.stderr + r.stdout).strip()[:300]}")
+        # The byte must be one that every boot reads: dm-verity checks only the blocks that are read, and a byte in the
+        # middle of the squashfs may belong to a file a camera-less unit never opens. So it is changed in the hash tree:
+        # behind its 4096-byte verity superblock the tree starts at hash_start = offset + 4096 with its top level, and
+        # that block is hashed whole and compared with the root hash on the first read of any block (mounting the root),
+        # on every boot. GRUB reads only the squashfs (kernel, initrd), never the tree: it still starts the kernel, and
+        # the failure is dm-verity's own.
+        pos = offset + 4096 + 100  # inside the top-level hash block of the tree
+        flip = (f"set -e; dev={dev}; pos={pos}; "
+                "b=$(dd if=$dev bs=1 skip=$pos count=1 status=none | od -An -tx1 | tr -d ' \\n'); "
+                "n=$(printf '%02x' $((0x$b ^ 0xff))); "
+                "printf \"\\\\x$n\" | dd of=$dev bs=1 seek=$pos count=1 conv=notrunc status=none; sync")
+        vm.ssh(flip)
+        if vm.ssh(verify, check=False, timeout=1800).returncode == 0:
+            raise Fail("d) the changed byte in slot A went unnoticed by veritysetup verify")
+        vm.ssh("mount -o remount,rw /boot/efi 2>/dev/null; "
+               "grub-editenv /boot/efi/EFI/BOOT/grubenv set ORDER='A B' A_OK=1 A_TRY=0 B_TRY=0; sync")  # as a rollback would
+        env = vm.ssh("grub-editenv /boot/efi/EFI/BOOT/grubenv list").stdout
+        if "ORDER=A B" not in env or "A_OK=1" not in env:
+            raise Fail(f"d) the boot state could not be set to try slot A first: {env.split()}")
+        n, since = len(vm.boots), len(vm.lines)
+        vm.mark = since
+        vm.reboot()
+        end, failed = time.time() + BOOT_TIMEOUT, None
+        while time.time() < end and not failed:
+            for l in vm.lines[since:]:
+                if "URBAN-OS-CHECK" in l:
+                    raise Fail(f"d) the system started although slot A was changed (no verity failure first): {l.strip()[:200]}")
+                if VERITY_FAIL.search(l):
+                    failed = l.strip()
+                    break
+            if vm._restart_error:
+                raise Fail(vm._restart_error)
+            time.sleep(2)
+        if not failed:
+            raise Fail("d) no verity failure or panic on the console after booting the changed slot A")
+        line = vm.booted("2", "B")  # back by itself, on the system that was not touched
+        sb_line(line, "d) slot B after the fall-back")
+        if len(vm.boots) - n < 2:
+            raise Fail(f"d) expected a failed start of slot A followed by a restart into slot B, saw {len(vm.boots) - n} start(s)")
+        if any("URBAN-OS-CHECK" in l and "slot=A" in l for l in vm.lines[since:]):
+            raise Fail("d) slot A reported a running system")
+        env = vm.ssh("grub-editenv /boot/efi/EFI/BOOT/grubenv list").stdout.split()
+        print(f"   OK d) one changed byte (offset {pos}, the top block of the hash tree) in slot A: veritysetup verify passed "
+              f"before and fails after; booting A "
+              f"fails ('{failed[:90]}'), the unit restarts and runs slot B by itself ({line[line.index('URBAN-OS-CHECK'):][:70]}); "
+              f"boot state {' '.join(x for x in env if x.split('=')[0] in ('ORDER', 'A_OK', 'A_TRY', 'B_OK', 'B_TRY'))}", flush=True)
+    finally:
+        drop(vm)
+    print("SECURE BOOT CHECK PASSED", flush=True)
+
+
 def foreign_bundle():
     """The same system as version 2, signed by someone who is not URBAN's release key."""
     k = "/tmp/foreign"
@@ -2599,6 +3118,8 @@ if __name__ == "__main__":
             hardware()
         elif what == "unitimage":
             unitimage(*sys.argv[2:7])
+        elif what == "secureboot":
+            secureboot()
         elif what == "update":
             if sys.argv[2] == "foreign":
                 foreign_bundle()

@@ -10,7 +10,10 @@ User=urban
 Group=urban
 WorkingDirectory=/opt/urban
 EnvironmentFile=/etc/urban/edge-%i.env
-ExecStart=/opt/urban/.venv/bin/python -m urban.node.district --unit %i --platform ${PLATFORM} --server-name ${SERVER_NAME} \
+# the env file is data the unit's own user can write: it must not be a way to inject code into the interpreter or
+# the loader (python -I below ignores PYTHON* as well)
+UnsetEnvironment=PYTHONPATH PYTHONHOME LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GCONV_PATH OPENSSL_CONF OPENSSL_MODULES
+ExecStart=/opt/urban/.venv/bin/python -I -m urban.node.district --unit %i --platform ${PLATFORM} --server-name ${SERVER_NAME} \
     --pki /etc/urban/pki --sensors "${SENSORS}" --relay /run/urban/relay.json --temp "${TEMP_SENSOR}"
 Restart=always
 RestartSec=2

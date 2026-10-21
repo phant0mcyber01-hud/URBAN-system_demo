@@ -1,0 +1,89 @@
+#!/bin/sh
+# Opens the root slot as a dm-verity device before the root is mounted.
+#
+# GRUB hands over   urban.verity=<PARTLABEL>:<root hash>:<hash offset>   (all three from the slot's signed boot file on
+# the ESP) and root=/dev/mapper/urban-root. The partition holds the read-only squashfs followed, at the hash offset, by
+# its dm-verity hash tree; the root hash and the offset are the only things that have to be trusted, and GRUB verified
+# them (the tree's unsigned superblock must agree with the offset, see below). A system that does not match cannot be
+# mounted (this script panics: panic=10 on the command line reboots, and GRUB's TRY logic then boots the other slot);
+# a block that is changed later makes the kernel panic the same way.
+#
+# No urban.verity on the command line (a development boot): nothing to do, the root is mounted as it always was.
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "$1" in
+  prereqs) prereqs; exit 0 ;;
+esac
+
+. /scripts/functions
+
+spec=""
+for x in $(cat /proc/cmdline); do
+  case "$x" in
+    urban.verity=*) spec="${x#urban.verity=}" ;;
+  esac
+done
+[ -n "$spec" ] || exit 0
+
+label="${spec%%:*}"
+rest="${spec#*:}"
+roothash="${rest%%:*}"
+offset="${rest#*:}"
+
+case "$label" in ""|*[!A-Za-z0-9._-]*) panic "urban-verity: bad partition label in urban.verity ($spec)" ;; esac
+case "$roothash" in ""|*[!0-9a-f]*) panic "urban-verity: bad root hash in urban.verity ($spec)" ;; esac
+case "$offset" in ""|*[!0-9]*) panic "urban-verity: bad hash offset in urban.verity ($spec)" ;; esac
+[ "${#roothash}" -eq 64 ] || panic "urban-verity: the root hash is not a SHA-256 value ($roothash)"
+
+modprobe -q dm_mod 2>/dev/null
+modprobe -q dm_verity 2>/dev/null
+
+# the partition may appear late (USB, NVMe): wait for it like rootwait does
+dev="/dev/disk/by-partlabel/$label"
+i=0
+while [ ! -b "$dev" ] && [ "$i" -lt 180 ]; do
+  if command -v udevadm >/dev/null 2>&1; then udevadm settle --timeout=1 >/dev/null 2>&1; fi
+  sleep 1
+  i=$((i + 1))
+done
+[ -b "$dev" ] || panic "urban-verity: $dev did not appear"
+
+# The initramfs has no udev rules for device-mapper: without this libdevmapper waits for a udev cookie that never
+# completes. It makes the node in /dev/mapper itself.
+export DM_DISABLE_UDEV=1
+mkdir -p /run/cryptsetup
+[ $((offset % 4096)) -eq 0 ] && [ "$offset" -gt 0 ] || panic "urban-verity: the hash offset $offset is not a multiple of 4096"
+# The data is exactly what precedes the tree: offset / 4096 blocks (the offset comes from the signed slot file). The
+# tree's own superblock is not signed, and veritysetup takes the length of the data and the block sizes from it (with a
+# superblock, --data-blocks is ignored). So the superblock is read first and must describe exactly the signed layout:
+# offset / 4096 data blocks, 4096-byte data and hash blocks, hash type 1, sha256 - or the slot is not booted. Parsed
+# with the shell alone (read, case): the initramfs has no sed or grep.
+info=$(veritysetup dump --hash-offset="$offset" "$dev" 2>&1) || panic "urban-verity: no dm-verity superblock at the signed hash offset $offset of $label - refusing to boot it"
+blocks=""; dbs=""; hbs=""; htype=""; halg=""
+while read -r w1 w2 w3 w4; do
+  case "$w1 $w2" in
+    "Data blocks:") blocks="$w3" ;;
+    "Data block") if [ "$w3" = "size:" ]; then dbs="$w4"; fi ;;
+    "Hash block") if [ "$w3" = "size:" ]; then hbs="$w4"; fi ;;
+    "Hash type:") htype="$w3" ;;
+    "Hash algorithm:") halg="$w3" ;;
+  esac
+done <<EOF
+$info
+EOF
+if [ "$blocks" != "$((offset / 4096))" ] || [ "$dbs" != 4096 ] || [ "$hbs" != 4096 ] || [ "$htype" != 1 ] || [ "$halg" != sha256 ]; then
+  panic "urban-verity: the dm-verity superblock of $label does not match its signed slot file (data blocks '$blocks', want $((offset / 4096)); block sizes '$dbs'/'$hbs', hash type '$htype', '$halg', want 4096/4096, 1, sha256) - refusing to boot it"
+fi
+if ! veritysetup open --panic-on-corruption --hash-offset="$offset" --data-blocks="$((offset / 4096))" "$dev" urban-root "$dev" "$roothash"; then
+  panic "urban-verity: $label does not match its signed root hash $roothash - refusing to boot it"
+fi
+
+i=0
+while [ ! -b /dev/mapper/urban-root ] && [ "$i" -lt 20 ]; do
+  sleep 1
+  i=$((i + 1))
+done
+[ -b /dev/mapper/urban-root ] || panic "urban-verity: /dev/mapper/urban-root was not made"
+
+echo "URBAN-VERITY: $label opened as /dev/mapper/urban-root, root hash $roothash"
+exit 0

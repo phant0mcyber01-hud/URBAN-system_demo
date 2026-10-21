@@ -8,7 +8,7 @@
 
 ![статус](https://img.shields.io/badge/статус-готовим%20пилот-8a63d2)
 ![python](https://img.shields.io/badge/python-3.11+-3776ab)
-![tests](https://img.shields.io/badge/тесты-293%20проходят-2ea44f)
+![tests](https://img.shields.io/badge/тесты-583%20проходят-2ea44f)
 ![пилот](https://img.shields.io/badge/пилот-Фергана-5cc8ff)
 
 ![Центр управления: камера заметила пробку, оператор переключил светофор на утверждённый план](docs/img/control.png)
@@ -224,7 +224,7 @@ backend/urban/     платформа на Python
   sources/         откуда приходят данные: симуляция или реальные блоки
   city/            город из OpenStreetMap и паспорта перекрёстков
   pipeline/        демо-двойник: сеть SUMO и спрос
-backend/tests/     293 теста
+backend/tests/     583 теста
 web/src/           интерфейс: карта, панели, вход
 deploy/            установка на сервер
 os/                URBAN OS для блока, районного сервера и центра: сборка образа, проверки в QEMU, демонстрация (node os/demo.mjs)

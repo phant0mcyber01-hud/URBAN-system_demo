@@ -101,4 +101,13 @@ const todo5 = /\*\*Не сделано[^\n]*(?:\n(?!\n)[^\n]*)*/.exec(context);
 if (todo5 && /подпись внутри TPM/i.test(todo5[0])) fail("the «Не сделано» paragraph of CONTEXT.md still lists signing inside the TPM");
 for (const must of ["Ключ устройства в TPM", "ECDSA P-256"])
   if (!context.includes(must)) fail(`CONTEXT.md does not record ${JSON.stringify(must)} (step 5)`);
+
+// step 6: Secure Boot and a verified system
+if (!headings.some((h) => /защищённая загрузка|secure boot/.test(h))) fail("docs/edge-os.md has no section on Secure Boot");
+for (const must of ["dm-verity", "db.crt", "check_signatures=enforce", "check-secureboot.mjs", "slot-A.cfg", "KEK"])
+  if (!text.includes(must)) fail(`docs/edge-os.md never says ${JSON.stringify(must)} (Secure Boot)`);
+if (/Защищённая загрузка \(Secure Boot\) не включена/.test(text)) fail("docs/edge-os.md still says Secure Boot is not enabled");
+if (todo5 && /Secure Boot/.test(todo5[0]) && !/Secure Boot на (железе|мини-ПК)/.test(todo5[0]))
+  fail("the «Не сделано» paragraph of CONTEXT.md still lists Secure Boot as not done");
+if (!context.includes("Защищённая загрузка (шаг 6)")) fail("CONTEXT.md does not record step 6 (Защищённая загрузка (шаг 6))");
 console.log("DOCS CHECK PASSED");

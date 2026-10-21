@@ -4,7 +4,7 @@ After=urban-prepare.service
 Wants=urban-prepare.service
 
 [Service]
-ExecStart=/opt/urban/.venv/bin/python -m urban.node.power
+ExecStart=/opt/urban/.venv/bin/python -I -m urban.node.power
 Restart=always
 RestartSec=5
 StandardOutput=journal+console

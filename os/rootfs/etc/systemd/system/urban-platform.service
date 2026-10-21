@@ -9,7 +9,10 @@ User=urban
 Group=urban
 WorkingDirectory=/opt/urban
 EnvironmentFile=/var/lib/urban/etc/platform.env
-ExecStart=/opt/urban/.venv/bin/python -m urban
+# the env file is data the unit's own user can write: it must not be a way to inject code into the interpreter or
+# the loader (python -I below ignores PYTHON* as well)
+UnsetEnvironment=PYTHONPATH PYTHONHOME LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GCONV_PATH OPENSSL_CONF OPENSSL_MODULES
+ExecStart=/opt/urban/.venv/bin/python -I -m urban
 Restart=always
 RestartSec=3
 StandardOutput=journal

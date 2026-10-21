@@ -87,6 +87,15 @@ esac
   fi
   [ -z "$lightline" ] || printf "  lighting      %s\n" "$lightline"
   printf "  system        URBAN OS %s, slot %s\n" "$version" "$slot"
+  # the signed boot chain, as urban-os-check found it (the redraws from sandboxes cannot read the firmware variables)
+  bootstate=$(cat /run/urban/boot-state 2>/dev/null)
+  case "$bootstate" in
+    "secureboot=on verity=on") echo "  boot          Secure Boot on, system verified (dm-verity)" ;;
+    "secureboot=off verity=on") echo "  boot          Secure Boot OFF (no URBAN keys in the firmware), system verified" ;;
+    "secureboot=on verity=off") echo "  boot          Secure Boot on, system NOT verified (no dm-verity)" ;;
+    "secureboot=off verity=off") echo "  boot          Secure Boot OFF, system NOT verified: runs whatever is on disk" ;;
+    *) echo "  boot          checking..." ;;
+  esac
   printf "  self-check    %s\n" "$check"
   printf "  health        %s\n" "$health"
   printf "  power         %s\n" "${power:-starting}"
@@ -106,7 +115,11 @@ esac
   if [ "$keys" -gt 0 ]; then
     echo "  maintenance   SSH as root with a key only ($keys key(s) allowed) - no passwords on this machine"
   else
-    echo "  maintenance   NO SSH KEY YET: put maintenance.pub on the URBAN-ESP partition and restart"
+    if [ -n "$unit" ]; then
+      echo "  maintenance   NO SSH KEY YET: the unit has its identity, so the ESP's maintenance.pub is ignored - rebuild the image with a key"
+    else
+      echo "  maintenance   NO SSH KEY YET: put maintenance.pub on the URBAN-ESP partition and restart (first start only)"
+    fi
   fi
   echo "  ------------------------------------------------------------------------------"
   echo

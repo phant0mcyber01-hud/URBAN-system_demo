@@ -84,6 +84,8 @@ export function inputsDigest() {
     join(ROOT, "deploy", "urban-edge@.service"), join(ROOT, "deploy", "urban-vision@.service"),
     join(ROOT, "deploy", "urban-lighting@.service"),
     join(ROOT, "data", "models", "yolox_nano.onnx"), join(OUT, "keys", "ca.pem"),
+    // the boot keys (when present): a new boot key or db certificate must rebuild GRUB, the signatures and the image
+    join(OUT, "keys", "boot.pub.gpg"), join(OUT, "keys", "sb", "db.crt"),
     ...walk(join(ROOT, "web", "dist"), []),
   ];
   const h = createHash("sha256");

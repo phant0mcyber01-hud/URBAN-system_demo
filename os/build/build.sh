@@ -44,6 +44,29 @@ log() { echo ">> $*"; }
 # ---- update signing keys: a CA whose certificate goes into the image, and a signing certificate from it
 bash /work/os/build/keys.sh "$OUT/keys"  # made once; valid from 2020 so a unit's wrong clock cannot block updates
 
+# ---- Secure Boot: the keys (data/os/keys/sb and boot-gpg, made once by keys.sh) and what is built from them
+SB="$OUT/keys/sb"
+for f in PK KEK db; do
+  [ -f "$SB/$f.crt" ] && [ -f "$SB/$f.key" ] || { echo "Secure Boot key $SB/$f is missing" >&2; exit 1; }
+done
+# the UEFI variables for the test VMs: PK, KEK and db are ours alone (no Microsoft or distribution keys), Secure Boot on
+OVMF_VARS=/usr/share/OVMF/OVMF_VARS_4M.fd
+[ -f "$OVMF_VARS" ] || { echo "$OVMF_VARS is missing: $(ls /usr/share/OVMF 2>&1 | tr '\n' ' ')" >&2; exit 1; }
+OWNER=$(cat "$SB/owner.guid")
+virt-fw-vars --input "$OVMF_VARS" --output "$OUT/ovmf-vars-urban.fd.tmp" \
+  --set-pk "$OWNER" "$SB/PK.crt" --add-kek "$OWNER" "$SB/KEK.crt" --add-db "$OWNER" "$SB/db.crt" --secure-boot
+mv "$OUT/ovmf-vars-urban.fd.tmp" "$OUT/ovmf-vars-urban.fd"
+# What GRUB loads is signed with the GnuPG boot key. gpg-agent needs a socket in its home, which the folder shared from
+# the host cannot hold, so the key ring is used from a copy in the container.
+GPGW=/tmp/boot-gpg
+rm -rf "$GPGW"; mkdir -p "$GPGW"; cp -r "$OUT/keys/boot-gpg/." "$GPGW/"; chmod -R go-rwx "$GPGW"; chmod 700 "$GPGW"
+boot_gpg() { gpg --homedir "$GPGW" --batch --yes --quiet "$@"; }
+boot_gpg --export | cmp -s - "$OUT/keys/boot.pub.gpg" || { echo "boot-gpg and boot.pub.gpg are not the same key" >&2; exit 1; }
+boot_sign() {  # FILE -> FILE.sig, a detached binary signature (what GRUB's pgp module reads)
+  rm -f "$1.sig"
+  boot_gpg --digest-algo SHA256 --detach-sign --output "$1.sig" "$1" && [ -s "$1.sig" ] || { echo "could not sign $1" >&2; exit 1; }
+}
+
 # ---- base system, cached by its package list; the extras on top, cached again
 COMPONENTS=main,non-free-firmware
 BASE_ID=$(echo "bookworm $COMPONENTS $PACKAGES" | sha256sum | cut -c1-12)
@@ -121,7 +144,7 @@ cp "$OUT/keys/ca.pem" "$ROOT/etc/rauc/keyring.pem"
 (cd /work/os/rootfs && find . -type d) | while read -r d; do chmod 755 "$ROOT/$d"; done
 (cd /work/os/rootfs && find . -type f) | while read -r f; do chmod 644 "$ROOT/$f"; done
 chmod 644 "$ROOT"/etc/systemd/system/urban-*.service "$ROOT/etc/rauc/keyring.pem"
-chmod 755 "$ROOT"/usr/local/bin/urban-*
+chmod 755 "$ROOT"/usr/local/bin/urban-* "$ROOT/etc/initramfs-tools/hooks/urban-verity" "$ROOT/etc/initramfs-tools/scripts/local-top/urban-verity"
 chroot "$ROOT" useradd --system --uid 990 --home-dir /var/lib/urban --no-create-home --shell /usr/sbin/nologin urban
 # the camera vision has its own user: same group (it shares its queue file), different uid (no reach into the unit)
 chroot "$ROOT" useradd --system --uid 991 --gid urban --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin urban-vision
@@ -142,8 +165,9 @@ echo urban-edge > "$ROOT/etc/hostname"
 printf "127.0.0.1 localhost\n127.0.1.1 urban-edge\n" > "$ROOT/etc/hosts"
 chroot "$ROOT" passwd -l root >/dev/null                 # no password logins at all; maintenance by SSH key only
 printf "VERSION=%s\nBUILT=%s\nCOMPATIBLE=%s\n" "$VERSION" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$COMPATIBLE" > "$ROOT/etc/urban-os-release"
-# the root file system, and the watchdog drivers, so the timer is armed before systemd starts
-for m in squashfs i6300esb iTCO_wdt sp5100_tco; do echo "$m" >> "$ROOT/etc/initramfs-tools/modules"; done
+# the root file system, the watchdog drivers (so the timer is armed before systemd starts) and dm-verity (the root slot is
+# opened as a verity device by scripts/local-top/urban-verity)
+for m in squashfs i6300esb iTCO_wdt sp5100_tco dm_mod dm_verity; do echo "$m" >> "$ROOT/etc/initramfs-tools/modules"; done
 chroot "$ROOT" systemctl enable systemd-networkd systemd-resolved systemd-timesyncd ssh nftables \
   urban-grow.service urban-prepare.service urban-os-check.service urban-health.service urban-power.service >/dev/null 2>&1
 chroot "$ROOT" systemctl mask apt-daily.timer apt-daily-upgrade.timer e2scrub_all.timer >/dev/null 2>&1 || true
@@ -156,6 +180,15 @@ log "kernel and initramfs"
 chroot "$ROOT" update-initramfs -u -k all >/dev/null
 cp "$(ls "$ROOT"/boot/vmlinuz-* | sort -V | tail -1)" "$ROOT/boot/vmlinuz"
 cp "$(ls "$ROOT"/boot/initrd.img-* | sort -V | tail -1)" "$ROOT/boot/initrd.img"
+# the initramfs must carry what opens the root as a verity device, or no unit could boot this image
+INITRD_FILES=$(chroot "$ROOT" lsinitramfs "/boot/$(basename "$(ls "$ROOT"/boot/initrd.img-* | sort -V | tail -1)")")
+for need in 'sbin/veritysetup$' 'scripts/local-top/urban-verity$' 'dm-verity\.ko'; do
+  grep -Eq "$need" <<<"$INITRD_FILES" || { echo "the initramfs lacks $need" >&2; exit 1; }
+done
+# GRUB (check_signatures=enforce) loads the kernel and the initrd only with these signatures, which sit next to them in
+# the slot: made last, from the very files that go into the squashfs
+boot_sign "$ROOT/boot/vmlinuz"
+boot_sign "$ROOT/boot/initrd.img"
 
 chroot "$ROOT" apt-get clean
 umount_chroot  # the pip cache is the host's: let go of it before cleaning up
@@ -170,14 +203,46 @@ SLOT="$OUT/build/rootfs-$VERSION.img"
 log "rootfs slot image"
 rm -f "$SLOT"
 mksquashfs "$ROOT" "$SLOT" -comp gzip -noappend -quiet -no-progress
+# ... followed by its dm-verity hash tree in the same file: the squashfs padded to 4096 bytes is the data, the tree
+# (a superblock and the hash levels) starts right after it, at URBAN_HASHOFFSET. GRUB still reads the squashfs from the
+# start of the partition; the initramfs opens the whole partition as /dev/mapper/urban-root through the tree.
+log "dm-verity hash tree"
 size=$(stat -c %s "$SLOT")
-[ "$size" -lt $((SLOT_MB * 1024 * 1024)) ] || { echo "rootfs ($size bytes) does not fit a ${SLOT_MB} MiB slot" >&2; exit 1; }
+padded=$(( (size + 4095) / 4096 * 4096 ))
+truncate -s "$padded" "$SLOT"
+rm -f "$SLOT.hash"
+VOUT=$(veritysetup format --hash=sha256 --data-block-size=4096 --hash-block-size=4096 "$SLOT" "$SLOT.hash")
+ROOTHASH=$(printf '%s\n' "$VOUT" | sed -n 's/^Root hash:[[:space:]]*//p')
+[[ "$ROOTHASH" =~ ^[0-9a-f]{64}$ ]] || { echo "veritysetup gave no SHA-256 root hash: $VOUT" >&2; exit 1; }
+cat "$SLOT.hash" >> "$SLOT"
+rm -f "$SLOT.hash"
+veritysetup verify --hash-offset="$padded" "$SLOT" "$SLOT" "$ROOTHASH"  # the tree and the data agree, as the initramfs will see them
+size=$(stat -c %s "$SLOT")
+[ "$size" -lt $((SLOT_MB * 1024 * 1024)) ] || { echo "rootfs with its hash tree ($size bytes) does not fit a ${SLOT_MB} MiB slot" >&2; exit 1; }
+
+# the slot's boot file, signed by the boot key: GRUB sources it (only if the signature holds) and passes the root hash on
+SLOTCFG="$OUT/build/slot-$VERSION.cfg"
+printf 'set URBAN_ROOTHASH=%s\nset URBAN_HASHOFFSET=%s\nset URBAN_VERSION=%s\n' "$ROOTHASH" "$padded" "$VERSION" > "$SLOTCFG"
+boot_sign "$SLOTCFG"
+# ... and the sha256 of the kernel and the initrd of this very build (the files that went into the squashfs, "hash  name"
+# lines as GRUB's hashsum --check reads them), signed the same way: GRUB boots them only if they are these, so an older
+# validly signed kernel or initrd put into the slot's partition is refused
+SLOTSUMS="$OUT/build/slot-$VERSION.sha256"
+( cd "$ROOT" && sha256sum boot/vmlinuz boot/initrd.img ) > "$SLOTSUMS"
+[ "$(grep -c '^[0-9a-f]\{64\}  boot/\(vmlinuz\|initrd\.img\)$' "$SLOTSUMS")" = 2 ] || { echo "the kernel/initrd hash list is wrong: $(cat "$SLOTSUMS")" >&2; exit 1; }
+boot_sign "$SLOTSUMS"
+log "slot $VERSION: root hash $ROOTHASH, hash offset $padded"
 
 # ---- signed update bundle
 log "update bundle"
 B=/tmp/bundle; rm -rf "$B"; mkdir -p "$B"
 cp "$SLOT" "$B/rootfs.img"
-printf "[update]\ncompatible=%s\nversion=%s\n\n[bundle]\nformat=verity\n\n[image.rootfs]\nfilename=rootfs.img\n" \
+# the slot's signed boot file travels with the image; the post-install hook puts it on the ESP for the target slot
+cp "$SLOTCFG" "$B/slot.cfg"; cp "$SLOTCFG.sig" "$B/slot.cfg.sig"
+cp "$SLOTSUMS" "$B/slot.sha256"; cp "$SLOTSUMS.sig" "$B/slot.sha256.sig"
+cp /work/os/build/bundle-hook.sh "$B/hook.sh"; chmod 755 "$B/hook.sh"
+chmod 644 "$B/slot.cfg" "$B/slot.cfg.sig" "$B/slot.sha256" "$B/slot.sha256.sig"
+printf "[update]\ncompatible=%s\nversion=%s\n\n[bundle]\nformat=verity\n\n[hooks]\nfilename=hook.sh\n\n[image.rootfs]\nfilename=rootfs.img\nhooks=post-install\n" \
   "$COMPATIBLE" "$VERSION" > "$B/manifest.raucm"
 rm -f "$OUT/urban-edge-$VERSION.raucb"
 rauc bundle --cert "$OUT/keys/signing.pem" --key "$OUT/keys/signing.key" "$B" "$OUT/urban-edge-$VERSION.raucb" >/dev/null
@@ -187,10 +252,7 @@ rauc --conf /tmp/verify.conf info "$OUT/urban-edge-$VERSION.raucb" >/dev/null  #
 
 if [ "$IMAGE" = 1 ]; then
   log "disk image"
-  E=/tmp/esp; rm -rf "$E"; mkdir -p "$E/EFI/BOOT"
-  grub-mkimage -O x86_64-efi -o "$E/EFI/BOOT/BOOTX64.EFI" -p /EFI/BOOT \
-    part_gpt fat squash4 normal linux echo test loadenv configfile regexp search all_video efi_gop gzio \
-    boot cat sleep reboot halt password_pbkdf2 pbkdf2 gcry_sha512
+  E=/tmp/esp; rm -rf "$E"; mkdir -p "$E/EFI/BOOT" "$E/EFI/URBAN"
   # the GRUB maintenance password: made once, kept with the other keys (data/os/keys, never in git); only its
   # PBKDF2 hash goes into the image
   if [ ! -f "$OUT/keys/grub-password" ]; then
@@ -199,10 +261,33 @@ if [ "$IMAGE" = 1 ]; then
   pw=$(cat "$OUT/keys/grub-password")
   hash=$(printf '%s\n%s\n' "$pw" "$pw" | grub-mkpasswd-pbkdf2 | sed -n 's/.*is \(grub\.pbkdf2\..*\)$/\1/p')
   [ -n "$hash" ] || { echo "grub-mkpasswd-pbkdf2 gave no hash" >&2; exit 1; }
+  # The boot loader: a standalone GRUB with URBAN's boot key built in. Its embedded config runs first, before anything
+  # on the disk is read: signatures are enforced from then on and the maintenance password is set (so a config that
+  # fails its signature leaves a locked GRUB prompt, not an open one), then the signed grub.cfg is loaded. The boot
+  # loader itself is signed with the Secure Boot db key; the firmware runs nothing else. Plain commands only: the
+  # embedded config is read by GRUB's simple parser.
+  cat > /tmp/early.cfg <<EOF
+set check_signatures=enforce
+export check_signatures
+set superusers="urban"
+export superusers
+password_pbkdf2 urban $hash
+configfile /EFI/BOOT/grub.cfg
+EOF
+  grub-mkimage -O x86_64-efi -o /tmp/BOOTX64.unsigned.EFI -p /EFI/BOOT -c /tmp/early.cfg \
+    --pubkey "$OUT/keys/boot.pub.gpg" --disable-shim-lock \
+    part_gpt fat squash4 normal linux echo test loadenv configfile regexp search all_video efi_gop gzio \
+    boot cat sleep reboot halt password_pbkdf2 pbkdf2 gcry_sha512 pgp gcry_rsa gcry_sha256 hashsum
+  sbsign --key "$SB/db.key" --cert "$SB/db.crt" --output "$E/EFI/BOOT/BOOTX64.EFI" /tmp/BOOTX64.unsigned.EFI >/dev/null
+  sbverify --cert "$SB/db.crt" "$E/EFI/BOOT/BOOTX64.EFI" >/dev/null || { echo "BOOTX64.EFI does not verify against db.crt" >&2; exit 1; }
+  rm -f /tmp/BOOTX64.unsigned.EFI
   sed "s|^# URBAN-GRUB-PASSWORD\$|set superusers=\"urban\"\npassword_pbkdf2 urban $hash|" /work/os/build/grub.cfg > "$E/EFI/BOOT/grub.cfg"
   grep -q '^password_pbkdf2 urban grub.pbkdf2' "$E/EFI/BOOT/grub.cfg" || { echo "grub.cfg has no password" >&2; exit 1; }
+  boot_sign "$E/EFI/BOOT/grub.cfg"
+  cp "$SLOTCFG" "$E/EFI/URBAN/slot-A.cfg"; cp "$SLOTCFG.sig" "$E/EFI/URBAN/slot-A.cfg.sig"  # slot B's pair is written by its first update
+  cp "$SLOTSUMS" "$E/EFI/URBAN/slot-A.sha256"; cp "$SLOTSUMS.sig" "$E/EFI/URBAN/slot-A.sha256.sig"
   grub-editenv "$E/EFI/BOOT/grubenv" create
-  grub-editenv "$E/EFI/BOOT/grubenv" set ORDER="A B" A_OK=1 A_TRY=0 B_OK=0 B_TRY=0
+  grub-editenv "$E/EFI/BOOT/grubenv" set ORDER="A B" A_OK=1 A_TRY=0 A_FAIL=0 B_OK=0 B_TRY=0 B_FAIL=0
   cp /work/os/build/urban-unit.txt "$E/urban-unit.txt"
   rm -f /tmp/esp.img; mkfs.vfat -C -n URBAN-ESP /tmp/esp.img $((ESP_MB * 1024)) >/dev/null
   mcopy -s -i /tmp/esp.img "$E"/* ::/

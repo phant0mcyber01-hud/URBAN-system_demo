@@ -68,6 +68,11 @@ const intruder = team.intruder || "";
 if (/ключ блока, до отзыва/.test(intruder)) problems.push("team intruder slide still says root takes the unit's key");
 if (!/TPM|чип/.test(intruder)) problems.push("team intruder slide does not say the key is in the chip");
 
+// step 6: the system is signed and verified at boot; Secure Boot is no longer a gap
+if (/Secure Boot/.test(team.gaps || "")) problems.push("team gaps slide still lists Secure Boot");
+if (!Object.values(team).some((t) => /Secure Boot/.test(t) && /(провер|подпис)/i.test(t)))
+  problems.push("team deck does not say the system is signed and verified at boot");
+
 if (problems.length) {
   for (const p of problems) console.log(`FAIL ${p}`);
   process.exit(1);

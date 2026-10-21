@@ -1,0 +1,19 @@
+#!/bin/sh
+# initramfs-tools hook: what the signed boot chain needs in the initramfs to open the root slot as a dm-verity device
+# (scripts/local-top/urban-verity does the opening). Without veritysetup or the modules the image could not boot, so
+# a missing piece stops the build here instead of showing up on a unit.
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "$1" in
+  prereqs) prereqs; exit 0 ;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+
+manual_add_modules dm_mod dm_verity sha256_generic
+
+if [ ! -x /sbin/veritysetup ]; then
+  echo "urban-verity: /sbin/veritysetup is missing (package cryptsetup-bin)" >&2
+  exit 1
+fi
+copy_exec /sbin/veritysetup /sbin

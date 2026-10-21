@@ -11,7 +11,10 @@ User=urban-vision
 Group=urban
 WorkingDirectory=/opt/urban
 EnvironmentFile=-/etc/urban/edge-%i.env
-ExecStart=/opt/urban/.venv/bin/python -m urban.vision run --cameras /etc/urban/cameras.json \
+# the env file is data the unit's own user can write: it must not be a way to inject code into the interpreter or
+# the loader (python -I below ignores PYTHON* as well)
+UnsetEnvironment=PYTHONPATH PYTHONHOME LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GCONV_PATH OPENSSL_CONF OPENSSL_MODULES
+ExecStart=/opt/urban/.venv/bin/python -I -m urban.vision run --cameras /etc/urban/cameras.json \
     --model /opt/urban/models/yolox_nano.onnx --out /run/urban/q/queues.json
 Restart=always
 RestartSec=3
