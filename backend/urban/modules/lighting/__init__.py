@@ -6,6 +6,9 @@ audits `lighting-expired`. A cabinet that loses the centre returns to its own sc
 live in memory: if the platform restarts they are gone and the cabinets are back on schedule in at most 2 minutes
 (the safe side). A cabinet's report is untrusted: it is accepted only for its own cabinet, field by field, with
 numbers finite and in range and words from a fixed set; anything else is dropped without a trace in the state.
+A cabinet whose unit is below the centre's version floor (Core.refusal) gets no commands: an override naming it is
+refused whole (409) and the cabinet shows the reason as an alert; renewals of an earlier override wait until it is
+updated (the core drops them meanwhile), and its lease runs out by itself.
 """
 from __future__ import annotations
 
@@ -200,6 +203,8 @@ class LightingModule:
             alerts.append({"kind": "door", "level": "alert", "text": "шкаф открыт"})
         if refused:
             alerts.append({"kind": "refused", "level": "warn", "text": f"шкаф отклонил команду: {refused}"})
+        if (below := self._refusal(rec["id"])) is not None:  # below the centre's version floor: no commands
+            alerts.append({"kind": "os-floor", "level": "alert", "text": below})
 
         def coord(v):
             return float(v) if _num(v, -180, 180) else None
@@ -235,9 +240,23 @@ class LightingModule:
             raise HTTPException(400, "unknown cabinet: " + ", ".join(_plain(x)[:40] for x in unknown[:5]))
         return [(x, known[x]) for x in wanted]
 
+    def _refusal(self, device: str) -> str | None:
+        """Why the core will not command this cabinet's unit now (below the version floor), or None."""
+        try:
+            why = self.core.refusal(device)
+        except Exception:
+            return None  # the core's own send() refuses it all the same
+        return _plain(why)[:REFUSAL_MAX] or None if isinstance(why, str) else None
+
     def override(self, who: str, body: Override) -> dict:
         with self._lock:
             targets = self._targets(body.cabinets)
+            # all or nothing: a cabinet the core will not command (below the version floor) fails the whole request,
+            # before anything is sent or recorded, so the operator is never told a command went out when it did not
+            below = [(cabinet, why) for cabinet, rec in targets if (why := self._refusal(rec["id"])) is not None]
+            if below:
+                raise HTTPException(409, "; ".join(f"шкаф {_plain(cabinet)[:40]}: {why}" for cabinet, why in below[:5])
+                                    + ". Команда не отправлена ни одному шкафу: снимите эти шкафы с выбора или обновите их.")
             now = self.core.now()
             for cabinet, rec in targets:
                 ok = self._send(rec["id"], cabinet, {"action": "set", "level": body.level, "ttl": LEASE_TTL})

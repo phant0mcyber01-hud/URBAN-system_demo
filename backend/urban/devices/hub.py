@@ -4,6 +4,12 @@ A device connects out to us (never the other way round), over TLS. It is trusted
 it signs our challenge with the key enrolled in the registry. Commands going down are signed
 with the gateway key and carry a rising sequence number and a timestamp, so a device can
 refuse forgeries and replays without trusting the network.
+
+The centre may also keep a version floor (`python -m urban.release floor N`, or the admin's POST /api/os-floor):
+a device that cannot show it runs at least system N gets no commands at all, only update offers, until it does.
+The rule is DeviceHub.floor_verdict. It is a mitigation for a unit put back on an old, possibly vulnerable, signed
+release by someone with its disk in hand; it relies on what the device reports, so it does not stop a device that
+lies about its version (that needs measured boot, a later step).
 """
 import asyncio
 import json
@@ -12,9 +18,11 @@ import time
 import traceback
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, StrictInt
 
+from ..release import ReleaseError
 from . import crypto
 from .health import clean
 from .registry import ACTIVE, REVOKED, Registry, kind_of
@@ -22,17 +30,37 @@ from .registry import ACTIVE, REVOKED, Registry, kind_of
 HELLO_TIMEOUT = 10  # seconds a connection may stay unauthenticated
 LINK_TTL = 3600     # seconds a download link for an update package stays valid
 REOFFER = 600       # seconds before the same release is offered to the same device again (it may be downloading)
+FLOOR_KINDS = ("unit", "district", "lighting")  # the devices that run URBAN OS: the version floor applies to them
+
+
+def floor_words(floor: int, have: int | None) -> str:
+    """Why a device below the floor gets no commands, in words for people (the Devices list, a refused action)."""
+    if have is not None:
+        return f"ниже допустимой версии (ОС {have} < {floor}): команды не отправляются"
+    return f"версия ОС не подтверждена (допустимая от {floor}): команды не отправляются"
+
+
+class FloorChange(BaseModel):
+    floor: StrictInt | None  # the new minimum system version; null clears it
 
 
 class DeviceHub:
     def __init__(self, registry: Registry, gateway_key, on_report, clock=lambda: 0, wall=time.time,
-                 plans: dict[str, set[int]] | None = None, gateway_cert: dict | None = None, releases=None):
+                 plans: dict[str, set[int]] | None = None, gateway_cert: dict | None = None, releases=None,
+                 audit=lambda event, target, note="", actor="platform": None):
         """on_report(device record, report dict); clock(): platform time sent in the welcome;
         wall(): wall-clock seconds stamped into every command, so a device can refuse stale ones;
         plans: tls id -> approved plan ids, handed to each unit at session start (its junction passport);
         gateway_cert: the root's certificate for gateway_key, presented at session start (devices/trust.py);
-        releases: the ReleaseStore of OS update packages to offer (urban/release.py), or None to offer nothing."""
+        releases: the ReleaseStore of OS update packages to offer and of the version floor (urban/release.py),
+        or None to offer nothing and keep no floor;
+        audit(event, target, note, actor): the platform's audit log, called on the event loop only."""
         self.releases = releases
+        self.audit = audit
+        self.proven: dict[str, int] = {}  # device id -> system version it reported in its current (or last) session
+        self._refused: set[str] = set()   # devices whose refusal below the floor is already audited this session
+        self._floor_audited: str | None = None  # id of the floor record last audited (also kept in the releases folder)
+        self._floor_marker_read = False
         self.links: dict[str, dict] = {}  # download token -> {"device", "version", "until"}
         self._offered: dict[str, tuple[int, float]] = {}  # device id -> (release version, wall time of the offer)
         self.plans = plans or {}
@@ -47,8 +75,24 @@ class DeviceHub:
 
     # ---- towards devices: this is gateway.send
     def online(self, tls: str) -> bool:
+        """Has the unit of this junction a session now (whether it may be commanded is reachable())."""
         rec = self.registry.by_tls(tls)
         return rec is not None and rec["id"] in self.sessions
+
+    def reachable(self, tls: str) -> bool:
+        """Can the gateway command the unit of this junction now: it has a session and is not below the floor."""
+        rec = self.registry.by_tls(tls)
+        return rec is not None and rec["id"] in self.sessions and self.floor_verdict(rec["id"], rec) is None
+
+    def why_unreachable(self, tls: str) -> str | None:
+        """Why the unit of this junction cannot be commanded now, in words for people; None if it can."""
+        rec = self.registry.by_tls(tls)
+        if rec is None:
+            return "у перекрёстка нет блока"
+        if rec["id"] not in self.sessions:
+            return "блок перекрёстка не на связи"
+        verdict = self.floor_verdict(rec["id"], rec)
+        return None if verdict is None else f"блок перекрёстка {rec['id']}: {floor_words(*verdict)}"
 
     def is_online(self, device: str) -> bool:
         """Has this device id a session now (by id, for the modules; online() is by junction)."""
@@ -64,25 +108,154 @@ class DeviceHub:
         env = {"device": device, "seq": self._seq, "t": int(self.wall()), "body": body}
         return {**env, "sig": crypto.sign(self.key, env)}
 
-    def send(self, msg: dict):
-        """Deliver a gateway message to the device of that junction.
+    def send(self, msg: dict) -> bool:
+        """Deliver a gateway message to the device of that junction. False if it was not sent.
 
-        A device that is not connected simply does not get it: its lease runs out by itself.
+        A device that is not connected simply does not get it: its lease runs out by itself. Neither does one below
+        the version floor (refused, audited once per session); a lease it may hold runs out the same way.
         """
         rec = self.registry.by_tls(msg.get("tls", ""))
         if rec is None or rec["id"] not in self.sessions:
-            return
+            return False
+        if (verdict := self.floor_verdict(rec["id"], rec)) is not None:
+            return self._refuse(rec["id"], verdict, str(msg.get("op") or "command"))
         text = json.dumps({"type": "cmd", **self.envelope(rec["id"], msg)}, ensure_ascii=False)
         asyncio.ensure_future(self._deliver(rec["id"], text))
+        return True
 
     def send_device(self, device: str, body: dict) -> bool:
-        """Deliver a signed command to one device by its id (an update offer is not about any junction).
-        False if it is not connected."""
+        """Deliver a signed command to one device by its id (a module's command is not about any junction).
+        False if it is not connected or is below the version floor (refused, audited once per session)."""
         if device not in self.sessions:
             return False
+        if (verdict := self.floor_verdict(device)) is not None:
+            return self._refuse(device, verdict, str(next(iter(body), "command")))
         text = json.dumps({"type": "cmd", **self.envelope(device, body)}, ensure_ascii=False)
         asyncio.ensure_future(self._deliver(device, text))
         return True
+
+    # ---- the version floor: the oldest system the centre still commands
+    def floor(self) -> int | None:
+        """The minimum system version (urban/release.py), or None: no floor, and the hub commands every version.
+        A change made meanwhile (the CLI, another process) is audited here, the first time the event loop asks."""
+        if self.releases is None:
+            return None
+        self._watch_floor()
+        return self.releases.floor()
+
+    def floor_verdict(self, device: str, rec: dict | None = None) -> tuple[int, int | None] | None:
+        """(floor, the version it showed) when the centre must not command this device, else None. The rule:
+        - no floor set: no device is below it (the default; nothing changes until an admin sets one);
+        - only units, district servers and lighting cabinets are judged (FLOOR_KINDS: they run URBAN OS);
+        - a device is judged by the system version it reported in its current session (`os` in its health report,
+          a whole number), below the floor -> below it. A version from an earlier session does not count: the box may
+          have been started from another disk since. Offline, the version of its last session stands;
+        - a device that has not reported a version in this session (it sends none, or not yet) cannot prove it runs
+          a new enough system: with a floor set it counts as below it;
+        - as soon as it reports a version at or above the floor it is commanded again, no restart needed.
+        Update offers are not commands in this sense: they still go to it, that is how it gets above the floor."""
+        return self._verdict(device, rec if rec is not None else self.registry.devices.get(device), self.floor())
+
+    def _verdict(self, device: str, rec: dict | None, floor: int | None) -> tuple[int, int | None] | None:
+        if floor is None:
+            return None
+        if rec is not None and kind_of(rec) not in FLOOR_KINDS:
+            return None  # an unknown record (rec None) is judged: refusing is the safe side
+        have = self.proven.get(device)
+        return None if have is not None and have >= floor else (floor, have)
+
+    def floor_refusal(self, device: str) -> str | None:
+        """Why the centre does not command this device now, in words for people, or None (Core.refusal)."""
+        verdict = self.floor_verdict(device)
+        return None if verdict is None else floor_words(*verdict)
+
+    def _refuse(self, device: str, verdict: tuple[int, int | None], what: str) -> bool:
+        """A command for a device below the floor is dropped; the first one in a session is audited. False."""
+        if device not in self._refused:
+            self._refused.add(device)
+            floor, have = verdict
+            shown = f"os {have} < floor {floor}" if have is not None else f"os not reported in this session, floor {floor}"
+            self.audit("command-refused-below-floor", device, f"{shown}; first refused: {what[:40]}", actor="platform")
+        return False
+
+    def heard(self, device: str, health):
+        """A health report from a device in its current session: what it says (cleaned), and the system version it
+        shows now. A report without a version leaves it unproved (floor_verdict)."""
+        self.seen[device] = {"at": time.time(), "health": clean(health)}
+        os_version = self.seen[device]["health"].get("os")  # clean() keeps only a whole number
+        if os_version is not None:
+            self.proven[device] = os_version
+        else:
+            self.proven.pop(device, None)
+        if self.floor_verdict(device) is None:
+            self._refused.discard(device)  # commanded again: a later relapse is audited again
+
+    def _watch_floor(self, anywhere: bool = False):
+        """Audit each change of the floor once (os-floor-set), whoever made it: the admin's route at once, the CLI
+        the next time the platform looks, also after a restart (the last audited record is kept on disk). Only on
+        the event loop, which writes the audit chain; a worker thread leaves it to the loop (anywhere: the caller
+        is on the loop)."""
+        if not anywhere:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return
+        rec = self.releases.floor_record()
+        if rec is None:
+            return
+        if not self._floor_marker_read:
+            self._floor_audited, self._floor_marker_read = self.releases.floor_audited(), True
+        if rec["id"] == self._floor_audited:
+            return
+        self._floor_audited = rec["id"]
+        self._refused.clear()  # a new floor: a refusal under it is news again
+        try:
+            self.releases.mark_floor_audited(rec["id"])
+        except OSError:  # audited once in this process all the same
+            print("hub: could not keep the audited floor record; it will be audited again after a restart", flush=True)
+        was = rec.get("was")
+        self.audit("os-floor-set", "os-floor", f"{rec['floor'] or 'none'} (was {was or 'none'})",
+                   actor=str(rec.get("by") or "-"))
+
+    def floor_view(self) -> dict:
+        """The floor for the interface: its value, who set it and when, the newest release offered, and the active
+        devices below it now."""
+        floor = self.floor()
+        rec = self.releases.floor_record() if self.releases is not None else None
+        below = sorted(d for d, r in self.registry.devices.items()
+                       if r.get("status") == ACTIVE and self._verdict(d, r, floor) is not None)
+        return {"floor": floor, "set_by": rec.get("by") if rec else None, "at": rec.get("at") if rec else None,
+                "newest": self.releases.newest() if self.releases is not None else None, "below": below}
+
+    def set_floor(self, floor: int | None, who: str) -> dict:
+        """The admin's change: written next to the releases and audited at once under the admin's name. Call it on
+        the event loop. A floor above every release offered is allowed (the devices may already run it), with a
+        warning: a device below it cannot be updated from the centre."""
+        if self.releases is None:
+            raise ReleaseError("this centre keeps no releases, so no floor")
+        self.releases.set_floor(floor, by=who)
+        self._watch_floor(anywhere=True)
+        view = self.floor_view()
+        if floor is not None and (view["newest"] is None or view["newest"] < floor):
+            view["warning"] = (f"Ни один выпуск в центре не достигает ОС {floor} (новейший: {view['newest'] or 'нет'}): "
+                               f"устройства ниже минимума нельзя обновить из центра")
+        return view
+
+    def floor_routes(self, viewer, admin) -> APIRouter:
+        """GET /api/os-floor for everyone signed in, POST /api/os-floor {"floor": N | null} for the admin."""
+        router = APIRouter()
+
+        @router.get("/api/os-floor")
+        async def get_floor(who: str = Depends(viewer)):
+            return self.floor_view()
+
+        @router.post("/api/os-floor")
+        async def post_floor(body: FloorChange, who: str = Depends(admin)):
+            try:
+                return self.set_floor(body.floor, who)
+            except ReleaseError:
+                raise HTTPException(400, "минимальная версия ОС — целое число от 1 (или null, чтобы снять её)")
+        return router
 
     # ---- over-the-air updates: the offer goes down the signed channel, the package comes over the same listener
     def pending_release(self, device: str, rec: dict) -> dict | None:
@@ -185,6 +358,8 @@ class DeviceHub:
                 await _close(old)
             self.sessions[device] = ws
             self.connects[device] = self.connects.get(device, 0) + 1
+            self.proven.pop(device, None)  # a new session proves its system version anew (floor_verdict)
+            self._refused.discard(device)
             self.seen[device] = self.reconnected(device, hello.get("version"))
             epoch = hello.get("epoch")
             self.epochs[device] = epoch if isinstance(epoch, int) else None
@@ -199,7 +374,7 @@ class DeviceHub:
             while True:
                 report = json.loads(await ws.receive_text())
                 if isinstance(report, dict) and report.get("type") == "report":
-                    self.seen[device] = {"at": time.time(), "health": clean(report.get("health"))}
+                    self.heard(device, report.get("health"))
                     if isinstance(report.get("epoch"), int) and not isinstance(report["epoch"], bool):
                         self.epochs[device] = report["epoch"]  # the gateway key epoch the unit obeys now
                     if kind_of(rec) == "district":  # which junctions it is trusted for, from the registry as it is now
@@ -279,6 +454,8 @@ class DeviceHub:
         if ws is not None:
             await _close(ws)
         self.seen.pop(device, None)
+        self.proven.pop(device, None)
+        self._refused.discard(device)
         return rec
 
     async def set_status(self, device: str, status: str) -> dict | None:
@@ -290,8 +467,11 @@ class DeviceHub:
         return rec
 
     def status(self) -> list[dict]:
+        """One row per device; below_floor: it gets no commands now (floor_verdict), floor: the minimum or None,
+        os_proven: the system version it reported in its current (or last) session."""
         self._sync()
         now = time.time()
+        floor = self.floor()
         out = []
         for rec in self.registry.devices.values():
             seen = self.seen.get(rec["id"], {})
@@ -304,7 +484,9 @@ class DeviceHub:
                         "status": rec["status"], "online": rec["id"] in self.sessions,
                         "connects": self.connects.get(rec["id"], 0),
                         "age": round(now - seen["at"]) if "at" in seen else None,
-                        "health": seen.get("health", {})})
+                        "health": seen.get("health", {}),
+                        "floor": floor, "below_floor": self._verdict(rec["id"], rec, floor) is not None,
+                        "os_proven": self.proven.get(rec["id"])})
         return out
 
 

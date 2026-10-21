@@ -91,10 +91,28 @@ const panel = createPanel(scene, S, {
   onTab: (tab) => {
     clearInterval(historyTimer);
     if (tab === 'history') { loadHistory(); historyTimer = setInterval(loadHistory, 20000); }
+    if (tab === 'devices') { loadFloor(); historyTimer = setInterval(loadFloor, 20000); }  // the CLI may change it too
     if (tab === 'junctions') loadJunctions();
   },
   onAction: (act, id) => run(async () => {
     if (act === 'enrol') return openEnrol(id);
+    if (act === 'floor-set') {
+      const raw = window.prompt('Минимальная версия ОС (целое число).\n\nУстройства, которые не покажут эту версию или новее, '
+        + 'перестанут получать команды, пока не обновятся; обновления им по-прежнему предлагаются.',
+      String(S.osFloor?.floor ?? S.osFloor?.newest ?? ''));
+      if (raw == null) return null;
+      const floor = Number(raw.trim());
+      if (!Number.isInteger(floor) || floor < 1) return toast('версия ОС — целое число от 1');
+      S.osFloor = await api.post('/api/os-floor', { floor });
+      panel.refresh();
+      return toast(S.osFloor.warning ?? `минимальная версия ОС: ${floor}`);
+    }
+    if (act === 'floor-clear') {
+      if (!window.confirm('Снять минимальную версию ОС?\n\nКоманды снова будут получать устройства с любой версией системы.')) return null;
+      S.osFloor = await api.post('/api/os-floor', { floor: null });
+      panel.refresh();
+      return toast('минимальная версия ОС снята');
+    }
     if (act === 'kit') return downloadKit(id);
     if (act === 'remove') {
       if (!window.confirm(`Убрать блок ${id} из реестра?\n\nОн уже отозван и не может подключиться. После удаления перекрёсток `
@@ -248,6 +266,15 @@ async function loadHistory() {
   try {
     const [h, commands] = await Promise.all([api.get('/api/history'), api.get('/api/history/commands?limit=40')]);
     S.history = { ...h, commands };
+    panel.render();
+  } catch (e) { if (e.message === 'нужно войти заново') signedOut(); }
+}
+
+// the centre's minimum OS version (the version floor), shown in the Devices tab; the admin sets and clears it there
+async function loadFloor() {
+  if (!S.user) return;
+  try {
+    S.osFloor = await api.get('/api/os-floor');
     panel.render();
   } catch (e) { if (e.message === 'нужно войти заново') signedOut(); }
 }

@@ -11,6 +11,7 @@ export function createState(scene) {
     tab: 'overview', cam: null, pin: null,
     user: null, // {name, role} of the signed-in account
     history: null, // from /api/history*, loaded when the tab opens
+    osFloor: null, // from /api/os-floor: {floor, set_by, at, newest, below}, loaded when the Devices tab opens
     junctions: null, // passports from /api/junctions
     junctionsVersion: 0, // bumped when the passports are reloaded, so the map recolours the junctions
     junction: null, // the passport open in the junctions tab

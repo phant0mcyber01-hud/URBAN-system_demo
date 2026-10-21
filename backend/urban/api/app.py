@@ -80,11 +80,20 @@ def _meta() -> dict:
 
 meta = _meta()
 GATEWAY_CERT = json.loads((c.PKI / "gateway.cert.json").read_text())
+
+
+def core_audit(event: str, target: str, note: str = "", actor: str = "platform"):
+    """One record from the core (the device hub, the modules) in the platform's audit chain; on the event loop."""
+    platform.gateway.audit.append(platform.t, event, "-", "-", target, note, actor=actor, mode="approval")
+
+
 hub = DeviceHub(Registry(c.PKI / "devices.json"), crypto.load_private((c.PKI / "gateway.key").read_text()),
                 on_report=lambda rec, report: route_report(rec, report), clock=lambda: platform.t,
-                plans=approved_plans(junctions), gateway_cert=GATEWAY_CERT, releases=ReleaseStore(c.RELEASES))
+                plans=approved_plans(junctions), gateway_cert=GATEWAY_CERT, releases=ReleaseStore(c.RELEASES),
+                audit=core_audit)
 store = Store(c.DB, mode=c.SOURCE, retention_days=c.HISTORY_DAYS)
-platform = Platform(meta["center"], meta["radius"], junctions, send=hub.send, reachable=hub.online, store=store,
+# reachable: connected and not below the centre's version floor; a unit below it gets no lease and no approval
+platform = Platform(meta["center"], meta["radius"], junctions, send=hub.send, reachable=hub.reachable, store=store,
                     corridor=c.GREEN_CORRIDOR)
 exporter = Exporter(store, crypto.load_private((c.PKI / "audit.key").read_text()), sinks_from_env(c.STATE))
 clients: set[WebSocket] = set()
@@ -151,6 +160,9 @@ async def lifespan(_):
                                           crypto.fingerprint(GATEWAY_CERT["gateway"]), actor="provision", mode="approval")
         marker.write_text(str(GATEWAY_CERT["epoch"]))
     print(f"  Gateway key: epoch {GATEWAY_CERT['epoch']}, {crypto.fingerprint(GATEWAY_CERT['gateway'])}", flush=True)
+    floor = hub.floor()  # on the event loop: a floor set with the CLI while the platform was down is audited now
+    print(f"  OS floor: {f'{floor}: older systems get no commands' if floor else 'none'} "
+          f"(python -m urban.release floor)", flush=True)
     if FIELD:
         ready = sum(approved(j) for j in junctions)
         print(f"  City: {meta.get('name') or 'not set up (python -m urban.city create)'}, {len(junctions)} junctions, "
@@ -268,11 +280,9 @@ def role(needed: str):
 viewer, operator, admin = role("viewer"), role("operator"), role("admin")
 
 # ---- City OS modules (urban/modules): what MODULES names, on top of the core's devices, roles and audit log ----
-core = Core(send=hub.send_device, online=hub.is_online, devices=hub.devices_of,
-            audit=lambda event, target, note="", actor="platform":
-                platform.gateway.audit.append(platform.t, event, "-", "-", target, note, actor=actor, mode="approval"),
+core = Core(send=hub.send_device, online=hub.is_online, devices=hub.devices_of, audit=core_audit,
             now=time.time, viewer=viewer, operator=operator, admin=admin, demo=c.DEMO,
-            extra={"platform": platform, "hub": hub})
+            extra={"platform": platform, "hub": hub}, refusal=hub.floor_refusal)
 try:
     modules = load_modules(c.MODULES, core)
 except ModuleError as err:
@@ -535,6 +545,10 @@ def devices(who: str = Depends(viewer)):
     return [{**row, "alerts": assess(row)} for row in hub.status()]
 
 
+# the version floor: GET /api/os-floor (anyone signed in), POST /api/os-floor {"floor": N | null} (admin, audited)
+app.include_router(hub.floor_routes(viewer, admin))
+
+
 class Link(BaseModel):
     up: bool
 
@@ -682,7 +696,10 @@ async def device_enroll(device: str, body: Enrolment, who: str = Depends(admin))
 async def approve(pid: str, who: str = Depends(operator)):
     p = platform.gateway.decide(pid, True, who, platform.t)
     if p is None:
-        raise HTTPException(409, "cannot approve: not pending, the link is down, or the device is offline")
+        pending = platform.gateway.proposals.get(pid)
+        why = hub.why_unreachable(pending["tls"]) if pending is not None and pending["status"] == "pending" else None
+        raise HTTPException(409, f"нельзя применить: {why}" if why  # in words for people (below the version floor, offline)
+                            else "cannot approve: not pending, the link is down, or the device is offline")
     return p
 
 

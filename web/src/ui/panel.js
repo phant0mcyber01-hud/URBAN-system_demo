@@ -79,6 +79,7 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab, before
           <span title="последний отчёт">${age(d.a)} назад</span>
           ${devButton(d)}
         </div>
+        ${floorTag(d)}
         ${d.al.length > 1 ? `<small>${d.al.slice(1).map((a) => esc(a[1])).join(' · ')}</small>` : ''}
       </div>`;
   const plural = (n, one, few, many) => (n % 10 === 1 && n % 100 !== 11 ? one : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? few : many);
@@ -97,11 +98,28 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab, before
     refused: (u) => `обновление отклонено${u.reason ? `: ${u.reason}` : ''}` };
   const osSpan = (d) => `<span title="версия системы и состояние обновления по воздуху">ОС ${esc(d.os ?? '—')}${d.up && UPDATE_RU[d.up.state]
     ? ` · ${esc(UPDATE_RU[d.up.state](d.up))}` : ''}</span>`;
+  // the centre's version floor: a device that has not shown at least that system version in its current session
+  // (po: the version it showed, fl: the floor) gets no commands, only update offers, until it does
+  const floorText = (d) => (d.po != null
+    ? `ниже допустимой версии (ОС ${d.po} < ${d.fl}): команды не отправляются`
+    : `версия ОС не подтверждена (допустимая от ${d.fl}): команды не отправляются`);
+  const floorTag = (d) => (d.bf ? `<div class="floor">${chip('bad', esc(floorText(d)))}</div>` : '');
+  const flagged = (d) => (!d.o && !waiting(d)) || d.lock || d.al.length || d.s === 'revoked' || d.bf;
+  const floorBox = () => {
+    const f = S.osFloor;
+    const value = f == null ? 'загрузка…' : f.floor == null ? 'не задана — команды получают устройства с любой версией ОС'
+      : `ОС ${esc(f.floor)}: устройства на более старой системе не получают команд, пока не обновятся
+        (${f.below?.length ? `сейчас таких ${f.below.length}` : 'сейчас таких нет'})${f.set_by ? ` · задал ${esc(f.set_by)}, ${esc(f.at ?? '')}` : ''}`;
+    const buttons = S.can('admin') && f != null
+      ? `<div class="btns"><button data-act="floor-set">${f.floor == null ? 'Задать минимум' : 'Изменить'}</button>
+         ${f.floor != null ? '<button data-act="floor-clear">Снять минимум</button>' : ''}</div>` : '';
+    return `<div class="item"><b>Минимальная версия ОС</b> — ${value}${buttons}</div>`;
+  };
   const deviceSummary = () => {
     const all = Object.values(S.dev);
     if (!all.length) return empty('ожидание устройств');
     const { units, districts } = split(all);
-    const bad = all.filter((d) => (!d.o && !waiting(d)) || d.lock || d.al.length || d.s === 'revoked');
+    const bad = all.filter(flagged);
     const part = (list, what) => (list.length ? chip(onlineOf(list) === list.length && !bad.length ? 'ok' : 'warn',
       `${onlineOf(list)} из ${list.length} ${what} на связи`) : '');
     return `<div class="item">${part(units, 'блоков')} ${part(districts, plural(districts.length, 'районный сервер', 'районных сервера', 'районных серверов'))}
@@ -121,17 +139,18 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab, before
           <div class="item"><b>2.</b> Здесь: «Подключить», вставить код, выбрать перекрёсток (и районный сервер, если блок подключается через него), сверить отпечаток с тем, что напечатал блок.</div>
           <div class="item"><b>3.</b> Скачать комплект и поставить его на блок:
             <code>python -m urban.edge --setup urban-edge-J-07.json --unit edge-J-07</code>, затем запустить службу блока.</div>
-          ${enrolButton() || '<p class="muted">Подключать блоки может администратор.</p>'}`
+          ${enrolButton() || '<p class="muted">Подключать блоки может администратор.</p>'}
+          ${floorBox()}`
         : empty('ожидание устройств');
     }
     const { units, districts } = split(all.map(([, d]) => d));
     const online = onlineOf(units);
     const pendingUnits = all.filter(([, d]) => waiting(d)).length;
-    const alerts = all.filter(([, d]) => d.al.some((a) => a[0] === 'alert') || d.lock || d.s === 'revoked').length;
-    const warns = all.filter(([, d]) => d.al.length && !d.al.some((a) => a[0] === 'alert') && !d.lock && d.s !== 'revoked').length;
+    const alerts = all.filter(([, d]) => d.al.some((a) => a[0] === 'alert') || d.lock || d.s === 'revoked' || d.bf).length;
+    const warns = all.filter(([, d]) => d.al.length && !d.al.some((a) => a[0] === 'alert') && !d.lock && d.s !== 'revoked' && !d.bf).length;
     const hot = all.map(([, d]) => d.t).filter((t) => typeof t === 'number');
     const rows = all
-      .sort(([, a], [, b]) => (b.lock - a.lock) || (b.al.length - a.al.length) || (a.o - b.o))
+      .sort(([, a], [, b]) => (b.lock - a.lock) || ((b.bf ?? 0) - (a.bf ?? 0)) || (b.al.length - a.al.length) || (a.o - b.o))
       .map(([junction, d]) => (isDistrict(d) ? districtRow(d) : `<div class="item dev" data-fly="${esc(junction)}">
         <div class="row"><span><b>${esc(d.id)}</b> <small>${esc(junction)}${d.via ? ` · через ${esc(d.via)}` : ''}${d.serial ? ` · ${esc(d.serial)}` : ''}</small></span>${devState(d)}</div>
         <div class="row meta">
@@ -144,6 +163,7 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab, before
           <span title="последний отчёт">${age(d.a)} назад</span>
           ${devButton(d)}
         </div>
+        ${floorTag(d)}
         ${d.al.length > 1 ? `<small>${d.al.slice(1).map((a) => esc(a[1])).join(' · ')}</small>` : ''}
       </div>`)).join('');
     const recent = [...S.devAlerts].reverse().slice(0, 6);
@@ -157,6 +177,7 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab, before
         потеря контроллера блокируют перекрёсток: команды снимаются, новые не принимаются. Районный сервер несёт
         соединения своих блоков в центр, не читая их, и отчитывается очередями своих камер.
         ${pendingUnits ? `Ждут первого подключения: ${pendingUnits}.` : ''}</p>
+      ${floorBox()}
       ${enrolButton()}
       ${recent.length ? `<h4>Последние события</h4>${recent.map((a) => `<div class="item"><time>${clock(a.t)}</time>
         ${chip(a.level === 'alert' ? 'bad' : 'warn', KIND_RU[a.kind] ?? esc(a.kind))} ${esc(a.device)}: ${esc(a.text)}</div>`).join('')}` : ''}
@@ -168,9 +189,12 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab, before
   const cmdCard = (c) => {
     const [cls, label] = CMD_STATUS[c.status] ?? ['info', c.status];
     const live = ['approved', 'active', 'revoking'].includes(c.status);
+    const unit = S.dev[c.cam];
+    const belowFloor = c.status === 'pending' && unit?.bf;  // the centre will not command this junction's unit now
     const buttons = c.status === 'pending'
       ? (S.can('operator')
-        ? `<div class="btns"><button class="go" data-act="approve" data-id="${c.id}" ${S.link ? '' : 'disabled'}>Применить</button>
+        ? `${belowFloor ? `<small>Нельзя применить: блок ${esc(unit.id)} — ${esc(floorText(unit))}.</small>` : ''}
+           <div class="btns"><button class="go" data-act="approve" data-id="${c.id}" ${S.link && !belowFloor ? '' : 'disabled'}>Применить</button>
            <button data-act="reject" data-id="${c.id}">Отклонить</button></div>`
         : `<small class="muted">Решение принимает оператор; у вашей учётной записи роль «наблюдатель».</small>`)
       : '';
@@ -446,7 +470,7 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab, before
       $('clock').textContent = clock(S.t);
       const wait = S.pending().length;
       tabs.querySelector('[data-tab=transport]').dataset.badge = wait || '';
-      const devBad = Object.values(S.dev).filter((d) => (!d.o && !waiting(d)) || d.lock || d.al.length || d.s === 'revoked').length;
+      const devBad = Object.values(S.dev).filter(flagged).length;
       tabs.querySelector('[data-tab=devices]').dataset.badge = devBad || '';
       const drafts = (S.junctions ?? []).filter((j) => j.passport.status !== 'approved').length;
       tabs.querySelector('[data-tab=junctions]').dataset.badge = S.mode === 'field' && drafts ? drafts : '';

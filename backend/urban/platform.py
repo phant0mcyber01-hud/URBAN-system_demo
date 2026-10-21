@@ -269,6 +269,9 @@ class Platform:
                 "l": h.get("leases"), "u": h.get("uptime"), "a": row.get("age"), "n": row.get("connects", 0),
                 "f": int(bool(row.get("first_seen"))),
                 "al": [[a["level"], a["text"]] for a in alerts], "lock": row.get("tls") in self.gateway.locked,
+                # the centre's version floor (devices/hub.py): below it the device gets no commands; po: the version
+                # it showed in its current session, fl: the floor
+                "bf": int(bool(row.get("below_floor"))), "fl": row.get("floor"), "po": row.get("os_proven"),
                 **({"cab": row["cabinet"]} if row.get("cabinet") else {}),  # a lighting unit: its cabinet
             }
         present = {row["junction"] if (row.get("kind") or "unit") == "unit" else row["id"] for row in rows}

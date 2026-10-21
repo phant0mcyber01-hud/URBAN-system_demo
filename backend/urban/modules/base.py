@@ -34,6 +34,9 @@ class Core:
     admin: Any = None
     demo: bool = False                               # the demo twin, not the real city
     extra: dict = field(default_factory=dict)        # anything else a built-in module needs from the platform
+    # device id -> why the core will not command it now (words for people: below the centre's version floor), or
+    # None; send() refuses such a device anyway, this lets a module say so to the person before trying
+    refusal: Callable[[str], str | None] = lambda device: None
 
 
 class Module(Protocol):

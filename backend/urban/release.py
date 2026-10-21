@@ -3,18 +3,29 @@
     python -m urban.release add urban-edge-3.raucb --version 3 [--devices edge-J-21,district-1]
     python -m urban.release list
     python -m urban.release withdraw 3
+    python -m urban.release floor 5          the minimum system version the centre commands
+    python -m urban.release floor            show it
+    python -m urban.release floor --clear    no minimum: every system version is commanded again
 
 A release is a RAUC bundle (urban-edge-<N>.raucb) signed with URBAN's build key. `add` copies it into the
 releases folder next to releases.json; the device hub then offers it, in a signed message, to every unit and
 district server (all of them, or only the listed ones) whose reported system version is older. A withdrawn
 release is never offered or served again. The platform may be running meanwhile: it notices the change itself.
+
+The floor (floor.json next to releases.json) is the oldest system the centre still commands: a unit, district server
+or lighting cabinet that does not report at least that version in its current session gets no commands, only update
+offers, until it reports a version at or above it (the rule: devices/hub.py, DeviceHub.floor_verdict). No floor is
+the default: nothing changes until an admin sets one, here or in the interface (POST /api/os-floor). Every change is
+audited as `os-floor-set` with who made it; a change made here is audited by the platform the next time it looks.
 """
 import argparse
 import datetime
+import getpass
 import hashlib
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -24,6 +35,12 @@ from . import config as c
 
 KEYRING = Path("/etc/rauc/keyring.pem")
 DEVICE_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")
+FLOOR, FLOOR_AUDITED = "floor.json", "floor.audited"  # the version floor; the id of the floor record last audited
+
+
+def _version(v) -> bool:
+    """A system version: a positive whole number (True is not one)."""
+    return isinstance(v, int) and not isinstance(v, bool) and v >= 1
 
 
 class ReleaseError(ValueError):
@@ -71,6 +88,7 @@ class ReleaseStore:
         self.index = self.dir / "releases.json"
         self._seen = None  # (mtime, size, inode) of releases.json as last read
         self._items: list[dict] = []
+        self._floor_seen, self._floor = None, None  # the same for floor.json
 
     # ---- reading: cheap enough to call on every device report (one stat)
     def releases(self) -> list[dict]:
@@ -106,12 +124,69 @@ class ReleaseStore:
                 best = r
         return best
 
+    def newest(self) -> int | None:
+        """The highest release still offered (to any device), or None."""
+        return max((r["version"] for r in self.releases() if not r.get("withdrawn")), default=None)
+
+    # ---- the version floor
+    def floor_record(self) -> dict | None:
+        """The floor as last set: {"floor": int, or None once cleared, "was", "by", "at", "id"}; None if it never was.
+        As cheap as releases(): one stat while floor.json is unchanged. A file that is not a record we write is
+        ignored and the last good record stays, as with an unreadable releases.json."""
+        path = self.dir / FLOOR
+        try:
+            st = path.stat()
+            seen = (st.st_mtime_ns, st.st_size, st.st_ino)
+        except OSError:
+            self._floor_seen, self._floor = None, None
+            return None
+        if seen != self._floor_seen:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return self._floor
+            if (not isinstance(data, dict) or not (data.get("floor") is None or _version(data.get("floor")))
+                    or not isinstance(data.get("id"), str)):
+                return self._floor
+            self._floor, self._floor_seen = data, seen
+        return self._floor
+
+    def floor(self) -> int | None:
+        """The minimum system version the centre commands, or None: no floor."""
+        rec = self.floor_record()
+        return rec["floor"] if rec is not None else None
+
+    def set_floor(self, floor: int | None, by: str = "cli", now: datetime.datetime | None = None) -> dict:
+        """Set the floor (a positive whole number) or clear it (None). by: who did it, for the audit log."""
+        if floor is not None and not _version(floor):
+            raise ReleaseError("the floor is a system version: a positive whole number")
+        rec = {"floor": floor, "was": self.floor(), "by": str(by)[:60] or "-",
+               "at": (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+               "id": secrets.token_hex(8)}
+        self._write_json(self.dir / FLOOR, rec)
+        self._floor_seen = None  # read back on the next call
+        return rec
+
+    def floor_audited(self) -> str | None:
+        """The id of the floor record the platform last wrote into its audit log, or None."""
+        try:
+            return (self.dir / FLOOR_AUDITED).read_text(encoding="utf-8").strip() or None
+        except OSError:
+            return None
+
+    def mark_floor_audited(self, ident: str):
+        self._write_json(self.dir / FLOOR_AUDITED, None, text=ident)
+
     # ---- writing
-    def _write(self, items: list[dict]):
+    def _write_json(self, path: Path, data, text: str | None = None):
+        """Whole or not at all: another process may read the file at any moment."""
         self.dir.mkdir(parents=True, exist_ok=True)
-        tmp = self.index.with_name(self.index.name + ".tmp")
-        tmp.write_text(json.dumps(items, ensure_ascii=False, indent=1), encoding="utf-8")
-        os.replace(tmp, self.index)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(text if text is not None else json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(tmp, path)
+
+    def _write(self, items: list[dict]):
+        self._write_json(self.index, items)
 
     def add(self, source: Path, version: int, devices: list[str] | None = None,
             now: datetime.datetime | None = None) -> dict:
@@ -152,6 +227,20 @@ class ReleaseStore:
         return rel
 
 
+def _cli_actor() -> str:
+    """Who changed the floor from the command line, for the audit log."""
+    try:
+        return f"cli:{getpass.getuser()}"
+    except Exception:  # no user name to be had (a bare container): it was still the command line
+        return "cli"
+
+
+def floor_text(rec: dict | None) -> str:
+    if rec is None or rec.get("floor") is None:
+        return "no floor: devices of every system version get commands"
+    return f"floor: {rec['floor']}, set by {rec.get('by', '-')} at {rec.get('at', '-')}"
+
+
 def main(argv: list[str] | None = None):
     ap = argparse.ArgumentParser(description="URBAN OS update packages of the control centre")
     ap.add_argument("--dir", default=None, help=f"the releases folder (default: {c.RELEASES})")
@@ -162,6 +251,9 @@ def main(argv: list[str] | None = None):
     add.add_argument("--devices", help="offer only to these device ids (comma-separated); default: every unit and district")
     sub.add_parser("list")
     sub.add_parser("withdraw", help="stop offering a release").add_argument("version", type=int)
+    fl = sub.add_parser("floor", help="the minimum system version the centre commands: show it, set it, or --clear it")
+    fl.add_argument("version", type=int, nargs="?", help="devices that do not report this version or newer get no commands")
+    fl.add_argument("--clear", action="store_true", help="no minimum: devices of every system version get commands again")
     args = ap.parse_args(argv)
 
     store = ReleaseStore(Path(args.dir) if args.dir else None)
@@ -177,6 +269,22 @@ def main(argv: list[str] | None = None):
         elif args.cmd == "withdraw":
             store.withdraw(args.version)
             print(f"withdrawn release {args.version}: it is no longer offered or served")
+        elif args.cmd == "floor":
+            if args.clear and args.version is not None:
+                raise ReleaseError("give a version or --clear, not both")
+            if args.clear:
+                rec = store.set_floor(None, by=_cli_actor())
+                print(f"floor cleared (was {rec['was'] or 'none'}): devices of every system version get commands again")
+            elif args.version is not None:
+                rec = store.set_floor(args.version, by=_cli_actor())
+                print(f"floor set to {rec['floor']} (was {rec['was'] or 'none'}): units, district servers and lighting "
+                      f"cabinets that do not report system {rec['floor']} or newer get no commands, only update offers")
+                newest = store.newest()
+                if newest is None or newest < rec["floor"]:
+                    print(f"warning: no release offered here is {rec['floor']} or newer (newest: {newest or 'none'}): "
+                          f"devices below the floor cannot be updated from the centre")
+            else:
+                print(floor_text(store.floor_record()))
         else:
             rows = store.releases()
             for r in sorted(rows, key=lambda r: r["version"]):
@@ -185,6 +293,7 @@ def main(argv: list[str] | None = None):
                       f"{str(r.get('sha256', ''))[:12]}  {r.get('added', '')}  to {to}")
             if not rows:
                 print("no releases")
+            print(floor_text(store.floor_record()))
     except ReleaseError as err:
         raise SystemExit(f"refused: {err}")
 

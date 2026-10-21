@@ -85,6 +85,8 @@ export function renderCabinet(c, { canOperate = false, selected = new Set(), foc
   const alert = isAlert(c);
   const serverText = (Array.isArray(c.alerts) ? c.alerts : []).map((a) => (Array.isArray(a) ? a[1] : typeof a === 'string' ? a : a?.text))
     .filter((t) => t && !problems.some((p) => p.text === t));
+  // below the centre's version floor: the cabinet gets no commands until it is updated (red, not a warning)
+  const floorText = new Set((Array.isArray(c.alerts) ? c.alerts : []).filter((a) => a?.kind === 'os-floor').map((a) => a.text));
   const o = c.override;
   return `<div class="item lt-cab${alert ? ' alert' : ''}${focus === id ? ' focus' : ''}" data-cabinet="${esc(id)}"${alert ? ' data-alert="1"' : ''}>
     <div class="row"><span>${canOperate
@@ -95,7 +97,7 @@ export function renderCabinet(c, { canOperate = false, selected = new Set(), foc
     ${o && (o.reason || o.actor) ? `<small>${o.actor ? esc(o.actor) : ''}${o.reason ? `${o.actor ? ': ' : ''}«${esc(o.reason)}»` : ''}</small>` : ''}
     ${c.schedule && !o ? `<small>${esc(SCHEDULE[c.schedule] ?? '')}${c.dark === true ? ', сейчас темно' : c.dark === false ? ', сейчас светло' : ''}</small>` : ''}
     ${problems.map((p) => `<div class="lt-alert ${p.level}">${chip(p.level, p.text)}</div>`).join('')}
-    ${serverText.map((t) => `<div class="lt-alert warn">${chip('warn', t)}</div>`).join('')}
+    ${serverText.map((t) => { const cls = floorText.has(t) ? 'bad' : 'warn'; return `<div class="lt-alert ${cls}">${chip(cls, t)}</div>`; }).join('')}
     <button class="lt-fly" data-lt-fly="${esc(id)}" ${Number.isFinite(c.lon) && Number.isFinite(c.lat) ? '' : 'hidden'}>На карте</button>
   </div>`;
 }
