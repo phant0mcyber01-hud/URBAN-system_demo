@@ -1,9 +1,18 @@
 #!/bin/sh
-# RAUC post-install hook of an URBAN OS bundle (manifest: [hooks] filename=hook.sh, [image.rootfs] hooks=post-install).
+# RAUC hooks of an URBAN OS bundle (manifest: [hooks] filename=hook.sh hooks=install-check, [image.rootfs]
+# hooks=post-install).
 #
-# The slot image has just been written to the target slot. It is first checked: its dm-verity superblock must describe
-# the layout of the bundle's slot.cfg (veritysetup dump) and the slot must verify against the root hash in slot.cfg
-# (veritysetup verify). Then the bundle's signed slot files go onto the ESP: slot.cfg with the new image's
+# install-check: before RAUC writes anything or touches the boot order. RAUC leaves its own compatible check to this hook,
+# so that check comes first. Then the unit must have the boot disk's links /dev/disk/urban/* (made since step 7 by
+# etc/udev/rules.d/60-urban-bootdisk.rules): the system in this bundle takes its slots, ESP and data only through them and
+# boots only when GRUB passes urban.bootpart, which a unit written before step 7 does not (its BOOTX64.EFI has no probe,
+# its grub.cfg passes no GUID, and an update replaces neither). Such a unit is refused here, its slots and boot order as
+# they were, and is written again. Exit 10 is RAUC's code for a hook that rejects the bundle; the last line on stderr is
+# the reason it reports.
+#
+# post-install: the slot image has just been written to the target slot. It is first checked: its dm-verity superblock
+# must describe the layout of the bundle's slot.cfg (veritysetup dump) and the slot must verify against the root hash in
+# slot.cfg (veritysetup verify). Then the bundle's signed slot files go onto the ESP: slot.cfg with the new image's
 # dm-verity root hash and slot.sha256 with the sha256 of its kernel and initrd, each with its detached signature by the
 # URBAN boot key (.sig), as
 #   /boot/efi/EFI/URBAN/slot-<A|B>.cfg, slot-<A|B>.sha256  and their  .sig
@@ -11,11 +20,21 @@
 # moved into place, then read back. Any failure fails the installation: RAUC then does not switch to the new slot.
 set -eu
 
-case "${1:-}" in
-  slot-pre-install|slot-install|install-check) exit 0 ;;
-esac
-
 fail() { echo "urban bundle hook: $*" >&2; exit 1; }
+reject() { echo "urban bundle hook: $*" >&2; exit 10; }
+
+case "${1:-}" in
+  install-check)
+    if [ -z "${RAUC_MF_COMPATIBLE:-}" ] || [ "$RAUC_MF_COMPATIBLE" != "${RAUC_SYSTEM_COMPATIBLE:-}" ]; then
+      reject "this bundle is for '${RAUC_MF_COMPATIBLE:-}', this system is '${RAUC_SYSTEM_COMPATIBLE:-}'"
+    fi
+    for l in esp rootfs-a rootfs-b; do
+      [ -b "$(readlink -e "/dev/disk/urban/$l" || true)" ] \
+        || reject "this unit was written before step 7 (no /dev/disk/urban/$l, the boot disk's links): write the image again"
+    done
+    exit 0 ;;
+  slot-pre-install|slot-install) exit 0 ;;
+esac
 
 # which slot is being written: A or B
 slot="${RAUC_SLOT_BOOTNAME:-}"
@@ -49,9 +68,13 @@ hashoff=$(sed -n 's/^set URBAN_HASHOFFSET=//p' "$src/slot.cfg")
 [ $((hashoff % 4096)) -eq 0 ] && [ "$hashoff" -gt 0 ] || fail "slot.cfg: the hash offset $hashoff is not a multiple of 4096"
 dev="${RAUC_SLOT_DEVICE:-}"
 if [ -z "$dev" ]; then
-  case "$slot" in A) dev=/dev/disk/by-partlabel/rootfs-a ;; B) dev=/dev/disk/by-partlabel/rootfs-b ;; esac
+  case "$slot" in A) dev=/dev/disk/urban/rootfs-a ;; B) dev=/dev/disk/urban/rootfs-b ;; esac
 fi
 [ -b "$dev" ] || fail "the slot device $dev is not there to check the written image"
+# The slot and the ESP are those of the disk this unit booted from (/dev/disk/urban/*, made by
+# etc/udev/rules.d/60-urban-bootdisk.rules), never a partition of the same name on another disk (a USB stick)
+want=$(readlink -e "/dev/disk/urban/rootfs-$(echo "$slot" | tr AB ab)") || fail "/dev/disk/urban/rootfs-$(echo "$slot" | tr AB ab) is missing: the boot disk's slot is not known"
+[ "$(readlink -e "$dev")" = "$want" ] || fail "the slot device $dev is not slot $slot of the boot disk ($want)"
 sync
 blockdev --flushbufs "$dev" 2>/dev/null || true
 # The tree's own superblock is not signed, and veritysetup takes the length of the data and the block sizes from it
@@ -79,6 +102,9 @@ veritysetup verify --hash-offset="$hashoff" --data-blocks="$((hashoff / 4096))" 
 
 esp=/boot/efi
 if ! mountpoint -q "$esp"; then mount "$esp" 2>/dev/null || fail "the ESP is not mounted at $esp"; fi
+espdev=$(readlink -e /dev/disk/urban/esp) || fail "/dev/disk/urban/esp is missing: the boot disk's ESP is not known"
+espsrc=$(findmnt -n -o SOURCE --mountpoint "$esp") || fail "nothing is mounted at $esp"
+[ "$(readlink -e "$espsrc")" = "$espdev" ] || fail "$esp is $espsrc, not the boot disk's ESP ($espdev): not writing boot files there"
 dir="$esp/EFI/URBAN"
 mkdir -p "$dir" || fail "cannot make $dir"
 

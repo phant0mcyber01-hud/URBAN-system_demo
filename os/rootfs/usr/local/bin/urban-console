@@ -100,9 +100,24 @@ esac
   printf "  health        %s\n" "$health"
   printf "  power         %s\n" "${power:-starting}"
   [ -z "$update" ] || printf "  update        %s\n" "$update"
-  case "$crypt" in
-    luks2-tpm2) echo "  data          encrypted - key sealed in this machine's TPM (a disk alone cannot be read)" ;;
-    plain) echo "  data          NOT encrypted - this machine has no TPM" ;;
+  # how the key is sealed, as urban-grow found it at this boot (/run/urban/data-seal; -sb-off: sealed to PCR 7 while
+  # Secure Boot is off, which any boot loader gives)
+  seal=$(cat /run/urban/data-seal 2>/dev/null)
+  case "$crypt:$seal" in
+    *:locked) echo "  data          DATA LOCKED - the TPM no longer matches this machine's Secure Boot state; type the recovery key" ;;
+    luks2-tpm2:pcr7) echo "  data          encrypted - key sealed in this machine's TPM, bound to its Secure Boot state (PCR 7)"
+                     echo "                recovery key: urban-recovery.enc on the ESP, opened only with the offline escrow key" ;;
+    luks2-tpm2:pcr7-sb-off) echo "  data          encrypted - sealed to PCR 7 while Secure Boot is OFF: protects nothing on this machine"
+                            echo "                until it is on (the recovery key will be asked once after turning it on)" ;;
+    luks2-tpm2:pcr7-resealed) echo "  data          encrypted - key sealed in this machine's TPM again: opened with the recovery key at this"
+                              echo "                boot and re-sealed to the current Secure Boot state (PCR 7)" ;;
+    luks2-tpm2:pcr7-resealed-sb-off) echo "  data          encrypted - opened with the recovery key at this boot and re-sealed to PCR 7"
+                                     echo "                while Secure Boot is OFF: protects nothing on this machine until it is on"
+                                     echo "                (the recovery key will be asked once after turning it on)" ;;
+    luks2-tpm2:recovery-only) echo "  data          encrypted - opened with the recovery key, NOT re-sealed (no TPM): the key is asked at every boot" ;;
+    luks2-tpm2:unbound) echo "  data          encrypted - key sealed in this machine's TPM, NOT bound to Secure Boot (older unit: write the image again)" ;;
+    luks2-tpm2:*) echo "  data          encrypted - key sealed in this machine's TPM (a disk alone cannot be read)" ;;
+    plain:*) echo "  data          NOT encrypted - this machine has no TPM" ;;
     *) echo "  data          checking..." ;;
   esac
   printf "  address       \\\\4\n"

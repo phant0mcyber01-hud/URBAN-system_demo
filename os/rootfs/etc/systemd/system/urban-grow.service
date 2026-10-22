@@ -1,16 +1,25 @@
 [Unit]
 Description=URBAN OS: the data partition - grown to the disk, encrypted with the TPM (before it is mounted)
 DefaultDependencies=no
-Requires=dev-disk-by\x2dpartlabel-urban\x2ddata.device
-After=dev-disk-by\x2dpartlabel-urban\x2ddata.device systemd-modules-load.service
-Before=systemd-fsck@dev-disk-by\x2dlabel-urban\x2ddata.service var-lib-urban.mount local-fs.target
+# the boot disk's urban-data partition (/dev/disk/urban/urban-data, etc/udev/rules.d/60-urban-bootdisk.rules), never a
+# partition of that name on another disk; the file system it gives is mounted as /dev/disk/urban/data-fs (fstab).
+# Waited for, not required: when the link never comes (its device job ends after its timeout) urban-grow still runs and
+# says on the screens why the boot stops at the data mount, which waits for data-fs with no time limit.
+Wants=dev-disk-urban-urban\x2ddata.device
+After=dev-disk-urban-urban\x2ddata.device systemd-modules-load.service
+Before=systemd-fsck@dev-disk-urban-data\x2dfs.service var-lib-urban.mount local-fs.target
+# the ESP: urban-grow writes the encrypted recovery key (urban-recovery.enc) there at first encryption, so neither its
+# fsck nor its mount may run meanwhile
+Before=systemd-fsck@dev-disk-urban-esp.service boot-efi.mount
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/bin/urban-grow
 StandardOutput=journal+console
-TimeoutStartSec=900
+# no time limit: a unit whose TPM no longer matches its Secure Boot state waits here for its recovery key as long as it
+# takes (the boot goes no further meanwhile); encrypting at first boot takes a minute or two
+TimeoutStartSec=infinity
 
 [Install]
 WantedBy=local-fs-pre.target

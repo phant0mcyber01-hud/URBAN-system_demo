@@ -110,4 +110,15 @@ if (/Защищённая загрузка \(Secure Boot\) не включена
 if (todo5 && /Secure Boot/.test(todo5[0]) && !/Secure Boot на (железе|мини-ПК)/.test(todo5[0]))
   fail("the «Не сделано» paragraph of CONTEXT.md still lists Secure Boot as not done");
 if (!context.includes("Защищённая загрузка (шаг 6)")) fail("CONTEXT.md does not record step 6 (Защищённая загрузка (шаг 6))");
+
+// step 7: PCR 7 seal with recovery, the boot-disk rule, the version floor; what stays open, said plainly
+for (const must of ["--tpm2-pcrs=7", "urban-recovery.enc", "os/recovery.mjs", "DATA LOCKED", "/dev/disk/urban/",
+  "check-pcr7.mjs", "check-bootdisk.mjs", "urban.release floor"])
+  if (!text.includes(must)) fail(`docs/edge-os.md never says ${JSON.stringify(must)} (step 7)`);
+if (/без привязки к PCR|не привязан к (состоянию Secure Boot|измерениям загрузки \(PCR\))/i.test(text))
+  fail("docs/edge-os.md still says the data key is not bound to PCRs");
+if (!/старый подписанный выпуск|старую подписанную версию/i.test(text) || !/измеряем\S* загрузк/i.test(text))
+  fail("docs/edge-os.md does not say that booting an old signed release with the disk in hand stays open (measured boot is later)");
+if (!/перемонтир/i.test(text)) fail("docs/edge-os.md does not say why the ESP is not made read-only (root can remount it)");
+if (!context.includes("(шаг 7)")) fail("CONTEXT.md does not record step 7");
 console.log("DOCS CHECK PASSED");

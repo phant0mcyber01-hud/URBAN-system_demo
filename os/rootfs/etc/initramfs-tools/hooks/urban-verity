@@ -1,7 +1,8 @@
 #!/bin/sh
 # initramfs-tools hook: what the signed boot chain needs in the initramfs to open the root slot as a dm-verity device
-# (scripts/local-top/urban-verity does the opening). Without veritysetup or the modules the image could not boot, so
-# a missing piece stops the build here instead of showing up on a unit.
+# (scripts/local-top/urban-verity does the opening): veritysetup and the modules, and blkid, which reads each
+# partition's GPT entry from the disk itself to find the slot by the partition GUID GRUB passes (urban.bootpart).
+# Without them the image could not boot, so a missing piece stops the build here instead of showing up on a unit.
 PREREQ=""
 prereqs() { echo "$PREREQ"; }
 case "$1" in
@@ -17,3 +18,9 @@ if [ ! -x /sbin/veritysetup ]; then
   exit 1
 fi
 copy_exec /sbin/veritysetup /sbin
+
+if [ ! -x /sbin/blkid ]; then
+  echo "urban-verity: /sbin/blkid is missing (package util-linux)" >&2
+  exit 1
+fi
+copy_exec /sbin/blkid /sbin || { echo "urban-verity: could not add blkid to the initramfs" >&2; exit 1; }

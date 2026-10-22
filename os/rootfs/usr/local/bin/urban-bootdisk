@@ -1,0 +1,77 @@
+#!/bin/sh
+# The disk this unit booted from, taken from the kernel's own state: the disk under the verified root. The initramfs
+# opened /dev/mapper/urban-root from the one partition carrying the GPT partition GUID that GRUB read from the disk it
+# booted from (urban.bootpart; initramfs-tools/scripts/local-top/urban-verity), so the partition under the root is that
+# partition and its parent is the boot disk. Neither a file a process could rewrite nor a by-label/by-partlabel link,
+# which any other disk with partitions of the same names can take over, decides anything here.
+#
+#   urban-bootdisk             prints the boot disk's kernel name (vda, nvme0n1, sda); exit 1 when there is no verified root
+#   urban-bootdisk root        prints the partition under the verified root (the booted slot: vda2, nvme0n1p3, ...)
+#   urban-bootdisk part NAME   exit 0 when the partition NAME (a kernel name) lies on the boot disk
+#   urban-bootdisk crypt NAME  exit 0 when the device-mapper device NAME (dm-N) is a LUKS volume opened from the boot
+#                              disk's partition named urban-data
+#
+# The udev rule etc/udev/rules.d/60-urban-bootdisk.rules makes /dev/disk/urban/* with it; urban-os-check checks them.
+# POSIX sh and shell built-ins only: udev runs it for every partition event.
+set -u
+
+parent() {  # the kernel name of the disk that partition $1 lies on
+  [ -f "/sys/class/block/$1/partition" ] || return 1
+  p=$(cd -P "/sys/class/block/$1/.." 2>/dev/null && pwd -P) || return 1
+  [ -n "${p##*/}" ] || return 1
+  echo "${p##*/}"
+}
+
+only_slave() {  # the one device under the device-mapper device $1
+  set -- "/sys/class/block/$1/slaves/"*
+  [ "$#" -eq 1 ] && [ -e "$1" ] || return 1
+  echo "${1##*/}"
+}
+
+first_line() {  # the first line of file $1
+  l=""
+  [ -r "$1" ] || return 1
+  IFS= read -r l < "$1" || [ -n "$l" ] || return 1
+  echo "$l"
+}
+
+root_part() {  # the partition under /dev/mapper/urban-root
+  for d in /sys/class/block/dm-*; do
+    [ "$(first_line "$d/dm/name" 2>/dev/null)" = urban-root ] || continue
+    only_slave "${d##*/}"
+    return
+  done
+  return 1
+}
+
+rootpart=$(root_part) || exit 1
+disk=$(parent "$rootpart") || exit 1
+
+case "${1:-}" in
+  "")
+    echo "$disk" ;;
+  root)
+    echo "$rootpart" ;;
+  part)
+    [ -n "${2:-}" ] && [ "$(parent "$2")" = "$disk" ] ;;
+  crypt)
+    [ -n "${2:-}" ] || exit 1
+    case "$(first_line "/sys/class/block/$2/dm/uuid" 2>/dev/null)" in CRYPT-LUKS2-*) ;; *) exit 1 ;; esac
+    s=$(only_slave "$2") || exit 1
+    [ "$(parent "$s")" = "$disk" ] || exit 1
+    # the partition's GPT name: the kernel's own copy, or, when the kernel has none (a partition added back by partx
+    # carries no name), the one udev's blkid read from the same GPT of the boot disk (its database, by device number)
+    named=1
+    while IFS= read -r l; do
+      [ "$l" = PARTNAME=urban-data ] && named=0
+    done < "/sys/class/block/$s/uevent"
+    if [ "$named" = 1 ] && devno=$(first_line "/sys/class/block/$s/dev") && [ -r "/run/udev/data/b$devno" ]; then
+      while IFS= read -r l; do
+        [ "$l" = E:ID_PART_ENTRY_NAME=urban-data ] && named=0
+      done < "/run/udev/data/b$devno"
+    fi
+    exit "$named" ;;
+  *)
+    sed -n '8,12p' "$0" >&2
+    exit 2 ;;
+esac

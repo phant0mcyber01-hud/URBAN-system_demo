@@ -1,31 +1,102 @@
 #!/bin/bash
 # The data partition, before it is mounted (every boot, urban-grow.service):
 #   1. first boot on a disk bigger than the image: the partition (the last one) takes the rest of the disk;
-#   2. with a TPM: at first boot the partition becomes LUKS2 and its key is sealed in this machine's TPM;
-#      every boot after that the TPM unlocks it. A disk taken out of its machine cannot be read. Whatever the
-#      installer put on the partition before (maintenance keys) is kept.
+#   2. with a TPM: at first boot the partition becomes LUKS2 and its key is sealed in this machine's TPM, bound to PCR 7:
+#      the firmware's Secure Boot state (on or off, its keys PK, KEK, db, dbx, and the db key that let our boot loader
+#      run). Every boot after that the TPM unlocks it, as long as that state is the same. At the same time a recovery
+#      key is made (systemd's: 256 bits, 8 groups of 8 modhex letters that type the same on any keyboard layout), given
+#      its own LUKS key slot, and kept nowhere in clear: it is encrypted to the owner's escrow key, whose public half is
+#      built into the image (/usr/share/urban/recovery-escrow.pem, RSA-4096, OAEP with SHA-256), and written to the ESP as
+#      urban-recovery.enc. The private half never leaves the owner (node os/recovery.mjs decrypt urban-recovery.enc).
+#      Whatever the installer put on the partition before (maintenance keys) is kept; a file system that does not even
+#      mount read-only is not encrypted (it stays plain, and its fsck runs as at every boot). A finished volume is marked
+#      in its LUKS2 header: labelled urban-data-new from luksFormat on, urban-data-ready once its file system and data are in.
+#      Only a volume labelled urban-data-new is ever redone or formatted; any other volume (finished, or without a label)
+#      that lacks its TPM key or its file system is opened with the recovery key or reported, never erased.
+#      With Secure Boot off the key is sealed to PCR 7 all the same. PCR 7 is then the same for any boot loader, so the
+#      seal protects nothing on this machine, and the screen says so; turning Secure Boot on later asks for the recovery
+#      key once and seals to the protected state. (Not sealing until Secure Boot is on would mean binding a TPM slot later
+#      without a passphrase, which systemd 252 cannot do.)
 #      Without a TPM the partition stays plain, and the screen and the self-check say so.
-# The file system is then mounted by its label (fstab: LABEL=urban-data): the plain partition or the opened
-# LUKS volume, whichever this machine has.
+#   3. the TPM refuses (Secure Boot turned off, its keys changed, a firmware or dbx update): nothing is wiped or formatted.
+#      The unit says DATA LOCKED on its screen and its serial console and asks there for the recovery key, without a time
+#      limit; the boot goes no further meanwhile (this service runs before the data is mounted, the mount waits with no
+#      device timeout), so none of the unit's services, its network or SSH start. The right key opens the data; the TPM's
+#      key slot is then sealed again to the PCR 7 of this boot (the old one wiped, the recovery slot kept) and the boot
+#      goes on. A wrong key is said and asked for again, for ever: the unit never locks itself out. The key is asked only
+#      through systemd's password agent, which never shows it.
+#   4. the data file system will not appear without a person (no data partition on the boot disk, no boot disk to take it
+#      from, a partition of an unknown kind, a LUKS header that cannot be read, a damaged file system on the opened volume):
+#      nothing is changed, the screens say BOOT STOPPED, why and what to do, and the boot stops at the data mount.
+# The file system is mounted from /dev/disk/urban/data-fs (fstab), a udev link (etc/udev/rules.d/60-urban-bootdisk.rules)
+# to the boot disk's plain partition or to the LUKS volume opened from it, whichever this machine has.
 #
 # Growing is done unmounted on purpose: rewriting the partition table under a mounted partition makes udev
 # re-read it, systemd sees the partition vanish for a moment and unmounts it under the running system. So
 # nothing is written when there is nothing to grow, the table is written under the disk's lock, and udev is
 # let settle before anything else touches the partition.
 #
-# The TPM key is bound to the chip only, not to the boot measurements (no PCRs): a firmware or system update
-# must never lock the unit out of its own data; the stolen-disk case is what this protects against.
+# Volumes encrypted by an image before step 7 (TPM key bound to no PCR, no recovery key) are not converted: such a unit
+# takes no update to this system (the bundle's install-check refuses it, nothing written) and is written again.
 set -u
-part=$(readlink -f /dev/disk/by-partlabel/urban-data) || exit 0
-name=${part##*/}
+DATA_LINK=/dev/disk/urban/urban-data  # the boot disk's data partition (never one of that name on another disk)
+ESP_LINK=/dev/disk/urban/esp          # the boot disk's ESP: urban-recovery.enc lives there
+FS_LINK=/dev/disk/urban/data-fs       # what fstab mounts: the plain partition or the opened volume (udev)
 MAPPED=/dev/mapper/urban-data
+NEW=urban-data-new                    # the LUKS2 label of a volume being made: nothing on it yet, the one that may be redone
+READY=urban-data-ready                # the LUKS2 label of a finished volume: its file system was made and may hold data
+ESCROW=/usr/share/urban/recovery-escrow.pem
+RECOVERY_FILE=urban-recovery.enc
+ESP_MNT=/run/urban-esp
+SBVAR=/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c
+MODHEX='[cbdefghijklnrtuv]'
 CRYPTSETUP=/usr/lib/systemd/systemd-cryptsetup  # not on PATH: systemd's own helper, the one crypttab would use
 [ -x "$CRYPTSETUP" ] || CRYPTSETUP=/lib/systemd/systemd-cryptsetup
+RULE="  =============================================================================="
 
 say() { echo "URBAN-DATA $*"; }
+seal_state() { install -d -m 755 /run/urban; echo "$1" > /run/urban/data-seal; }  # for the screen (urban-console)
+
+to_screens() {  # stdin -> every console the kernel writes to: the monitor's (tty0) and the serial line (ttyS0)
+  local text t shown=""
+  text=$(cat)
+  for t in $(cat /sys/class/tty/console/active 2>/dev/null); do
+    [ -c "/dev/$t" ] || continue
+    timeout 10 bash -c 'printf "%s\n" "$1" > "$2"' _ "$text" "/dev/$t" 2>/dev/null && shown="$shown $t"
+  done
+  [ -n "$shown" ] || { timeout 10 bash -c 'printf "%s\n" "$1" > /dev/console' _ "$text" 2>/dev/null && shown=" console"; }
+  SHOWN=${shown# }
+}
+
+# The data file system will not appear without a person: fstab waits for it with no time limit, so the boot stops at
+# that mount. Said on the screens the way the lock notice is, and in the journal; then this script ends, changing
+# nothing. $1: what stops the boot, $2: what to do.
+stopped() { notice "BOOT STOPPED" "$@"; }
+notice() {  # $1: the heading, $2: why, $3: what to do
+  local text
+  text=$(echo; echo "$RULE"; printf '%s\n' "$1: $2" "$3" | fold -s -w 76 | sed 's/^/  /; s/ *$//'; echo "$RULE"; echo)
+  SHOWN=""
+  to_screens <<<"$text"  # not through a pipe: to_screens sets SHOWN in this shell
+  say "$1: $2 $3"
+  say "the notice is on the screens: ${SHOWN:-none}"
+  exit 0
+}
+
+# the boot disk's data partition. The service waits for its link without requiring it, so that it runs and says why
+# when the link never comes; udev is given one more settle first.
+part=$(readlink -e "$DATA_LINK") || { udevadm settle; part=$(readlink -e "$DATA_LINK"); }
+if [ -z "$part" ]; then
+  if bootdisk=$(/usr/local/bin/urban-bootdisk 2>/dev/null); then
+    stopped "the boot disk $bootdisk has no data partition (no GPT partition named urban-data was found on it)." \
+            "Check the disk; writing the image again makes a new, empty one."
+  fi
+  stopped "the boot disk is not known (no verified root to take it from), so no partition can be told from another disk's." \
+          "Write the image again; if it stays so, send the serial console's log."
+fi
+name=${part##*/}
 
 grow() {
-  local disk num end total spare_mb out
+  local disk num end total spare_mb out sectors
   disk=/dev/$(lsblk -ndo PKNAME "$part")
   num=$(cat "/sys/class/block/$name/partition")
   end=$(( $(cat "/sys/class/block/$name/start") + $(cat "/sys/class/block/$name/size") ))
@@ -36,7 +107,11 @@ grow() {
   fi
   out=$(sfdisk --lock --no-reread --force --relocate gpt-bak-std "$disk" 2>&1) || { say "could not grow: relocate: $out"; return 0; }
   out=$(echo ", +" | sfdisk --lock --no-reread --force -N "$num" "$disk" 2>&1) || { say "could not grow: sfdisk: $out"; return 0; }
-  out=$(partx -u -n "$num" "$disk" 2>&1) || { say "could not grow: partx: $out"; return 0; }
+  # the kernel is told the new size in place (resizepart: BLKPG resize), with the size from the disk's own table. Not
+  # partx -u: it removes the partition from the kernel and adds it again without its GPT name (PARTNAME), and the boot
+  # disk's udev rule needs that name for the data volume's link (urban-bootdisk crypt)
+  out=$(partx -g -o SECTORS -n "$num" "$disk" 2>&1) && sectors=$(echo "$out" | tr -d ' ') \
+    && out=$(resizepart "$disk" "$num" "$sectors" 2>&1) || { say "could not grow: resizepart: $out"; return 0; }
   udevadm settle
   e2fsck -f -p "$part" >/dev/null 2>&1; [ $? -le 1 ] || { say "could not grow: e2fsck found errors"; return 0; }
   out=$(resize2fs "$part" 2>&1) || { say "could not grow: resize2fs: $out"; return 0; }
@@ -53,9 +128,46 @@ have_tpm() {
   return 1
 }
 
+secure_boot_on() { [ -r "$SBVAR" ] && [ "$(tail -c1 "$SBVAR" 2>/dev/null | od -An -tu1 | tr -d ' ')" = 1 ]; }
+
+# One line per LUKS2 token of the data partition: <type> <key slots> <PCRs> (comma-separated, - for none), e.g.
+# "systemd-tpm2 1 7" and "systemd-recovery 2 -". From the token's own JSON (the field names of luksDump's text vary with
+# the systemd version), via luksDump --dump-json-metadata or, failing that, token export one by one.
+tokens() {
+  python3 -I - "$part" <<'PY'
+import json, re, subprocess, sys
+dev = sys.argv[1]
+run = lambda *a: subprocess.run(["cryptsetup", *a], capture_output=True, text=True)
+tokens = None
+r = run("luksDump", "--dump-json-metadata", dev)
+if r.returncode == 0:
+    try:
+        tokens = list(json.loads(r.stdout).get("tokens", {}).values())
+    except ValueError:
+        tokens = None
+if tokens is None:
+    dump = run("luksDump", dev).stdout
+    section = re.split(r"^\S", dump.split("\nTokens:", 1)[1], maxsplit=1, flags=re.M)[0] if "\nTokens:" in dump else ""
+    tokens = []
+    for tid in re.findall(r"^\s+(\d+): \S+", section, re.M):
+        e = run("token", "export", "--token-id", tid, dev)
+        if e.returncode == 0:
+            tokens.append(json.loads(e.stdout))
+for t in tokens:
+    print(t.get("type", "?"), ",".join(map(str, t.get("keyslots", []))) or "-",
+          ",".join(map(str, t.get("tpm2-pcrs", []))) or "-")
+PY
+}
+has_token() { tokens | awk -v t="$1" '$1 == t { f = 1 } END { exit !f }'; }
+
+TPM_SAID=""
 unlock() {
   local out i
-  have_tpm 20  # the TPM's device node may come a little after the disk's
+  if ! have_tpm 20; then  # the TPM's device node may come a little after the disk's
+    TPM_SAID="no TPM on this machine now (switched off in the firmware?)"
+    say "the TPM did not release the key ($TPM_SAID)"
+    return 1
+  fi
   for i in 1 2 3; do
     if out=$("$CRYPTSETUP" attach urban-data "$part" - tpm2-device=auto,headless=true 2>&1); then
       udevadm settle
@@ -64,8 +176,93 @@ unlock() {
     fi
     sleep 2
   done
-  say "LOCKED: the TPM did not release the key ($(echo "$out" | tail -n 1))"  # the mount fails; the self-check says so
+  # for the screen, a line about the TPM itself: systemd-cryptsetup's last word is only what headless=true makes it say
+  # once the TPM failed ("Password querying disabled via 'headless' option.")
+  TPM_SAID=$(echo "$out" | grep -iE 'tpm|pcr|policy' | tail -n 1)
+  [ -n "$TPM_SAID" ] || TPM_SAID=$(echo "$out" | tail -n 1)
+  say "the TPM did not release the key ($TPM_SAID)"
   return 1
+}
+
+# ---- the ESP of the boot disk, mounted here for a moment (fstab mounts it at /boot/efi only after this service; the
+# service is ordered before that mount and its fsck, so nothing else has it open meanwhile)
+esp_dev() {  # the ESP's device, given udev up to half a minute to make its link at first boot
+  local esp i
+  for i in $(seq 1 30); do
+    esp=$(readlink -e "$ESP_LINK") && [ -b "$esp" ] && { echo "$esp"; return 0; }
+    udevadm settle; sleep 1
+  done
+  return 1
+}
+esp_mount() {  # ro|rw
+  local esp
+  esp=$(esp_dev) || { say "no ESP on the boot disk ($ESP_LINK is missing)"; return 1; }
+  mkdir -p "$ESP_MNT"
+  mountpoint -q "$ESP_MNT" && umount "$ESP_MNT"
+  mount -t vfat -o "$1,umask=0077,nodev,nosuid,noexec" "$esp" "$ESP_MNT"
+}
+esp_umount() { umount "$ESP_MNT" 2>/dev/null; }
+
+escrow_fpr() {  # sha256 of the escrow public key (DER), as os/recovery.sh prints it; nothing when it cannot be read
+  local der
+  der=$(openssl pkey -pubin -in "$ESCROW" -outform DER 2>/dev/null | base64 -w0)
+  [ -n "$der" ] || return 1
+  printf '%s' "$der" | base64 -d | sha256sum | cut -d' ' -f1
+}
+
+ESCROWED=0
+# $1: the recovery key. Encrypted to the escrow key and written to the ESP as urban-recovery.enc; the key itself goes from
+# this script's memory into openssl through a pipe and is never written anywhere. The file is read back before it counts.
+escrow_write() {
+  local ct=/run/urban-recovery.ct fpr uuid unit ok=0
+  [ -s "$ESCROW" ] || { say "this image has no escrow key ($ESCROW)"; return 1; }
+  fpr=$(escrow_fpr)
+  [ ${#fpr} = 64 ] || { say "the escrow key $ESCROW cannot be read"; return 1; }
+  uuid=$(cryptsetup luksUUID "$part") || return 1
+  rm -f "$ct"
+  printf 'URBAN-RECOVERY-KEY v1 volume=%s key=%s\n' "$uuid" "$1" \
+    | openssl pkeyutl -encrypt -pubin -inkey "$ESCROW" -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 \
+        -pkeyopt rsa_mgf1_md:sha256 -out "$ct" 2>/dev/null
+  [ "$(stat -c %s "$ct" 2>/dev/null)" = 512 ] || { say "the recovery key could not be encrypted to the escrow key"; rm -f "$ct"; return 1; }
+  esp_mount rw || { rm -f "$ct"; return 1; }
+  unit=$(sed -n 's/^UNIT=//p' "$ESP_MNT/urban-unit.txt" 2>/dev/null | head -n 1 | tr -cd 'A-Za-z0-9._-' | head -c 64)
+  if {
+       echo "URBAN recovery key of a unit's data partition, encrypted to the owner's escrow key (RSA-4096, OAEP SHA-256)."
+       echo "Only the offline escrow key opens it: node os/recovery.mjs decrypt urban-recovery.enc"
+       echo "unit: ${unit:-unknown}"
+       echo "volume: $uuid"
+       echo "escrow-key: sha256:$fpr"
+       echo "made: $(date -u +%Y-%m-%dT%H:%M:%SZ) (the unit's clock)"
+       echo "-----BEGIN URBAN RECOVERY KEY-----"
+       base64 -w 64 "$ct"
+       echo "-----END URBAN RECOVERY KEY-----"
+     } > "$ESP_MNT/$RECOVERY_FILE.tmp" && sync && mv -f "$ESP_MNT/$RECOVERY_FILE.tmp" "$ESP_MNT/$RECOVERY_FILE" && sync \
+     && sed -n "/^-----BEGIN URBAN RECOVERY KEY-----\$/,/^-----END URBAN RECOVERY KEY-----\$/p" "$ESP_MNT/$RECOVERY_FILE" \
+          | sed '1d;$d' | base64 -d 2>/dev/null | cmp -s - "$ct"; then
+    ok=1
+  fi
+  [ "$ok" = 1 ] || rm -f "$ESP_MNT/$RECOVERY_FILE"  # a file that does not read back is no recovery key
+  rm -f "$ESP_MNT/$RECOVERY_FILE.tmp" "$ct"
+  esp_umount || ok=0
+  [ "$ok" = 1 ] || { say "the encrypted recovery key could not be written to the ESP"; return 1; }
+  ESCROWED=1
+  say "recovery key encrypted to escrow key sha256:${fpr:0:16}... and kept on the ESP as $RECOVERY_FILE (volume $uuid)"
+}
+
+RK=""
+# $1: a passphrase of the volume. Enrols a recovery key in a slot of its own and keeps it in RK. systemd-cryptenroll prints
+# the key alone on stdout (its explanations go to stderr, kept in /run for the error message only and removed). No
+# colours: with them systemd 252 also draws the key as a QR code.
+new_recovery() {
+  local out err=/run/urban-data.rk.err
+  RK=""
+  if ! out=$(NO_COLOR=1 SYSTEMD_COLORS=0 PASSWORD="$1" systemd-cryptenroll --recovery-key "$part" 2>"$err"); then
+    say "the recovery key could not be enrolled: $(tail -n 1 "$err")"; rm -f "$err"; return 1
+  fi
+  rm -f "$err"
+  RK=$(printf '%s\n' "$out" | grep -E "^$MODHEX{8}(-$MODHEX{8}){7}\$" | head -n 1)
+  out=""
+  [ -n "$RK" ] || { say "systemd-cryptenroll printed no recovery key"; return 1; }
 }
 
 undo() {
@@ -78,35 +275,65 @@ undo() {
     tar -C /run/urban-data-mnt -xf /run/urban-data-keep.tar; umount /run/urban-data-mnt
   fi
   rm -f /run/urban-data-keep.tar /run/urban-data.key
+  RK=""
+  if [ "$ESCROWED" = 1 ] && esp_mount rw; then  # the key of a volume that is gone
+    rm -f "$ESP_MNT/$RECOVERY_FILE"; esp_umount; ESCROWED=0
+  fi
   udevadm settle
   return 1
 }
 
+SB_OFF="sealed to PCR 7 while Secure Boot is OFF: protects nothing on this machine until it is on (the recovery key will be asked once after turning it on)"
+# $1: pcr7 or pcr7-resealed, the state of a volume this boot's PCR 7 opens. With Secure Boot off that PCR 7 is the one any
+# boot loader gives: the seal keeps a disk taken out closed, and nothing on this machine. It is kept all the same (turning
+# Secure Boot on asks for the recovery key once, then seals to the protected state); the screen and the journal say so.
+pcr7_state() {
+  if secure_boot_on; then
+    seal_state "$1"
+  else
+    seal_state "$1-sb-off"
+    say "$SB_OFF"
+  fi
+}
+
 encrypt() {
   # what is on the plain partition now (the installer's maintenance keys, nothing else yet) comes along
-  local keep=/run/urban-data-keep.tar key=/run/urban-data.key out
-  for tool in "$CRYPTSETUP" /usr/bin/systemd-cryptenroll /usr/sbin/cryptsetup; do
+  local keep=/run/urban-data-keep.tar key=/run/urban-data.key out tool
+  for tool in "$CRYPTSETUP" /usr/bin/systemd-cryptenroll /usr/sbin/cryptsetup /usr/bin/openssl /usr/bin/python3; do
     [ -x "$tool" ] || { say "could not encrypt: $tool is missing"; return 1; }
   done
+  # no escrow key, no ESP: no recovery key could be kept, and a key sealed to PCR 7 without one would lose the data at the
+  # first firmware update. The partition stays plain (and the screen says so) rather than that.
+  [ -s "$ESCROW" ] || { say "could not encrypt: this image has no recovery escrow key ($ESCROW)"; return 1; }
+  esp_dev >/dev/null || { say "could not encrypt: no ESP on the boot disk to keep the recovery key"; return 1; }
   mkdir -p /run/urban-data-mnt
-  if mount -o ro "$part" /run/urban-data-mnt; then
-    if [ -e /run/urban-data-mnt/etc/unit.conf ]; then  # already in use: never rewritten in place (a power cut
-      umount /run/urban-data-mnt                         # then would lose a working machine's keys and data)
-      say "plain: this machine's data is already in use; to encrypt it, write the image again with the TPM on"
-      return 0
-    fi
-    if ! tar -C /run/urban-data-mnt -cf "$keep" .; then
-      umount /run/urban-data-mnt; rm -f "$keep"
-      say "could not encrypt: the data could not be copied aside; the partition stays plain"
-      return 1
-    fi
-    umount /run/urban-data-mnt
-  else
-    : > "$keep"
+  if ! mount -o ro "$part" /run/urban-data-mnt; then
+    # a file system that does not even mount read-only may still hold a machine's data: never formatted over. It stays
+    # plain, and its fsck (fstab) runs as at every boot
+    say "plain: the data partition's file system does not mount (read-only), so it is not encrypted; its check (fsck) runs as at every boot"
+    seal_state plain
+    return 0
   fi
+  if [ -e /run/urban-data-mnt/etc/unit.conf ]; then  # already in use: never rewritten in place (a power cut
+    umount /run/urban-data-mnt                         # then would lose a working machine's keys and data)
+    say "plain: this machine's data is already in use; to encrypt it, write the image again with the TPM on"
+    seal_state plain
+    return 0
+  fi
+  if ! tar -C /run/urban-data-mnt -cf "$keep" .; then
+    umount /run/urban-data-mnt; rm -f "$keep"
+    say "could not encrypt: the data could not be copied aside; the partition stays plain"
+    return 1
+  fi
+  umount /run/urban-data-mnt
   ( umask 077; head -c 48 /dev/urandom | base64 -w0 > "$key" )  # a one-time passphrase, gone after this boot
-  out=$(cryptsetup luksFormat --type luks2 --batch-mode --key-file "$key" "$part" 2>&1) || undo "luksFormat: $out" || return 1
-  out=$(PASSWORD="$(cat "$key")" systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs= "$part" 2>&1) || undo "TPM enrolment: $out" || return 1
+  out=$(cryptsetup luksFormat --type luks2 --label "$NEW" --batch-mode --key-file "$key" "$part" 2>&1) || undo "luksFormat: $out" || return 1
+  # the order keeps a power cut harmless: the recovery key is escrowed before the TPM key exists, so a volume with a TPM
+  # key always has its recovery key on the ESP (finish, below, redoes a volume without a TPM key from scratch)
+  new_recovery "$(cat "$key")" || undo "no recovery key" || return 1
+  escrow_write "$RK" || undo "the recovery key could not be kept on the ESP" || return 1
+  RK=""
+  out=$(PASSWORD="$(cat "$key")" systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7 "$part" 2>&1) || undo "TPM enrolment: $out" || return 1
   out=$(PASSWORD="$(cat "$key")" systemd-cryptenroll --wipe-slot=password "$part" 2>&1) || undo "wiping the passphrase: $out" || return 1
   rm -f "$key"
   unlock || undo "the TPM did not unlock what it had just sealed" || return 1
@@ -118,41 +345,242 @@ encrypt() {
     fi
     umount /run/urban-data-mnt
   fi
+  # the mark of a finished volume, in place of urban-data-new: from here on a missing TPM key or file system is never
+  # redone or made over it (finish and data_fs, below)
+  out=$(cryptsetup config --label "$READY" "$part" 2>&1) || undo "marking the volume finished: $out" || return 1
   rm -f "$keep"
   udevadm settle
-  say "the partition is now LUKS2 with its key sealed in this machine's TPM"
+  say "the partition is now LUKS2 with its key sealed in this machine's TPM, bound to PCR 7 (the Secure Boot state);" \
+      "its recovery key is on the ESP, encrypted to the escrow key ($RECOVERY_FILE)"
+  pcr7_state pcr7
 }
 
-# A first-boot encryption cut short (power, timeout) leaves a LUKS volume that never held data: finish it rather
-# than leave a unit that cannot mount its data partition. Only a volume without a TPM token, or one that opens
-# but has no file system yet, counts as unfinished; a sealed volume the TPM refuses stays LOCKED (never wiped).
+# ---- the TPM refused: the unit is locked until the recovery key is typed on its console
+
+LOCKED_LINE="DATA LOCKED: the TPM no longer matches this machine's Secure Boot state (Secure Boot turned off, its keys changed, or a firmware update). The data stays closed. Recovery: decrypt urban-recovery.enc from the ESP with the offline escrow key (node os/recovery.mjs decrypt urban-recovery.enc) and type the key here."
+LOCKED_SB_OFF="Secure Boot is OFF on this machine. Turn it on in the firmware settings and restart before typing the key, unless it is meant to stay off: the key is re-sealed to the state of this boot."
+
+locked_text() {  # $1: yes when the volume has a recovery key slot
+  local unit="" file="not found on the ESP: use the copy kept at installation" uuid fpr
+  uuid=$(cryptsetup luksUUID "$part" 2>/dev/null)
+  fpr=$(escrow_fpr)
+  if esp_mount ro >/dev/null 2>&1; then  # (this function's output is the screen's text)
+    unit=$(sed -n 's/^UNIT=//p' "$ESP_MNT/urban-unit.txt" 2>/dev/null | head -n 1 | tr -cd 'A-Za-z0-9._-' | head -c 64)
+    [ -s "$ESP_MNT/$RECOVERY_FILE" ] && file="on the ESP of this disk"
+    esp_umount
+  fi
+  echo
+  echo "$RULE"
+  echo "  DATA LOCKED: the TPM no longer matches this machine's Secure Boot state"
+  echo "  (Secure Boot turned off, its keys changed, or a firmware update)."
+  echo "  The data stays closed."
+  if [ "$1" = yes ]; then
+    echo "  Recovery: decrypt urban-recovery.enc from the ESP with the offline escrow key"
+    echo "  (node os/recovery.mjs decrypt urban-recovery.enc) and type the key here."
+  else
+    echo "  This partition has NO recovery key (it was encrypted by an older URBAN image):"
+    echo "  only the TPM state it was sealed to can open it. Nothing is erased."
+  fi
+  if ! secure_boot_on; then  # the key is re-sealed to the state it is typed in: an accident should not become that state
+    echo
+    echo "  Secure Boot is OFF on this machine. Turn it on in the firmware settings and"
+    echo "  restart before typing the key, unless it is meant to stay off: the key is"
+    echo "  re-sealed to the state of this boot."
+  fi
+  echo
+  echo "  unit ${unit:-unknown}, data volume ${uuid:-?}"
+  echo "  urban-recovery.enc $file; escrow key sha256:${fpr:0:16}..."
+  echo "  the TPM said: ${TPM_SAID:-nothing}"
+  echo "$RULE"
+  echo
+}
+
+# $1: the prompt. Only through systemd's password agent, on every console: it never shows what is typed (a star per key,
+# or nothing after TAB). Its console agent is started first (harmless when it runs already: this service may come before
+# its path unit). Cancelled there (Esc, Ctrl-C, Ctrl-D): fails, and recover asks again. Never a plain read of the
+# console: its terminal would echo the key in clear.
+ask() {
+  systemctl --no-block start systemd-ask-password-console.path >/dev/null 2>&1
+  systemd-ask-password --no-tty --timeout=0 --id=urban-data:recovery "$1"
+}
+
+normal() {  # what was typed -> the key as enrolled: no blanks, lower case, dashes after every 8 letters
+  local k bare
+  k=$(printf '%s' "$1" | tr -d ' \t\r\n' | tr 'A-Z' 'a-z')
+  bare=${k//-/}
+  if [[ "$bare" =~ ^$MODHEX{64}$ ]]; then
+    printf '%s-%s-%s-%s-%s-%s-%s-%s' "${bare:0:8}" "${bare:8:8}" "${bare:16:8}" "${bare:24:8}" \
+      "${bare:32:8}" "${bare:40:8}" "${bare:48:8}" "${bare:56:8}"
+  else
+    printf '%s' "$k"
+  fi
+}
+
+reseal() {  # $1: the recovery key that opened the volume. A new TPM key slot for this boot's PCR 7; the old one wiped
+  local out have=0
+  if ! have_tpm 20; then
+    seal_state recovery-only
+    say "opened with the recovery key, but there is no TPM now: not re-sealed, the recovery key will be asked for at the next boot"
+  elif out=$(PASSWORD="$1" systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7 --wipe-slot=tpm2 "$part" 2>&1); then
+    say "re-sealed to this machine's current Secure Boot state"
+    pcr7_state pcr7-resealed
+  else
+    seal_state recovery-only
+    say "could not re-seal to this machine's current Secure Boot state ($(echo "$out" | tail -n 1)):" \
+        "the recovery key will be asked for at the next boot"
+  fi
+  # the recovery slot is kept, so the encrypted key on the ESP stays right; written again only if it is gone
+  if esp_mount ro; then
+    [ -s "$ESP_MNT/$RECOVERY_FILE" ] && have=1
+    esp_umount
+  fi
+  if [ "$have" = 0 ] && has_token systemd-recovery; then
+    escrow_write "$1" && say "$RECOVERY_FILE was missing on the ESP: written again"
+  fi
+}
+
+recover() {
+  local typed rk n=0 have_rk=no out rc text note=""
+  has_token systemd-recovery && have_rk=yes
+  seal_state locked
+  SHOWN=""
+  text=$(locked_text "$have_rk")
+  to_screens <<<"$text"  # not through a pipe: to_screens sets SHOWN in this shell
+  say "LOCKED: ${LOCKED_LINE#DATA LOCKED: }"
+  secure_boot_on || say "$LOCKED_SB_OFF"
+  say "the lock notice is on the screens: ${SHOWN:-none}"
+  while :; do
+    # after a wrong key or a cancelled question the notice is shown again with what happened, so the steps to recover
+    # have not scrolled off a 25-line monitor
+    [ -z "$note" ] || to_screens <<<"$text"$'\n'"$note"
+    note=""
+    say "waiting for the recovery key on the console"
+    if ! typed=$(ask "URBAN data partition - recovery key:"); then
+      note="  The question was cancelled; it is asked again."
+      sleep 3; continue
+    fi
+    rk=$(normal "$typed"); typed=""
+    [ -n "$rk" ] || continue
+    out=$(printf '%s' "$rk" | cryptsetup open --type luks2 --key-file=- "$part" urban-data 2>&1); rc=$?
+    if [ "$rc" = 0 ]; then
+      udevadm settle
+      say "unlocked with the recovery key"
+      break
+    fi
+    n=$((n + 1))
+    if [ "$rc" = 2 ]; then
+      note="  That is not the recovery key of this data partition. Type it again."
+      say "the key typed is not the recovery key of this data partition (attempt $n): asking again"
+    else
+      note="  The data partition could not be opened: $(echo "$out" | tail -n 1)"
+      say "could not open the data partition with the key typed ($(echo "$out" | tail -n 1)): asking again"
+    fi
+    sleep 2
+  done
+  reseal "$rk"
+  rk=""
+}
+
+# The file system on the opened volume ($1: the volume's LUKS2 label). Made only on a volume labelled urban-data-new
+# (its first encryption was cut before the file system was made: nothing was ever written there), and only when blkid
+# positively finds nothing (exit 2; not on a read error, 4, or an ambiguous probe, 8). Any other volume without a file
+# system is damaged and never formatted over: the boot stops and says how to repair it. A volume labelled urban-data-new
+# that has its file system (cut right before the mark) is marked finished.
+data_fs() {
+  local fstype rc out
+  fstype=$(blkid -p -o value -s TYPE "$MAPPED" 2>/dev/null); rc=$?
+  if [ "$rc" = 0 ] && [ -n "$fstype" ]; then
+    :
+  elif [ "$1" = "$NEW" ] && [ "$rc" = 2 ]; then
+    say "unfinished encryption found (no file system yet): making one"
+    out=$(mkfs.ext4 -q -L urban-data "$MAPPED" 2>&1) || { say "could not make the file system: $out"; return; }
+    udevadm settle
+  else
+    stopped "the data volume opens, but no file system is found on it (blkid exit $rc): it is damaged. Nothing is formatted." \
+            "Repair it on another Linux machine: take the disk out, open the volume with its recovery key (node os/recovery.mjs decrypt urban-recovery.enc), run e2fsck -b 32768 on it, then put the disk back."
+  fi
+  [ "$1" != "$NEW" ] || cryptsetup config --label "$READY" "$part" >/dev/null 2>&1 \
+    || say "the volume could not be marked finished ($READY): tried again at the next boot"
+}
+
+# A first-boot encryption cut short (power, timeout) leaves a LUKS volume that never held data: finish it rather than leave
+# a unit that cannot mount its data partition. Only a volume labelled urban-data-new counts as unfinished: redone from
+# scratch when it has no TPM key yet, given its file system when it opens without one. Any other volume is never wiped
+# or formatted: one the TPM refuses, or one without a TPM key (removed by hand, an enrolment that failed), is LOCKED and
+# waits for its recovery key (which seals it to the TPM again); one without a file system is damaged.
 finish() {
-  if ! cryptsetup luksDump "$part" 2>/dev/null | grep -q 'systemd-tpm2'; then
-    say "unfinished encryption found (no TPM key): starting it again on an empty partition"
+  local pcrs dump label
+  # the one decision here that erases: taken from luksDump's own text (the token type is printed whatever the systemd
+  # version), and only when luksDump read the header; a header it cannot read is left alone
+  if ! dump=$(cryptsetup luksDump "$part" 2>&1); then
+    stopped "the LUKS header of the data partition $part cannot be read ($(echo "$dump" | tail -n 1)). Nothing is erased." \
+            "Check the disk: nothing opens the data until its header reads again."
+  fi
+  label=$(sed -n 's/^Label:[[:space:]]*//p' <<<"$dump" | head -n 1)
+  if ! grep -q 'systemd-tpm2' <<<"$dump" && [ "$label" = "$NEW" ]; then
+    say "unfinished encryption found (no TPM key yet): starting it again on an empty partition"
     wipefs -q -a "$part"; mkfs.ext4 -q -L urban-data "$part"; udevadm settle
-    have_tpm && encrypt
+    if have_tpm; then
+      encrypt || { say "plain: encryption failed, the partition stays readable"; seal_state plain; }
+    else
+      seal_state plain
+    fi
     return
   fi
-  unlock || return 1
-  if [ -z "$(blkid -o value -s TYPE "$MAPPED" 2>/dev/null)" ]; then
-    say "unfinished encryption found (no file system): making one"
-    mkfs.ext4 -q -L urban-data "$MAPPED"; udevadm settle
+  if ! grep -q 'systemd-tpm2' <<<"$dump"; then
+    say "the volume has no TPM key (removed by hand, or an enrolment that failed): nothing is erased, it opens with its recovery key"
+    TPM_SAID="this volume has no TPM key slot"
+    recover
+  elif unlock; then
+    pcrs=$(tokens | awk '$1 == "systemd-tpm2" { print $3; exit }')
+    case ",$pcrs," in
+      ,,) seal_state unknown; say "the PCRs of the TPM key could not be read: left as it is" ;;
+      *,7,*) pcr7_state pcr7 ;;
+      ,-,) seal_state unbound
+           say "sealed by an image before step 7 (bound to no PCR, no recovery key): not converted; write the image again" ;;
+      *) seal_state "pcrs-$pcrs"; say "sealed to PCRs $pcrs (not 7): left so" ;;
+    esac
+  else
+    recover
   fi
+  data_fs "$label"
+}
+
+# fstab mounts /dev/disk/urban/data-fs, which udev points at the opened volume or the plain partition of the boot disk.
+# udev sees a new file system only through a change event, and the one that follows mkfs (udev's inotify watch) may not be
+# queued yet when settle looks: settle waits only for events udevd already has. So the event is asked for and waited for
+# by itself (trigger --settle), a few times on a busy machine; what udev knew is put in the journal if it never comes.
+fs_link() {
+  local want target try
+  want=$(readlink -e "$MAPPED" 2>/dev/null) || want=$part
+  udevadm settle
+  for try in 1 2 3 4 5 6 7 8 9 10; do
+    target=$(readlink -e "$FS_LINK" 2>/dev/null)
+    [ "$target" = "$want" ] && return
+    udevadm trigger --settle --action=change "$want" 2>/dev/null || { udevadm trigger --action=change "$want" 2>/dev/null; udevadm settle; }
+    [ "$try" = 1 ] || sleep 2
+  done
+  say "udev on $want: $(udevadm info --query=property "$want" 2>/dev/null \
+    | grep -E '^(DM_NAME|DM_UUID|DM_SUSPENDED|DM_NOSCAN|DM_UDEV_DISABLE_DISK_RULES_FLAG|DM_UDEV_PRIMARY_SOURCE_FLAG|ID_FS_TYPE|DEVLINKS)=' | tr '\n' ' ')"
+  notice "BOOT WAITING" "the link $FS_LINK, which is what is mounted, does not point at the data file system $want (${target:-missing}); the boot waits for it." \
+         "If this stays for some minutes, restart the unit; if it comes back, write the image again."
 }
 
 kind=$(blkid -o value -s TYPE "$part" 2>/dev/null)
 case "$kind" in
   crypto_LUKS)
-    finish; exit 0 ;;
+    finish ;;
   ext4)
     grow
     if have_tpm; then
-      encrypt || say "plain: encryption failed, the partition stays readable"
+      encrypt || { say "plain: encryption failed, the partition stays readable"; seal_state plain; }
     else
       say "plain: no TPM on this machine, the data partition is not encrypted"
+      seal_state plain
     fi ;;
   *)
-    say "the partition holds $kind, not a file system of ours" ;;
+    stopped "the data partition $part holds ${kind:-nothing blkid recognises}, not a file system or a LUKS volume of URBAN OS. Nothing is changed." \
+            "Check the disk; writing the image again makes a new, empty data partition." ;;
 esac
-udevadm settle
+fs_link
 exit 0

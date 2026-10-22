@@ -73,6 +73,10 @@ if (/Secure Boot/.test(team.gaps || "")) problems.push("team gaps slide still li
 if (!Object.values(team).some((t) => /Secure Boot/.test(t) && /(провер|подпис)/i.test(t)))
   problems.push("team deck does not say the system is signed and verified at boot");
 
+// step 7: the team deck says what was closed (PCR 7 seal, boot disk only, version floor) and what stays open
+if (!/шаг 7/i.test(teamAll) || !/PCR 7/.test(teamAll) || !/загрузочн\S* диск/i.test(teamAll) || !/старый подписанный выпуск|старую подписанную версию/i.test(teamAll))
+  problems.push("team deck does not show what step 7 closed (PCR 7, boot disk) and what stays open (an old signed release)");
+
 if (problems.length) {
   for (const p of problems) console.log(`FAIL ${p}`);
   process.exit(1);

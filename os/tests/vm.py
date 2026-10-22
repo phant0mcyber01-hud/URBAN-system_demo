@@ -17,6 +17,12 @@
     python3 vm.py secureboot            Secure Boot enforced: the unit boots with URBAN's keys; a boot loader not signed by
                                         them is refused by the firmware; a changed boot config is not executed; one changed
                                         byte in a slot makes it fail and the unit falls back to the other slot
+    python3 vm.py bootdisk              a stranger's USB stick with partitions named esp, rootfs-a, rootfs-b, urban-data
+                                        attached: the unit boots, mounts and updates only from its own disk, the stick
+                                        stays byte for byte unchanged (os/tests/vm_bootdisk.py)
+    python3 vm.py pcr7                  the data key sealed to PCR 7: Secure Boot turned off on the same machine locks the
+                                        data and stops the boot; the escrowed recovery key typed on the console opens it and
+                                        re-seals to the new state (os/tests/vm_pcr7.py)
     python3 vm.py chain                 unit -> district -> centre: three machines, the relay, the district's reports
     python3 vm.py ota                   over the air: the centre releases version 2, the district and the unit install it
                                         by themselves; the unit's root helper refuses what it must refuse
@@ -90,7 +96,7 @@ class VM:
     def __init__(self, name, version="1", unit="edge-J-07", serial="URB-TEST", image=None, key=KEY,
                  add_key=True, bus="virtio", nic="virtio-net-pci", role=None, host=None, grow_mb=0, forward=(),
                  listen="127.0.0.1", vnc=None, ssh_port=2222, mem=2048, tpm=True, center=None, vision=None, module=None,
-                 secure_boot=True):
+                 secure_boot=True, extra_disk=None, extra_bus="usb", console_input=False):
         os.makedirs(LOGS, exist_ok=True)
         self.secure_boot = secure_boot  # firmware with URBAN's keys enrolled and Secure Boot enforced; False: the control
         self.name, self.disk, self.key, self.bus, self.nic = name, f"/tmp/{name}.img", key, bus, nic
@@ -98,6 +104,8 @@ class VM:
         self.listen, self.vnc = listen, vnc  # where those ports listen; VNC display number for the screen, or none
         self.ssh_port, self.mem, self.tpm = ssh_port, mem, tpm
         self.swtpm = None
+        self.extra_disk, self.extra_bus = extra_disk, extra_bus  # a second disk, attached as it is (a stranger's USB stick)
+        self.console_input = console_input  # keys can be typed on the serial console (type_console); otherwise stdin is empty
         if image:  # a finished unit image: used as it is, nothing added
             sh(["mv", image, self.disk])
             unit, add_key = None, False
@@ -122,6 +130,7 @@ class VM:
         if grow_mb:  # a disk bigger than the image, as every real one is
             sh(["truncate", "-s", f"+{grow_mb}M", self.disk])
         self.lines, self.mark, self.proc = [], 0, None
+        self.partial = ""  # what the console wrote after its last newline: a prompt waiting for its answer has none yet
         self.boots = []  # len(self.lines) at each power-on of the machine (cold starts after guest reboots included)
         self._stopping = self._cycling = False  # set while the harness itself switches the machine off
         self._restarting = False  # set while a guest reboot is being turned into a cold start (old QEMU gone, new not yet)
@@ -158,7 +167,9 @@ class VM:
         """(machine flags, pflash drives). Secure Boot on: the SMM-capable OVMF build, its variable store protected
         (writable only from SMM) and filled with URBAN's PK/KEK/db and Secure Boot enabled (built into the volume as
         ovmf-vars-urban.fd). Off: the plain build with an empty variable store, as before."""
-        vars_ = f"/tmp/{self.name}-vars.fd"  # firmware variables of this machine, like a real board's NVRAM
+        # firmware variables of this machine, like a real board's NVRAM: one store per firmware, so the same machine can be
+        # switched between them (set_secure_boot) and keep its disk and its TPM
+        vars_ = f"/tmp/{self.name}-vars.fd" if self.secure_boot else f"/tmp/{self.name}-vars-nosb.fd"
         if self.secure_boot:
             if not os.path.exists(vars_):
                 if not os.path.exists(f"{OUT}/ovmf-vars-urban.fd"):
@@ -178,6 +189,16 @@ class VM:
                   "-drive", f"if=pflash,format=raw,unit=1,file={vars_}"]
         return machine, drives
 
+    def _extra(self) -> list[str]:
+        """The second disk, if any, on its own controller: a USB stick (usb) or a virtio disk. The harness writes nothing
+        to it; what the machine does to it is the test's business."""
+        if not self.extra_disk:
+            return []
+        drive = ["-drive", f"file={self.extra_disk},format=raw,if=none,id=x0"]
+        if self.extra_bus == "usb":
+            return drive + ["-device", "qemu-xhci,id=xhcix", "-device", "usb-storage,drive=x0,bus=xhcix.0,removable=on"]
+        return drive + ["-device", "virtio-blk-pci,drive=x0"]
+
     def start(self):
         accel = ["-enable-kvm", "-cpu", "host"] if os.environ.get("URBAN_KVM") == "1" else ["-cpu", "max"]
         machine, firmware = self._firmware()
@@ -186,6 +207,7 @@ class VM:
             ["qemu-system-x86_64", *machine, "-m", str(self.mem), "-smp", "2", *accel,
              *firmware,
              *DISK_BUS[self.bus](self.disk),
+             *self._extra(),
              *(self._tpm() if self.tpm else []),
              "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{self.ssh_port}-:22"
              + "".join(f",hostfwd=tcp:{self.listen}:{h}-:{g}" for h, g in self.forward), "-device", f"{self.nic},netdev=n0",
@@ -193,18 +215,30 @@ class VM:
              *(["-vnc", f"127.0.0.1:{self.vnc}"] if self.vnc is not None else ["-display", "none"]),
              "-serial", "stdio", "-monitor", f"unix:/tmp/{self.name}.mon,server,nowait",
              "-name", self.name],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            stdin=subprocess.PIPE if self.console_input else subprocess.DEVNULL)
         threading.Thread(target=self._read, daemon=True).start()
 
     def _read(self):
         proc = self.proc
-        for raw in iter(proc.stdout.readline, b""):
+        self.partial, rest = "", b""
+
+        def take(raw):
             line = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", raw.decode("utf-8", "replace")).rstrip()
             self.lines.append(line)
             self.log.write(line + "\n")
             self.log.flush()
             if SHOW.search(line):
                 print(f"   vm| {line[:200]}", flush=True)
+
+        # what has arrived, not only whole lines: a password prompt stays without its newline until its answer is typed
+        for chunk in iter(lambda: proc.stdout.read1(65536), b""):
+            *whole, rest = (rest + chunk).split(b"\n")
+            for raw in whole:
+                take(raw)
+            self.partial = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", rest.decode("utf-8", "replace"))
+        if rest:  # the last words before the end, without a newline: a line of their own, as readline gave them
+            take(rest)
         proc.wait()
         # Every reboot of the guest (systemctl reboot, the watchdog, a rollback) ends QEMU (-no-reboot) and is turned
         # into a cold start of the same machine here, as a cabinet's power coming back. A warm reset of OVMF with a
@@ -321,6 +355,20 @@ class VM:
         self.start()
         self._cycling = False
 
+    def set_secure_boot(self, on):
+        """Secure Boot switched on or off in this machine's firmware setup, for its next power_on(): the same disk and TPM
+        state, the firmware build and variable store of that setting (_firmware). Only while the machine is off."""
+        if self.proc and self.proc.poll() is None:
+            raise Fail(f"{self.name}: the firmware is switched only while the machine is off")
+        self.secure_boot = on
+
+    def type_console(self, text):
+        """Keys typed on the serial console, as a person at the unit types them (needs VM(console_input=True))."""
+        if not self.console_input or not self.proc or self.proc.stdin is None:
+            raise Fail(f"{self.name}: no console input (VM(console_input=True))")
+        self.proc.stdin.write(text.encode())
+        self.proc.stdin.flush()
+
     def stop(self):
         self._stopping = True
         if self.proc and self.proc.poll() is None:
@@ -402,9 +450,16 @@ def image():
             or not all(os.path.exists(f"/tmp/bundle-x/{n}") for n in ("slot.cfg", "slot.cfg.sig", "slot.sha256", "slot.sha256.sig"))):
         raise Fail("the update bundle has no post-install hook (hook.sh) with its signed slot file: an installed slot "
                    "would get no signed boot file")
+    if not re.search(r"^hooks=(\S*;)?install-check(;|$)", manifest, re.M):  # RAUC writes the list as hooks=install-check;
+        raise Fail("the update bundle's hook does not run before the install (no hooks=install-check): a unit written "
+                   "before step 7 would have its other slot written before the hook refuses it")
     shutil.rmtree("/tmp/bundle-x", ignore_errors=True)
     contents()
+    import vm_bootdisk  # step 7: the boot-disk pieces (os/tests/vm_bootdisk.py)
+    vm_bootdisk.image_pieces(disk, parts, esp)
     signed_chain(disk, parts, esp)
+    import vm_pcr7  # step 7: the recovery escrow's public key in the image, its private key nowhere (os/tests/vm_pcr7.py)
+    vm_pcr7.escrow_in_image(disk, parts, esp)
     print("IMAGE LAYOUT VERIFIED", flush=True)
 
 
@@ -631,11 +686,12 @@ def roles_in(slot, listing):
         "opt/urban/web/dist/index.html", "etc/modules", "etc/fstab", "usr/local/bin/urban-grow"])
     if "dm_crypt" not in open("/tmp/sq2/etc/modules").read():
         raise Fail("dm-crypt is not loaded at boot: the encrypted data partition could not be opened")
-    if "LABEL=urban-data" not in open("/tmp/sq2/etc/fstab").read():
-        raise Fail("the data partition is not mounted by label (the opened LUKS volume would not mount)")
+    if not re.search(r"^/dev/disk/urban/data-fs\s+/var/lib/urban\s", open("/tmp/sq2/etc/fstab").read(), re.M):
+        raise Fail("the data partition is not mounted from /dev/disk/urban/data-fs (the boot disk's plain partition "
+                   "or the LUKS volume opened from it)")
     grow = open("/tmp/sq2/usr/local/bin/urban-grow").read()
-    for need in ("luksFormat --type luks2", "systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=", "--wipe-slot=password",
-                 "systemd-cryptsetup", "attach urban-data"):
+    for need in ("luksFormat --type luks2", "systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7", "--wipe-slot=password",
+                 "systemd-cryptsetup", "attach urban-data", "systemd-cryptenroll --recovery-key", "urban-recovery.enc"):
         if need not in grow:
             raise Fail(f"urban-grow does not {need}")
     if 'include "/run/urban/nft/*.nft"' not in open("/tmp/sq2/etc/nftables.conf").read():
@@ -1072,11 +1128,12 @@ def encrypted():
         if "data=rw,luks2-tpm2" not in line:
             raise Fail(f"the self-check does not say the data is encrypted: {line}")
         status = vm.ssh("cryptsetup status urban-data; cryptsetup luksDump /dev/disk/by-partlabel/urban-data").stdout
-        if not re.search(r"type:\s+LUKS2", status) or "systemd-tpm2" not in status:
-            raise Fail(f"not a LUKS2 volume with a TPM2 token:\n{status[:600]}")
+        if not re.search(r"type:\s+LUKS2", status) or "systemd-tpm2" not in status or "systemd-recovery" not in status:
+            raise Fail(f"not a LUKS2 volume with a TPM2 token and a recovery key:\n{status[:600]}")
         slots_used = re.findall(r"^\s+\d+: luks2\s*$", status, re.M)  # the 'Keyslots:' list of luksDump
-        if len(slots_used) != 1:
-            raise Fail(f"{len(slots_used)} key slot(s), want exactly the TPM's (a passphrase left behind, or no key at all)")
+        if len(slots_used) != 2:
+            raise Fail(f"{len(slots_used)} key slot(s), want exactly the TPM's and the recovery key's (a passphrase left "
+                       "behind, or a key missing)")
         src = vm.ssh("findmnt -n -o SOURCE /var/lib/urban").stdout.strip()
         if src != "/dev/mapper/urban-data":
             raise Fail(f"the data is mounted from {src}, not the opened volume")
@@ -2709,6 +2766,27 @@ def update(kind):
             if booted != "B" or by_slot["B"].get("boot_status") != "good":
                 raise Fail(f"after the update: booted {booted}, slot B {by_slot['B'].get('boot_status')}")
             print(f"   {line}")
+            # step 7: a unit written before step 7 has no boot-disk links (/dev/disk/urban); the bundle's install-check
+            # refuses it before RAUC marks or writes anything. Played on the updated unit, whose other slot A is good
+            # (A_OK=1) so that marking it would show, by hiding the links under an empty tmpfs for one attempt (udev may
+            # still add links meanwhile: they land in the tmpfs). The refusal must be the hook's own words, and slot A, its
+            # first megabytes and the boot state must be as before
+            state = "dd if=/dev/disk/urban/rootfs-a bs=1M count=8 status=none | sha256sum; grub-editenv /boot/efi/EFI/BOOT/grubenv list"
+            before, (_, slots_before) = vm.ssh(state).stdout, slots(vm)
+            r = vm.ssh(f"mount -t tmpfs -o size=64k,mode=755 urban-hidden /dev/disk/urban && {{ rauc install {STAGE}/update.raucb; "
+                       "rc=$?; umount /dev/disk/urban; exit $rc; }", check=False, timeout=900)
+            said = r.stdout + r.stderr
+            if r.returncode == 0 or "written before step 7" not in said:
+                raise Fail(f"a unit without the boot disk's links was not refused by the bundle's hook (rc {r.returncode}): "
+                           + said.strip()[-400:])
+            after, (booted_after, slots_after) = vm.ssh(state).stdout, slots(vm)
+            if slots_before["A"].get("boot_status") != "good":
+                raise Fail(f"control failed: slot A is {slots_before['A'].get('boot_status')} after the update, not good: "
+                           "a refused install could not be told from one that marked it")
+            if after != before or booted_after != "B" or slots_after["A"].get("boot_status") != "good":
+                raise Fail(f"the refused install still changed slot A or the boot state:\n{before}\n{after}")
+            print(f"   pre-step-7 unit refused, slot A (good) untouched: "
+                  f"{next(l for l in said.splitlines() if 'written before step 7' in l).strip()[:160]}")
             print("UPDATE CHECK PASSED", flush=True)
         elif kind == "foreign":
             vm.put(f"{OUT}/urban-edge-2.raucb", f"{STAGE}/genuine.raucb")
@@ -3118,8 +3196,14 @@ if __name__ == "__main__":
             hardware()
         elif what == "unitimage":
             unitimage(*sys.argv[2:7])
+        elif what == "bootdisk":  # step 7: partitions only from the boot disk, a stranger's disk attached
+            import vm_bootdisk
+            vm_bootdisk.bootdisk()
         elif what == "secureboot":
             secureboot()
+        elif what == "pcr7":  # step 7, G4: the data key sealed to PCR 7; locked when Secure Boot changes; the recovery key
+            import vm_pcr7
+            vm_pcr7.pcr7()
         elif what == "update":
             if sys.argv[2] == "foreign":
                 foreign_bundle()

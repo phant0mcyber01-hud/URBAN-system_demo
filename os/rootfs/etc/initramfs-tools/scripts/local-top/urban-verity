@@ -1,8 +1,22 @@
 #!/bin/sh
 # Opens the root slot as a dm-verity device before the root is mounted.
 #
-# GRUB hands over   urban.verity=<PARTLABEL>:<root hash>:<hash offset>   (all three from the slot's signed boot file on
-# the ESP) and root=/dev/mapper/urban-root. The partition holds the read-only squashfs followed, at the hash offset, by
+# GRUB hands over   urban.verity=<PARTLABEL>:<root hash>:<hash offset>   (the root hash and the offset from the slot's
+# signed boot file on the ESP, the name from the signed grub.cfg),   urban.bootpart=<GPT partition GUID>   (the slot
+# partition's GUID, read by GRUB from the partition table of the disk it booted from) and root=/dev/mapper/urban-root.
+#
+# The slot is found by that GUID, never by its name: a second disk (a USB stick) may carry partitions named rootfs-a,
+# esp or urban-data too, and udev's by-partlabel and by-partuuid links go to whichever device came last. So every
+# partition of the machine is read here (blkid -p: the GPT entry on the disk itself, no link, no cache). Exactly one may
+# carry the GUID - with two (a copy of this unit's disk attached) the unit refuses to boot rather than guess - and it
+# must be named as urban.verity says. The partition GRUB named is the one opened, and its disk is this unit's boot
+# disk: the running system takes the ESP, the data partition and the update slots only from the disk under
+# /dev/mapper/urban-root (/dev/disk/urban/*, made by etc/udev/rules.d/60-urban-bootdisk.rules). What was chosen is
+# also written to /run/urban-boot/disk (initramfs-tools moves /run into the real root) and said on the console
+# (URBAN-BOOTDISK). Without urban.bootpart there is no going back to the name: a boot config older than this system
+# is refused.
+#
+# The partition holds the read-only squashfs followed, at the hash offset, by
 # its dm-verity hash tree; the root hash and the offset are the only things that have to be trusted, and GRUB verified
 # them (the tree's unsigned superblock must agree with the offset, see below). A system that does not match cannot be
 # mounted (this script panics: panic=10 on the command line reboots, and GRUB's TRY logic then boots the other slot);
@@ -18,9 +32,11 @@ esac
 . /scripts/functions
 
 spec=""
+bootpart=""
 for x in $(cat /proc/cmdline); do
   case "$x" in
     urban.verity=*) spec="${x#urban.verity=}" ;;
+    urban.bootpart=*) bootpart="${x#urban.bootpart=}" ;;
   esac
 done
 [ -n "$spec" ] || exit 0
@@ -34,19 +50,68 @@ case "$label" in ""|*[!A-Za-z0-9._-]*) panic "urban-verity: bad partition label 
 case "$roothash" in ""|*[!0-9a-f]*) panic "urban-verity: bad root hash in urban.verity ($spec)" ;; esac
 case "$offset" in ""|*[!0-9]*) panic "urban-verity: bad hash offset in urban.verity ($spec)" ;; esac
 [ "${#roothash}" -eq 64 ] || panic "urban-verity: the root hash is not a SHA-256 value ($roothash)"
+[ -n "$bootpart" ] || panic "urban-verity: no urban.bootpart on the kernel command line (a boot config older than this system): not looking for $label by its name - refusing to boot"
+case "$bootpart" in *[!0-9a-f-]*) panic "urban-verity: bad partition GUID in urban.bootpart ($bootpart)" ;; esac
+[ "${#bootpart}" -eq 36 ] || panic "urban-verity: urban.bootpart is not a partition GUID ($bootpart)"
 
 modprobe -q dm_mod 2>/dev/null
 modprobe -q dm_verity 2>/dev/null
 
+# Every partition whose GPT entry carries the GUID $bootpart, read from the partition tables themselves (blkid -p
+# reads the disk; /sys/class/block lists what the kernel found). Sets found (their kernel names), nfound, and fname and
+# fscheme (the GPT name and the table type of the last one found).
+find_slot() {
+  found=""; nfound=0; fname=""; fscheme=""
+  for sys in /sys/class/block/*; do
+    [ -f "$sys/partition" ] || continue
+    n="${sys##*/}"
+    [ -b "/dev/$n" ] || continue
+    uuid=""; pname=""; scheme=""
+    while IFS='=' read -r k v; do
+      case "$k" in
+        PART_ENTRY_UUID) uuid="$v" ;;
+        PART_ENTRY_NAME) pname="$v" ;;
+        PART_ENTRY_SCHEME) scheme="$v" ;;
+      esac
+    done <<EOF
+$(blkid -p -o export "/dev/$n" 2>/dev/null)
+EOF
+    if [ "$uuid" = "$bootpart" ]; then
+      found="$found $n"; nfound=$((nfound + 1)); fname="$pname"; fscheme="$scheme"
+    fi
+  done
+}
+
 # the partition may appear late (USB, NVMe): wait for it like rootwait does
-dev="/dev/disk/by-partlabel/$label"
 i=0
-while [ ! -b "$dev" ] && [ "$i" -lt 180 ]; do
+find_slot
+while [ "$nfound" -eq 0 ] && [ "$i" -lt 180 ]; do
   if command -v udevadm >/dev/null 2>&1; then udevadm settle --timeout=1 >/dev/null 2>&1; fi
   sleep 1
   i=$((i + 1))
+  find_slot
 done
-[ -b "$dev" ] || panic "urban-verity: $dev did not appear"
+[ "$nfound" -gt 0 ] || panic "urban-verity: the boot partition (GPT partition GUID $bootpart, $label) did not appear"
+# once more after the devices still being announced have settled: a second disk with the same GUID is not a choice
+if command -v udevadm >/dev/null 2>&1; then udevadm settle --timeout=10 >/dev/null 2>&1; fi
+find_slot
+[ "$nfound" -eq 1 ] || panic "urban-verity: $nfound partitions carry this unit's boot partition GUID $bootpart (${found# }): another disk copies this unit's disk - remove it; not guessing which one to boot"
+part="${found# }"
+[ "$fscheme" = gpt ] && [ "$fname" = "$label" ] || panic "urban-verity: the partition with GUID $bootpart ($part) is named '$fname' ($fscheme), not $label - refusing to boot it"
+# its disk: the partition's parent in sysfs (vda2 -> vda, nvme0n1p2 -> nvme0n1, sda2 -> sda)
+disk=$(cd -P "/sys/class/block/$part/.." 2>/dev/null && pwd -P)
+disk="${disk##*/}"
+[ -n "$disk" ] && [ -b "/dev/$disk" ] && [ ! -f "/sys/class/block/$disk/partition" ] || panic "urban-verity: cannot tell which disk $part lies on"
+dev="/dev/$part"
+mkdir -p /run/urban-boot
+{
+  echo "DISK=$disk"
+  echo "DISKSEQ=$(cat "/sys/class/block/$disk/diskseq" 2>/dev/null)"
+  echo "PART=$part"
+  echo "PARTUUID=$bootpart"
+  echo "SLOT=$label"
+} > /run/urban-boot/disk
+echo "URBAN-BOOTDISK: slot $label is $part (partition GUID $bootpart) on disk $disk"
 
 # The initramfs has no udev rules for device-mapper: without this libdevmapper waits for a udev cookie that never
 # completes. It makes the node in /dev/mapper itself.

@@ -34,6 +34,7 @@ sb=off
 sbvar=/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c
 if [ -r "$sbvar" ] && [ "$(tail -c1 "$sbvar" 2>/dev/null | od -An -tu1 | tr -d ' ')" = 1 ]; then sb=on; fi
 # a warning, not a failure: with Secure Boot off the firmware runs any boot loader on the ESP, which an update cannot fix
+# (and the data key sealed to PCR 7 protects nothing on this machine meanwhile: the screen's data line says so)
 [ "$sb" = on ] || warn+=("secure boot is off")
 verity=off
 rootdev=$(findmnt -n -o SOURCE / 2>/dev/null)
@@ -41,6 +42,33 @@ if grep -q ' urban\.verity=' /proc/cmdline && [ -b /dev/mapper/urban-root ] && [
    && [ "$(readlink -f "$rootdev")" = "$(readlink -f /dev/mapper/urban-root)" ] \
    && veritysetup status urban-root 2>/dev/null | grep -qi 'type: *VERITY'; then
   verity=on
+fi
+
+# Partitions only from the disk this unit booted from: the disk under the verified root (urban-bootdisk). The links
+# /dev/disk/urban/* (etc/udev/rules.d/60-urban-bootdisk.rules) that fstab, RAUC and the scripts use must all be there
+# and lie on it, the root must run from the booted slot's link, and the ESP and the data must be mounted from theirs.
+# Another disk with partitions of the same names (a USB stick) must not have taken any of them.
+bootdisk=$(/usr/local/bin/urban-bootdisk 2>/dev/null)
+if [ -z "$bootdisk" ]; then
+  fail+=("the boot disk is not known (no verified root to take it from)")
+else
+  for l in esp rootfs-a rootfs-b urban-data data-fs; do
+    t=$(readlink -e "/dev/disk/urban/$l") || { fail+=("no /dev/disk/urban/$l on the boot disk $bootdisk"); continue; }
+    n=${t##*/}
+    if [ "$l" = data-fs ]; then
+      /usr/local/bin/urban-bootdisk part "$n" || /usr/local/bin/urban-bootdisk crypt "$n" \
+        || fail+=("/dev/disk/urban/data-fs ($n) is not from the boot disk $bootdisk")
+    else
+      /usr/local/bin/urban-bootdisk part "$n" || fail+=("/dev/disk/urban/$l ($n) is not on the boot disk $bootdisk")
+    fi
+  done
+  booted=$(readlink -e "/dev/disk/urban/rootfs-$(echo "$slot" | tr AB ab)")
+  [ "${booted##*/}" = "$(/usr/local/bin/urban-bootdisk root)" ] || fail+=("the root does not run from the boot disk's slot $slot")
+  for m in /boot/efi:esp /var/lib/urban:data-fs; do
+    src=$(findmnt -n -o SOURCE --mountpoint "${m%%:*}" 2>/dev/null)
+    [ -n "$src" ] && [ "$(readlink -e "$src")" = "$(readlink -e "/dev/disk/urban/${m#*:}")" ] \
+      || fail+=("${m%%:*} is not mounted from /dev/disk/urban/${m#*:} (${src:-nothing})")
+  done
 fi
 
 wd=$(systemctl show -p RuntimeWatchdogUSec --value)

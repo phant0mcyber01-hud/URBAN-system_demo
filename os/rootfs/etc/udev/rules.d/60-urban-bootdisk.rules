@@ -1,0 +1,27 @@
+# /dev/disk/urban/<name>: the partitions of the disk this unit booted from, and nothing of any other disk.
+#
+# A USB stick (or any second disk) may carry GPT partitions named esp, rootfs-a, rootfs-b and urban-data, or an ext4
+# labelled urban-data: udev's by-partlabel and by-label links then go to whichever device was announced last. So nothing
+# of URBAN OS uses those links. fstab, RAUC (etc/rauc/system.conf), the bundle hook, urban-grow and urban-os-check use
+# these instead:
+#   /dev/disk/urban/esp, rootfs-a, rootfs-b, urban-data   the partitions of those names on the boot disk
+#   /dev/disk/urban/data-fs                               the data file system to mount: the boot disk's urban-data
+#                                                         partition while it is plain ext4, or once it is LUKS2 the
+#                                                         volume urban-grow opened from it (/dev/mapper/urban-data)
+# The boot disk is the disk under the verified root (urban-bootdisk: the partition GRUB named by its GUID, which the
+# initramfs opened as /dev/mapper/urban-root). That device exists before this udev starts (the initramfs made it), so
+# the coldplug of the real system already knows it. Without a verified root no link is made at all: no fallback.
+# After 60-persistent-storage.rules and 13-dm-disk.rules, which import the partition's GPT entry and the file system type.
+ACTION=="remove", GOTO="urban_bootdisk_end"
+SUBSYSTEM!="block", GOTO="urban_bootdisk_end"
+
+ENV{DEVTYPE}=="partition", ENV{ID_PART_ENTRY_SCHEME}=="gpt", ENV{ID_PART_ENTRY_NAME}=="esp|rootfs-a|rootfs-b|urban-data", \
+  PROGRAM=="/usr/local/bin/urban-bootdisk part %k", SYMLINK+="disk/urban/$env{ID_PART_ENTRY_NAME}"
+
+ENV{DEVTYPE}=="partition", ENV{ID_PART_ENTRY_SCHEME}=="gpt", ENV{ID_PART_ENTRY_NAME}=="urban-data", ENV{ID_FS_TYPE}=="ext4", \
+  PROGRAM=="/usr/local/bin/urban-bootdisk part %k", SYMLINK+="disk/urban/data-fs"
+
+KERNEL=="dm-*", ENV{DM_NAME}=="urban-data", ENV{ID_FS_TYPE}=="ext4", \
+  PROGRAM=="/usr/local/bin/urban-bootdisk crypt %k", SYMLINK+="disk/urban/data-fs"
+
+LABEL="urban_bootdisk_end"

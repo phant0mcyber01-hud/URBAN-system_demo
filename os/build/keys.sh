@@ -8,7 +8,7 @@
 # every update. Expiry is what protects against old keys, not the start date.
 #
 #   keys.sh DIR    makes DIR/ca.{key,pem} and DIR/signing.{key,pem} unless DIR/ca.pem exists, and (each only if
-#                  missing, so older key folders get them on the next build) the boot keys below.
+#                  missing, so older key folders get them on the next build) the boot keys and the recovery escrow key below.
 #
 # The boot keys (step 6, Secure Boot) - never in git, kept with the update keys in data/os/keys:
 #   DIR/sb/{PK,KEK,db}.{key,crt}   UEFI Secure Boot platform key, key-exchange key and signature database key: RSA-2048,
@@ -94,6 +94,37 @@ EOF
   echo ">> boot keys in $K (sb/ and boot-gpg/: never in git, keep PK.key/KEK.key/db.key and boot-gpg off networked machines)"
 }
 boot_keys
+
+# The recovery escrow key (step 7): every unit encrypts the recovery key of its data partition to it and leaves only the
+# ciphertext on its ESP (urban-recovery.enc); node os/recovery.mjs decrypt opens it with the private half.
+#   DIR/escrow/escrow.pem   RSA-4096 public key: built into the image (/usr/share/urban/recovery-escrow.pem)
+#   DIR/escrow/escrow.key   its private key: never in an image; after the first build the owner keeps it offline (two copies)
+# Made only when neither half exists. The public half alone is the expected state once the private key is kept offline:
+# the build goes on with it. The private half alone, or two halves that are not one key, stop the build: a new pair would
+# leave the owner believing one key opens every unit's recovery file when it does not.
+escrow_key() {
+  local E="$K/escrow" t
+  mkdir -p "$E"; chmod 700 "$E" 2>/dev/null || true
+  if [ -f "$E/escrow.key" ] && [ ! -f "$E/escrow.pem" ]; then
+    echo "keys.sh: $E/escrow.key exists without its public half escrow.pem. Restore it from the offline copy (or make it from" \
+      "the private key: openssl pkey -in $E/escrow.key -pubout -out $E/escrow.pem) and build again. Not making a new escrow key." >&2
+    exit 1
+  elif [ ! -f "$E/escrow.pem" ]; then
+    ( umask 077; openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out "$E/escrow.key" 2>/dev/null )
+    openssl pkey -in "$E/escrow.key" -pubout -out "$E/escrow.pem"
+    chmod 600 "$E/escrow.key"; chmod 644 "$E/escrow.pem"
+    echo ">> recovery escrow key made in $E: escrow.pem goes into the images; move escrow.key off this machine (two offline copies)"
+  fi
+  t=$(openssl pkey -pubin -in "$E/escrow.pem" -noout -text 2>/dev/null) || { echo "keys.sh: $E/escrow.pem is not a public key" >&2; exit 1; }
+  [[ "$t" == *"Public-Key: (4096 bit)"* ]] || { echo "keys.sh: $E/escrow.pem is not an RSA-4096 public key" >&2; exit 1; }
+  if [ -f "$E/escrow.key" ]; then
+    [ "$(openssl pkey -in "$E/escrow.key" -pubout -outform DER | sha256sum)" = "$(openssl pkey -pubin -in "$E/escrow.pem" -outform DER | sha256sum)" ] \
+      || { echo "keys.sh: $E/escrow.key and escrow.pem are not one key pair: restore the right pair from the offline copy" >&2; exit 1; }
+  else
+    echo ">> recovery escrow: only escrow.pem here (escrow.key is kept offline); recovery needs the offline key"
+  fi
+}
+escrow_key
 
 [ -f "$K/ca.pem" ] && exit 0
 W=$(mktemp -d)

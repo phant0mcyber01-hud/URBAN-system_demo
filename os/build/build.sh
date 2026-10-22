@@ -43,6 +43,10 @@ log() { echo ">> $*"; }
 
 # ---- update signing keys: a CA whose certificate goes into the image, and a signing certificate from it
 bash /work/os/build/keys.sh "$OUT/keys"  # made once; valid from 2020 so a unit's wrong clock cannot block updates
+# ---- the recovery escrow key (data/os/keys/escrow, made once by keys.sh): only its public half goes into the image; the
+# private half need not be here at all (the owner keeps it offline)
+ESCROW="$OUT/keys/escrow/escrow.pem"
+[ -s "$ESCROW" ] || { echo "the recovery escrow key $ESCROW is missing" >&2; exit 1; }
 
 # ---- Secure Boot: the keys (data/os/keys/sb and boot-gpg, made once by keys.sh) and what is built from them
 SB="$OUT/keys/sb"
@@ -137,9 +141,22 @@ fi
 log "system configuration"
 cp -r /work/os/rootfs/. "$ROOT/"
 cp /work/deploy/urban-edge@.service /work/deploy/urban-vision@.service /work/deploy/urban-lighting@.service "$ROOT/etc/systemd/system/"
-# the data partition is mounted by label; systemd-cryptsetup needs the dm-crypt module early
+# the data partition is mounted from the boot disk's link /dev/disk/urban/data-fs (fstab): the plain partition or the
+# LUKS volume urban-grow opened; systemd-cryptsetup needs the dm-crypt module early
 echo dm_crypt >> "$ROOT/etc/modules"
 cp "$OUT/keys/ca.pem" "$ROOT/etc/rauc/keyring.pem"
+# the recovery escrow key's public half: urban-grow encrypts each unit's recovery key to it with the image's own openssl
+# (RSA-OAEP, SHA-256). Tried here once the way a unit will, and opened again when the private half is on this machine.
+install -D -m 644 "$ESCROW" "$ROOT/usr/share/urban/recovery-escrow.pem"
+printf 'URBAN-RECOVERY-KEY v1 build-check\n' | chroot "$ROOT" openssl pkeyutl -encrypt -pubin -inkey /usr/share/urban/recovery-escrow.pem \
+  -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256 -out /tmp/escrow-check.ct \
+  || { echo "the image's openssl cannot encrypt to the recovery escrow key" >&2; exit 1; }
+if [ -f "$OUT/keys/escrow/escrow.key" ]; then
+  [ "$(openssl pkeyutl -decrypt -inkey "$OUT/keys/escrow/escrow.key" -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 \
+       -pkeyopt rsa_mgf1_md:sha256 -in "$ROOT/tmp/escrow-check.ct")" = "URBAN-RECOVERY-KEY v1 build-check" ] \
+    || { echo "what the image encrypts to the escrow key does not open with escrow.key" >&2; exit 1; }
+fi
+rm -f "$ROOT/tmp/escrow-check.ct"
 # the repository may sit on a file system without Unix modes (Windows): set them, never copy them
 (cd /work/os/rootfs && find . -type d) | while read -r d; do chmod 755 "$ROOT/$d"; done
 (cd /work/os/rootfs && find . -type f) | while read -r f; do chmod 644 "$ROOT/$f"; done
@@ -242,7 +259,8 @@ cp "$SLOTCFG" "$B/slot.cfg"; cp "$SLOTCFG.sig" "$B/slot.cfg.sig"
 cp "$SLOTSUMS" "$B/slot.sha256"; cp "$SLOTSUMS.sig" "$B/slot.sha256.sig"
 cp /work/os/build/bundle-hook.sh "$B/hook.sh"; chmod 755 "$B/hook.sh"
 chmod 644 "$B/slot.cfg" "$B/slot.cfg.sig" "$B/slot.sha256" "$B/slot.sha256.sig"
-printf "[update]\ncompatible=%s\nversion=%s\n\n[bundle]\nformat=verity\n\n[hooks]\nfilename=hook.sh\n\n[image.rootfs]\nfilename=rootfs.img\nhooks=post-install\n" \
+# the hook also runs once before anything is written (install-check): it refuses a unit written before step 7
+printf "[update]\ncompatible=%s\nversion=%s\n\n[bundle]\nformat=verity\n\n[hooks]\nfilename=hook.sh\nhooks=install-check\n\n[image.rootfs]\nfilename=rootfs.img\nhooks=post-install\n" \
   "$COMPATIBLE" "$VERSION" > "$B/manifest.raucm"
 rm -f "$OUT/urban-edge-$VERSION.raucb"
 rauc bundle --cert "$OUT/keys/signing.pem" --key "$OUT/keys/signing.key" "$B" "$OUT/urban-edge-$VERSION.raucb" >/dev/null
@@ -277,7 +295,7 @@ EOF
   grub-mkimage -O x86_64-efi -o /tmp/BOOTX64.unsigned.EFI -p /EFI/BOOT -c /tmp/early.cfg \
     --pubkey "$OUT/keys/boot.pub.gpg" --disable-shim-lock \
     part_gpt fat squash4 normal linux echo test loadenv configfile regexp search all_video efi_gop gzio \
-    boot cat sleep reboot halt password_pbkdf2 pbkdf2 gcry_sha512 pgp gcry_rsa gcry_sha256 hashsum
+    boot cat sleep reboot halt password_pbkdf2 pbkdf2 gcry_sha512 pgp gcry_rsa gcry_sha256 hashsum probe
   sbsign --key "$SB/db.key" --cert "$SB/db.crt" --output "$E/EFI/BOOT/BOOTX64.EFI" /tmp/BOOTX64.unsigned.EFI >/dev/null
   sbverify --cert "$SB/db.crt" "$E/EFI/BOOT/BOOTX64.EFI" >/dev/null || { echo "BOOTX64.EFI does not verify against db.crt" >&2; exit 1; }
   rm -f /tmp/BOOTX64.unsigned.EFI

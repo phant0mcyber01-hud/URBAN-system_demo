@@ -1,8 +1,12 @@
 # URBAN Edge OS. The root is a read-only squashfs slot (A or B, from the kernel command line).
 # Everything that changes lives on the data partition or in memory.
-# urban-data by its file-system label: the plain partition, or the LUKS volume urban-grow unlocked with the TPM
-LABEL=urban-data      /var/lib/urban  ext4   defaults,noatime,nodev,nosuid,noexec,x-systemd.device-timeout=10min  0 2
-PARTLABEL=esp         /boot/efi       vfat   umask=0077,noatime,nodev,nosuid,noexec  0 2
+# The ESP and the data partition only from the disk this unit booted from (/dev/disk/urban/*, made by
+# etc/udev/rules.d/60-urban-bootdisk.rules), never by a label or a partition name another disk could carry too.
+# data-fs: the boot disk's urban-data partition while it is plain, or the LUKS volume urban-grow opened from it. No
+# device timeout: a unit whose data stays locked waits in urban-grow (before this mount) for its recovery key, and
+# nothing that needs the data starts meanwhile.
+/dev/disk/urban/data-fs  /var/lib/urban  ext4   defaults,noatime,nodev,nosuid,noexec,x-systemd.device-timeout=infinity  0 2
+/dev/disk/urban/esp      /boot/efi       vfat   umask=0077,noatime,nodev,nosuid,noexec  0 2
 tmpfs                 /tmp            tmpfs  mode=1777,nosuid,nodev,size=128M  0 0
 tmpfs                 /var/tmp        tmpfs  mode=1777,nosuid,nodev,size=32M   0 0
 tmpfs                 /var/log        tmpfs  mode=0755,nosuid,nodev,size=64M   0 0
