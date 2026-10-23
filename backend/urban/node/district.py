@@ -9,8 +9,9 @@ report every second. The report carries the queues its cameras measure (keyed by
 only those of the junctions routed through this district), its own health, and what its relay is doing.
 
 It takes no junction commands: only units do, and the centre never addresses one to a district. Should one
-arrive anyway it is refused and said so in the next report. The one thing the centre does send it is an OS update
-offer (edge/update.py), checked like a unit checks a command; the district downloads the package by itself.
+arrive anyway it is refused and said so in the next report. The two things the centre does send it are an OS update
+offer (edge/update.py) and the peer list of its tunnel to its units (edge/tunnel.py), each checked like a unit checks
+a command; the district downloads the package by itself and hands the peer list to the root helper.
 
 While the centre is unreachable the reports are kept (the last BUFFER seconds) and sent in order as soon as
 the link is back, each with the time it was made, so the centre's history has no hole for the outage.
@@ -31,6 +32,7 @@ from ..devices.trust import GatewayTrust
 from ..edge.__main__ import read_sensors
 from ..edge.device import VERSION, envelope_refusal
 from ..edge.probe import Probe
+from ..edge.tunnel import Tunnel
 from ..edge.update import make_updater
 
 BUFFER = 900  # seconds of reports kept through an outage of the link to the centre
@@ -42,12 +44,15 @@ class DistrictDevice:
 
     def __init__(self, device_id: str, key, root_public=None, gateway_public=None, gateway_state: Path | None = None,
                  probe=None, relay_stats=None, buffer: int = BUFFER, updater=None, state_path: Path | None = None,
-                 wall=time.time):
+                 wall=time.time, tunnel=None):
         """relay_stats(): what the relay reports about itself (the kernel relay, os urban-relay, writes it), or None;
         updater: takes the centre's OS update offers and reports the system version (edge/update.py);
-        state_path: where the last accepted sequence number of an offer is kept, as a unit does for its commands."""
+        state_path: where the last accepted sequence number of an offer is kept, as a unit does for its commands;
+        tunnel: takes the centre's signed peer list and reports the root helper's state (edge/tunnel.py). Without
+        one a {"wg": ...} body is refused like any other command."""
         self.id, self.key = device_id, key
         self.updater, self.state_path, self.wall = updater, state_path, wall
+        self.tunnel = tunnel
         self.last_seq = 0
         if state_path is not None and state_path.exists():
             try:
@@ -76,10 +81,12 @@ class DistrictDevice:
         return True
 
     def on_command(self, msg: dict):
-        """A district obeys no junction command; one that arrives is reported, not executed. An update offer is
-        not one: it is checked like a unit checks a command (gateway signature, this device, fresh, rising number)."""
+        """A district obeys no junction command; one that arrives is reported, not executed. An update offer and the
+        tunnel's peer list are not ones: they are checked like a unit checks a command (gateway signature, this
+        device, fresh, rising number)."""
         body = msg.get("body") if isinstance(msg, dict) else None
-        if not (isinstance(body, dict) and "update" in body):
+        peers = self.tunnel is not None and isinstance(body, dict) and set(body) == {"wg"}
+        if not (isinstance(body, dict) and ("update" in body or peers)):
             self.outbox.append({"type": "edge", "status": "refused", "device": self.id,
                                 "reason": "a district server takes no commands"})
             return
@@ -90,6 +97,11 @@ class DistrictDevice:
         self.last_seq = msg["seq"]
         if self.state_path is not None:
             self.state_path.write_text(str(self.last_seq))
+        if peers:  # for the root helper, which checks it again and sets up wg0
+            why = self.tunnel.take(body["wg"], self.trust.public, self.trust.epoch)
+            if why:
+                self.outbox.append({"type": "edge", "status": "refused", "device": self.id, "reason": why})
+            return
         if self.updater is not None:
             self.updater.offer(body["update"])
 
@@ -103,7 +115,8 @@ class DistrictDevice:
                 relay = None
         return {"version": VERSION, "temp": temp, "uptime": round(time.monotonic() - self.started),
                 "relay": relay, "buffered": len(self.buffer),
-                **(self.updater.health() if self.updater is not None else {})}
+                **(self.updater.health() if self.updater is not None else {}),
+                **(self.tunnel.health() if self.tunnel is not None else {})}
 
     def make_report(self, queues: dict, now: int) -> dict:
         events, self.outbox = self.outbox, []
@@ -160,7 +173,7 @@ class District:
         self.dev = DistrictDevice(self.id, key, root_public, gateway_public, pki / "edge" / f"{self.id}.gateway.json",
                                   probe=Probe(args.temp, None), relay_stats=_relay_reader(Path(args.relay) if args.relay else None),
                                   updater=make_updater(args.platform, args.server_name, self.tls_context),
-                                  state_path=pki / "edge" / f"{self.id}.seq")
+                                  state_path=pki / "edge" / f"{self.id}.seq", tunnel=Tunnel("district", self.id))
         self.sensors = Path(args.sensors) if args.sensors else None
         self.url = f"wss://{args.platform}/device"
         self.server_name = args.server_name

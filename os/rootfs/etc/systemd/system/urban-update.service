@@ -21,6 +21,7 @@ StandardError=journal+console
 # a download of the package is done; writing a slot over a slow disk takes minutes
 TimeoutStartSec=2h
 NoNewPrivileges=yes
+InaccessiblePaths=-/var/lib/urban/wg
 PrivateTmp=yes
 ProtectHome=yes
 ProtectKernelLogs=yes

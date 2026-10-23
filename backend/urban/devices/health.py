@@ -4,7 +4,10 @@ Rules are plain thresholds on the self-report (temperature, door, controller lin
 version) plus what the hub knows (session, last report). Each alert has a level: `warn` is
 something to plan around, `alert` means the unit cannot be trusted with commands right now.
 """
+import ipaddress
 import math
+
+from ..net import wireguard
 
 EXPECTED_VERSION = "0.1.0"
 TEXT_MAX = 80                        # longest string a unit may put into its health report
@@ -16,6 +19,15 @@ BLOCKING = {"door", "controller"}    # alerts that stop commands at that junctio
 
 UPDATE_STATES = {"downloading", "ready", "failed", "installing", "refused", "installed"}
 REASON_MAX = 120                     # longest reason an update state may carry
+
+# the tunnel to the district, as the root helper on the device last wrote it (/run/urban/wg.json, docs/wireguard-design.md)
+WG_STATES = {"none", "clock", "up", "down"}
+WG_MODES = {"off", "allow", "only"}
+WG_REASONS = {"", "bad file", "no trust anchor", "bad gateway certificate", "older gateway key", "bad signature",
+              "not addressed here", "older version", "wrong endpoint", "malformed"}  # the helper's fixed words
+WG_NETWORK = ipaddress.ip_network(wireguard.DEFAULT_BASE)
+WG_NUMBERS = {"applied": 10 ** 15, "epoch": 10 ** 6, "handshake": 10 ** 11,  # versions are ms timestamps, handshakes s
+              "peers": 255, "peers_up": 255}  # whole numbers from 0 up to (not including) these
 
 
 def _plain(text: str) -> str:
@@ -55,6 +67,38 @@ def clean(health) -> dict:
         v = health.get(key)
         if isinstance(v, str) and v:
             out[key] = v[:TEXT_MAX]
+    wg = _wg(health.get("wg"))  # a unit or a district: its tunnel, only with a real public key
+    if wg is not None:
+        out["wg"] = wg
+    return out
+
+
+def _wg(raw) -> dict | None:
+    """The tunnel part of a report: the device's tunnel public key (the centre takes its first one from here) and what
+    the root helper applied. Without a valid key the whole part is dropped; any other field that is not exactly what
+    the helper writes is dropped alone."""
+    if not isinstance(raw, dict):
+        return None
+    try:
+        out = {"public": wireguard.check_key(raw.get("public"))}
+    except wireguard.WireGuardError:
+        return None
+    for key, words in (("state", WG_STATES), ("mode", WG_MODES), ("reason", WG_REASONS)):
+        if isinstance(raw.get(key), str) and raw[key] in words:
+            out[key] = raw[key]
+    for key, top in WG_NUMBERS.items():
+        v = raw.get(key)
+        if isinstance(v, int) and not isinstance(v, bool) and 0 <= v < top:
+            out[key] = v
+    address = raw.get("address")
+    if isinstance(address, str) and len(address) <= 15:
+        try:
+            if ipaddress.IPv4Address(address) in WG_NETWORK:
+                out["address"] = address
+        except ValueError:
+            pass
+    if isinstance(raw.get("proven"), bool):
+        out["proven"] = raw["proven"]
     return out
 
 

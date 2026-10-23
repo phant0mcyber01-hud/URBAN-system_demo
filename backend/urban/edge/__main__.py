@@ -33,6 +33,10 @@ tried on real hardware yet.
 
 Every unit keeps its own outbound TLS session to the platform, authenticates with its own key
 and obeys only commands signed by the gateway.
+
+A real unit behind a district with the tunnel (edge/tunnel.py) dials --platform, the kit's address, until the root
+helper reports that a handshake has proven the tunnel link; from then on it dials the district's tunnel address
+(10.77.<district>.1:8443, which the district relays to the centre) and switches over within the same process.
 """
 import argparse
 import asyncio
@@ -58,6 +62,7 @@ from ..equipment.ntcip import NtcipAdapter
 from ..equipment.snmp import SnmpClient, SnmpV3Client
 from ..junctions import approved_plans, load_all_junctions
 from .device import EdgeDevice
+from .tunnel import Tunnel
 from .update import make_updater
 from .probe import Probe
 from ..sources.field import SUPERSEDED
@@ -311,31 +316,62 @@ class Unit:
         self.adapter = make_adapter(args)
         self.probe = Probe(args.temp, args.door, args.door_open)
         self.tls_context = ssl.create_default_context(cafile=str(args.ca or pki / "ca.pem"))
+        tunnel = Tunnel("unit", self.id)
         self.dev = EdgeDevice(self.id, args.junction, key, gateway_public, self.adapter,
                               state_path=Path(args.state or pki / "edge" / f"{self.id}.seq"),
                               root_public=root_public, gateway_state=pki / "edge" / f"{self.id}.gateway.json",
-                              probe=self.probe, updater=make_updater(args.platform, args.server_name, self.tls_context))
+                              probe=self.probe, tunnel=tunnel,
+                              updater=make_updater(lambda: tunnel.platform(args.platform), args.server_name, self.tls_context))
         self.sensors = Path(args.sensors) if args.sensors else None
+        self.platform = args.platform  # the kit's: the plain path, until the tunnel is proven
         self.url = f"wss://{args.platform}/device"
-        self.server_name = args.server_name
+        self.server_name = args.server_name  # the centre's name, whichever path leads to it
         self.ws = None
+        self.session_platform = None  # where the open session goes
+        self._closing = None
 
     async def ticker(self):
         while True:
             now = int(time.time())
             self.dev.tick(now)
             ws = self.ws
-            if ws is not None:
+            if ws is not None and not self.switch(ws):
                 try:
                     await ws.send(json.dumps(self.dev.report(read_sensors(self.sensors))))
                 except Exception:
                     self.ws = None
             await asyncio.sleep(max(0.0, (now + 1) - time.time()))
 
+    def switch(self, ws) -> bool:
+        """Close the open session if the centre is to be reached another way now (the tunnel was proven, or a new kit
+        cleared that); the session loop then dials the new way. The unit's process, leases and clock go on as they are.
+        True if it was closed."""
+        want = self.dev.tunnel.platform(self.platform)
+        if want is None or want == self.session_platform:
+            return False
+        if want == self.platform:
+            print(f"edge: back to the plain path: platform {want}", flush=True)
+        else:
+            print(f"edge: switching to the tunnel: platform {want}", flush=True)
+        self.ws = None
+        self._closing = asyncio.ensure_future(ws.close())  # not awaited: the ticker must not miss a second
+        return True
+
     async def session(self):
+        waiting = False
         while True:
+            platform = self.dev.tunnel.platform(self.platform)  # chosen anew for every attempt
+            if platform is None:  # the tunnel helper has not said yet whether the link is proven: no attempt
+                if not waiting:
+                    print("edge: waiting for the tunnel status", flush=True)
+                waiting = True
+                await asyncio.sleep(RETRY)
+                continue
+            waiting = False
+            self.session_platform = platform
             try:
-                async with websockets.connect(self.url, ssl=self.tls_context, server_hostname=self.server_name) as ws:
+                async with websockets.connect(f"wss://{platform}/device", ssl=self.tls_context,
+                                              server_hostname=self.server_name) as ws:
                     challenge = json.loads(await ws.recv())
                     if not isinstance(challenge, dict):
                         raise ConnectionError("no challenge")
@@ -351,7 +387,8 @@ class Unit:
                         print(f"edge: {why}: refusing to work", flush=True)
                         raise SystemExit(1)  # a unit that refuses to work says so to systemd
                     print(f"edge: {self.id} online at {self.dev.tls}, approved plans "
-                          f"{sorted(self.adapter.plans(self.dev.tls))}, gateway key epoch {self.dev.trust.epoch}", flush=True)
+                          f"{sorted(self.adapter.plans(self.dev.tls))}, gateway key epoch {self.dev.trust.epoch}, "
+                          f"platform {platform}", flush=True)
                     self.ws = ws
                     async for text in ws:
                         msg = json.loads(text)

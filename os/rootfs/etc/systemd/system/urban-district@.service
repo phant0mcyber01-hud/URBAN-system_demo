@@ -17,14 +17,15 @@ ExecStart=/opt/urban/.venv/bin/python -I -m urban.node.district --unit %i --plat
     --pki /etc/urban/pki --sensors "${SENSORS}" --relay /run/urban/relay.json --temp "${TEMP_SENSOR}"
 Restart=always
 RestartSec=2
-# The sandbox: its own key folder, the update inbox and the network, nothing else (as urban-edge@)
+# The sandbox: its own key folder, the update inbox, the tunnel inbox and the network, nothing else (as urban-edge@)
 NoNewPrivileges=yes
 ProtectSystem=strict
-# its key folder, and the update inbox (OTA updates: it downloads a package there and writes request.json;
-# the root helper urban-update.service installs it only after its own checks). The "-" keeps a server install
-# without the inbox working.
-ReadWritePaths=/etc/urban/pki -/var/lib/urban/update-inbox
-InaccessiblePaths=-/var/lib/urban/ssh -/var/lib/urban/update -/var/lib/urban/rauc -/var/lib/urban/platform -/boot
+# its key folder, the update inbox (OTA updates: it downloads a package there and writes request.json;
+# the root helper urban-update.service installs it only after its own checks) and the tunnel inbox (the centre's
+# signed peer list for the WireGuard tunnel to its units: the root helper urban-wg checks it again before it applies
+# it). The "-" keeps a server install without the inboxes working.
+ReadWritePaths=/etc/urban/pki -/var/lib/urban/update-inbox -/var/lib/urban/wg-inbox
+InaccessiblePaths=-/var/lib/urban/ssh -/var/lib/urban/update -/var/lib/urban/rauc -/var/lib/urban/platform -/boot -/var/lib/urban/wg
 ProtectHome=yes
 PrivateTmp=yes
 # no devices at all but the TPM's resource manager, through which the district signs with its device key (the key

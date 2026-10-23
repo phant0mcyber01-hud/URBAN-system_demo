@@ -76,11 +76,20 @@ def split_hostport(platform: str, default: int = 443) -> tuple[str, int]:
     return platform.strip("[]"), default
 
 
-def make_updater(platform: str, server_name: str, context: ssl.SSLContext) -> "Updater":
+def make_updater(platform, server_name: str, context: ssl.SSLContext) -> "Updater":
     """An Updater that downloads from `platform` (host:port of the device listener, or of the district relay in
-    front of it) with the TLS context and server name the device's websocket uses."""
-    host, port = split_hostport(platform)
-    return Updater(lambda: _TlsConnection(host, port, context, server_name))
+    front of it) with the TLS context and server name the device's websocket uses. `platform` may also be a function
+    that gives it, asked at each download: a unit's path to the centre moves into the tunnel (edge/tunnel.py), and
+    None from it means no path is known yet, so that download is not tried."""
+    where = platform if callable(platform) else (lambda: platform)
+
+    def connect():
+        target = where()
+        if target is None:
+            return None
+        host, port = split_hostport(target)
+        return _TlsConnection(host, port, context, server_name)
+    return Updater(connect)
 
 
 def valid_offer(spec) -> dict | None:
@@ -106,7 +115,8 @@ def _reason(text: str) -> str:
 
 class Updater:
     def __init__(self, connect, version=_READ, inbox: Path | None = None, status: Path | None = None):
-        """connect(): a fresh http.client connection to the centre's device listener;
+        """connect(): a fresh http.client connection to the centre's device listener, or None while there is no path
+        to it (that download fails and the offer is taken again later);
         version: the running system's version (default: read from the OS release file; None: unknown, so
         every offer is ignored); inbox, status: where the package goes and where the root helper reports."""
         self.connect = connect
@@ -182,6 +192,8 @@ class Updater:
             raise UpdateError("not enough free space for the package")
         digest, got = hashlib.sha256(), 0
         conn = self.connect()
+        if conn is None:  # the centre offers it again after a while
+            raise UpdateError("no path to the centre yet (waiting for the tunnel status)")
         try:
             conn.request("GET", spec["path"], headers={"Accept": "application/octet-stream"})
             resp = conn.getresponse()

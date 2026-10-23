@@ -77,6 +77,18 @@ if (!Object.values(team).some((t) => /Secure Boot/.test(t) && /(провер|п�
 if (!/шаг 7/i.test(teamAll) || !/PCR 7/.test(teamAll) || !/загрузочн\S* диск/i.test(teamAll) || !/старый подписанный выпуск|старую подписанную версию/i.test(teamAll))
   problems.push("team deck does not show what step 7 closed (PCR 7, boot disk) and what stays open (an old signed release)");
 
+// step 8: the team deck shows what the tunnel changed and what stays open; the gaps slide no longer lists it as missing;
+// the public deck says plainly, in one sentence, that camera video between the junction and the district is now closed
+if (!/шаг\s*8/i.test(changesText) || !/WireGuard/.test(changesText) || !/51820/.test(changesText) || !/\bonly\b/.test(changesText))
+  problems.push("team deck's changes slides do not show what step 8 changed (WireGuard on UDP 51820, mode only)");
+if (!/Открыто:[^.]*(QEMU|PresharedKey)/.test(changesText))
+  problems.push("team deck's changes slides do not say what stays open after step 8 (only QEMU, PresharedKey)");
+if (/WireGuard до района/.test(team.gaps || "")) problems.push("team gaps slide still lists «WireGuard до района»");
+if (!/WireGuard|туннел/.test(intruder)) problems.push("team intruder slide has nothing on the wire between the junction and the district");
+const videoClosed = Object.values(pub).flatMap((t) => t.split(/[.!?]/))
+  .some((s) => /видео/i.test(s) && /перекрёст/i.test(s) && /район/i.test(s) && /закрыт/i.test(s) && /теперь/i.test(s));
+if (!videoClosed) problems.push("public deck does not say that camera video between the junction and the district is now closed");
+
 if (problems.length) {
   for (const p of problems) console.log(`FAIL ${p}`);
   process.exit(1);

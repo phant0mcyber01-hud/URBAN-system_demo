@@ -1,9 +1,9 @@
 #!/bin/bash
 # What the machine's own screen shows above the login prompt: who it is and in which role, its key and
-# enrolment code (a junction unit), its address, the last self-check, its health and its power. An installer
-# plugs in a monitor and reads it; nothing has to be typed. Written to /run (the root is read-only) and
-# linked from /etc/issue.d; getty is asked to redraw. Called by urban-prepare, urban-os-check, urban-health,
-# the update helper and the power manager when its plan changes.
+# enrolment code (a junction unit), its tunnel to the district, its address, the last self-check, its health and its
+# power. An installer plugs in a monitor and reads it; nothing has to be typed. Written to /run (the root is read-only)
+# and linked from /etc/issue.d; getty is asked to redraw. Called by urban-prepare, urban-os-check, urban-health,
+# the update helper, the tunnel helper when the tunnel's state changes and the power manager when its plan changes.
 D=/var/lib/urban
 OUT=/run/urban/console.issue
 install -d /run/urban
@@ -50,6 +50,16 @@ if [ "$module" = lighting ]; then
   fi
   lightline=${lightline:-waiting for the lighting program}
 fi
+# The WireGuard tunnel to the district (a junction unit) or to the district's units (a district server): the line its
+# root helper urban-wg writes (state, addresses, handshake, the tunnel key's fingerprint). Only plain characters of it
+# reach the screen (a backslash would be a getty escape).
+tunnelline=""
+case "$(conf ROLE | tail -n 1):$module" in
+  unit:lighting) ;;
+  unit:*|district:*)
+    tunnelline=$(head -n 1 /run/urban/wg.txt 2>/dev/null | head -c 200 | tr -cd 'A-Za-z0-9 .,:()>_-')
+    tunnelline=${tunnelline:-no status yet (the tunnel helper urban-wg writes it at boot)} ;;
+esac
 case "$role" in
   unit) what="junction unit"; [ "$vision" = off ] && what="junction unit, light (no cameras)"
         [ "$module" = lighting ] && what="street-lighting cabinet (module lighting)" ;;
@@ -86,6 +96,7 @@ esac
     echo "                on the URBAN-ESP partition of this disk, then restart"
   fi
   [ -z "$lightline" ] || printf "  lighting      %s\n" "$lightline"
+  [ -z "$tunnelline" ] || printf "  tunnel        %s\n" "$tunnelline"
   printf "  system        URBAN OS %s, slot %s\n" "$version" "$slot"
   # the signed boot chain, as urban-os-check found it (the redraws from sandboxes cannot read the firmware variables)
   bootstate=$(cat /run/urban/boot-state 2>/dev/null)

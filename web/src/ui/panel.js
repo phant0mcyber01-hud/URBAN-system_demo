@@ -79,9 +79,58 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab, before
           <span title="последний отчёт">${age(d.a)} назад</span>
           ${devButton(d)}
         </div>
+        ${districtTunnel(d)}
         ${floorTag(d)}
         ${d.al.length > 1 ? `<small>${d.al.slice(1).map((a) => esc(a[1])).join(' · ')}</small>` : ''}
       </div>`;
+  // the WireGuard tunnel between a junction unit and its district (d.wg: the centre's view, DeviceHub._wg_row): the
+  // first tunnel key a device reports is taken by itself, a changed one waits for the admin; a district's relay port
+  // stays open to units outside the tunnel (mode allow) until the admin closes it (mode only)
+  const WG_STATE = { up: 'туннель поднят', down: 'туннель не поднят', clock: 'туннель ждёт верного времени', none: 'туннеля ещё нет' };
+  const WG_PROBLEM = {
+    'no district': 'напрямую к центру: туннеля нет', 'district not active': 'район отозван: туннеля нет',
+    'district has no tunnel key yet': 'район ещё не сообщил ключ туннеля', 'district address is not IPv4': 'адрес района не IPv4: туннеля нет',
+    'no tunnel key yet': 'блок ещё не сообщил ключ туннеля',
+  };
+  const wgPending = (d) => (d.wg?.pending
+    ? `${chip('warn', esc(`новый ключ туннеля ${d.wg.pending} ждёт подтверждения`))}${S.can('admin')
+      ? `<button data-act="wg-accept" data-id="${esc(d.id)}" title="Сверьте с экраном устройства: без повторного подключения ключ не меняется">Принять ключ туннеля</button>` : ''}` : '');
+  const wgCommon = (w) => `${w.behind ? chip('warn', 'не применено') : ''}${w.reason ? `<span title="последний отказ помощника туннеля">отказ: ${esc(w.reason)}</span>` : ''}${w.ignored_keys
+    ? `<span title="другие ключи, присланные после ожидающего, не сохранены">ещё ключей отброшено: ${esc(w.ignored_keys)}</span>` : ''}`;
+  const unitTunnel = (d) => {
+    const w = d.wg;
+    // a unit straight to the centre that never reported a tunnel key (an older system, the demo) has nothing to show
+    if (!w || (!w.address && !w.fingerprint && !w.pending && ['no district', 'revoked'].includes(w.problem))) return '';
+    const key = w.fingerprint ? `<span title="отпечаток ключа туннеля">ключ ${esc(w.fingerprint)}</span>` : '';
+    const link = w.address
+      ? `<span title="адрес блока в туннеле">туннель ${esc(w.address)}</span>${key}
+        ${w.handshake_age != null ? `<span title="последнее рукопожатие с районом">рукопожатие ${age(w.handshake_age)} назад</span>` : ''}
+        ${w.proven ? '<span title="блок ходит в центр через туннель">доказан</span>'
+          : '<span title="блок ходит в центр мимо туннеля, через открытый порт района">старый путь</span>'}
+        ${w.state ? `<span>${esc(WG_STATE[w.state] ?? w.state)}</span>` : ''}`
+      : key;
+    const problem = WG_PROBLEM[w.problem] ? `<span>${esc(WG_PROBLEM[w.problem])}</span>` : '';
+    return `<div class="row meta">${link}${problem}${wgCommon(w)}${wgPending(d)}</div>`;
+  };
+  const districtTunnel = (d) => {
+    const w = d.wg;
+    if (!w) return '';
+    const units = Object.values(S.dev).filter((u) => !isDistrict(u) && u.via === d.id && u.s === 'active');
+    const inTunnel = Math.max(0, units.length - (w.unproven?.length ?? 0));
+    const button = S.can('admin') && (w.index != null || w.mode === 'only')
+      ? (w.mode === 'only'
+        ? `<button data-act="wg-allow" data-id="${esc(d.id)}" title="Ретранслятор снова примет блоки и мимо туннеля">Открыть порт района</button>`
+        : `<button data-act="wg-only" data-id="${esc(d.id)}" title="Ретранслятор будет принимать блоки только через туннель">Закрыть открытый порт района</button>`)
+      : '';
+    return `<div class="row meta">
+        <span title="номер района в туннельной сети">${w.index != null ? `туннель №${esc(w.index)} · ${esc(w.address)}` : 'туннелю ещё не назначен номер'}</span>
+        <span title="кому отвечает ретранслятор района">${w.mode === 'only' ? 'порт района закрыт: только туннель' : 'порт района открыт'}</span>
+        <span title="блоки района, которые в этой сессии ходят в центр через туннель">${inTunnel} из ${units.length} блоков в туннеле</span>
+        ${w.fingerprint ? `<span title="отпечаток ключа туннеля">ключ ${esc(w.fingerprint)}</span>` : ''}
+        ${w.state ? `<span>${esc(WG_STATE[w.state] ?? w.state)}</span>` : ''}
+        ${wgCommon(w)}${wgPending(d)}${button}
+      </div>`;
+  };
   const plural = (n, one, few, many) => (n % 10 === 1 && n % 100 !== 11 ? one : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? few : many);
   const devState = (d) => (d.s === 'revoked' ? chip('bad', 'отозвано') : d.lock ? chip('bad', 'заблокирован')
     : d.o ? (d.al.length ? chip(d.al[0][0] === 'alert' ? 'bad' : 'warn', d.al[0][1]) : chip('ok', 'норма'))
@@ -104,7 +153,8 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab, before
     ? `ниже допустимой версии (ОС ${d.po} < ${d.fl}): команды не отправляются`
     : `версия ОС не подтверждена (допустимая от ${d.fl}): команды не отправляются`);
   const floorTag = (d) => (d.bf ? `<div class="floor">${chip('bad', esc(floorText(d)))}</div>` : '');
-  const flagged = (d) => (!d.o && !waiting(d)) || d.lock || d.al.length || d.s === 'revoked' || d.bf;
+  // a changed tunnel key waiting for the admin is flagged too: a genuine box does not change it without re-enrolment
+  const flagged = (d) => (!d.o && !waiting(d)) || d.lock || d.al.length || d.s === 'revoked' || d.bf || d.wg?.pending;
   const floorBox = () => {
     const f = S.osFloor;
     const value = f == null ? 'загрузка…' : f.floor == null ? 'не задана — команды получают устройства с любой версией ОС'
@@ -163,6 +213,7 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab, before
           <span title="последний отчёт">${age(d.a)} назад</span>
           ${devButton(d)}
         </div>
+        ${unitTunnel(d)}
         ${floorTag(d)}
         ${d.al.length > 1 ? `<small>${d.al.slice(1).map((a) => esc(a[1])).join(' · ')}</small>` : ''}
       </div>`)).join('');

@@ -113,6 +113,34 @@ const panel = createPanel(scene, S, {
       panel.refresh();
       return toast('минимальная версия ОС снята');
     }
+    // the tunnel to the district: a changed tunnel key waits for the admin; a district's relay port is closed to
+    // units outside the tunnel (mode only) or opened again (allow). The devices get it with their next report.
+    if (act === 'wg-accept') {
+      const d = Object.values(S.dev).find((x) => x.id === id);
+      if (!d?.wg?.pending) return toast('ключ туннеля уже не ждёт подтверждения');
+      const links = d.k === 'district'
+        ? Object.values(S.dev).filter((u) => u.k !== 'district' && u.via === id && u.s === 'active' && u.wg?.address).length : 0;
+      if (!window.confirm(`Принять новый ключ туннеля ${id}?\n\n${d.wg.fingerprint ?? '—'} → ${d.wg.pending}\n\n`
+        + 'Настоящий блок не меняет ключ туннеля без повторного подключения. Если устройство не заменяли и не подключали '
+        + 'заново, это почти наверняка подмена: не принимайте ключ, отзовите устройство и проверьте его на месте.'
+        + (d.k === 'district' ? `\n\nИзменятся связки блоков этого района: ${links}.` : ''))) return null;
+      const r = await api.post(`/api/devices/${encodeURIComponent(id)}/wg-accept`);
+      return toast(`ключ туннеля ${id} принят: ${r.fingerprint}`);
+    }
+    if (act === 'wg-only' || act === 'wg-allow') {
+      const d = Object.values(S.dev).find((x) => x.id === id);
+      const unproven = d?.wg?.unproven ?? [];
+      const names = unproven.length ? ` (${unproven.slice(0, 6).join(', ')}${unproven.length > 6 ? ', …' : ''})` : '';
+      const text = act === 'wg-only'
+        ? `Закрыть открытый порт района ${id}?\n\nРетранслятор района будет принимать блоки только через туннель. `
+          + (unproven.length ? `Не доказан туннель у блоков: ${unproven.length}${names}. Они потеряют связь с центром, пока их туннель не заработает.`
+            : 'У всех блоков района туннель доказан.')
+        : `Открыть порт района ${id}?\n\nРетранслятор снова будет принимать блоки и мимо туннеля, из частных сетей. `
+          + `Блоков без доказанного туннеля: ${unproven.length}${names}.`;
+      if (!window.confirm(text)) return null;
+      const r = await api.post(`/api/devices/${encodeURIComponent(id)}/wg-mode`, { mode: act === 'wg-only' ? 'only' : 'allow' });
+      return toast(r.mode === 'only' ? `порт района ${id} закрыт: блоки только через туннель` : `порт района ${id} открыт`);
+    }
     if (act === 'kit') return downloadKit(id);
     if (act === 'remove') {
       if (!window.confirm(`Убрать блок ${id} из реестра?\n\nОн уже отозван и не может подключиться. После удаления перекрёсток `

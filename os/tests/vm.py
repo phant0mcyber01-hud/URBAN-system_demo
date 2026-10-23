@@ -13,7 +13,8 @@
                                         override reaches the cabinet and its screen, a foreign cabinet is refused, the
                                         cabinet returns to its schedule by itself when the centre's listener stops
     python3 vm.py hardened [lighting]   an intruder on a junction unit (or a lighting cabinet): root, the hijacked service,
-                                        the device key inside the TPM and useless when copied to another machine
+                                        the device key inside the TPM and useless when copied to another machine; on the
+                                        unit also the tunnel's key, interface and inbox
     python3 vm.py secureboot            Secure Boot enforced: the unit boots with URBAN's keys; a boot loader not signed by
                                         them is refused by the firmware; a changed boot config is not executed; one changed
                                         byte in a slot makes it fail and the unit falls back to the other slot
@@ -26,6 +27,11 @@
     python3 vm.py chain                 unit -> district -> centre: three machines, the relay, the district's reports
     python3 vm.py ota                   over the air: the centre releases version 2, the district and the unit install it
                                         by themselves; the unit's root helper refuses what it must refuse
+    python3 vm.py wireguard             step 8: the chain with the district and the unit on a wire of their own: the tunnel
+                                        comes up from the centre's signed messages alone, a camera's stream crosses the
+                                        wire only inside it (QEMU's own capture of the wire, judged, with a control in
+                                        the clear), an outsider gets no answer, mode only, the district's tunnel down, the
+                                        unit's clock a year back, a revocation (os/tests/vm_wireguard.py)
     python3 vm.py demo [pilot]          the three machines (or the pilot's one) kept running, screens over VNC
     python3 vm.py demo-enrol            enrol the demo's district and unit at its centre, by the centre's CLI
     python3 vm.py demo-kit FILE DEVICE  put a kit downloaded from the demo's centre onto that machine
@@ -96,7 +102,8 @@ class VM:
     def __init__(self, name, version="1", unit="edge-J-07", serial="URB-TEST", image=None, key=KEY,
                  add_key=True, bus="virtio", nic="virtio-net-pci", role=None, host=None, grow_mb=0, forward=(),
                  listen="127.0.0.1", vnc=None, ssh_port=2222, mem=2048, tpm=True, center=None, vision=None, module=None,
-                 secure_boot=True, extra_disk=None, extra_bus="usb", console_input=False):
+                 secure_boot=True, extra_disk=None, extra_bus="usb", console_input=False, link=None, restrict=False,
+                 rtc=None, data_files=None):
         os.makedirs(LOGS, exist_ok=True)
         self.secure_boot = secure_boot  # firmware with URBAN's keys enrolled and Secure Boot enforced; False: the control
         self.name, self.disk, self.key, self.bus, self.nic = name, f"/tmp/{name}.img", key, bus, nic
@@ -106,6 +113,11 @@ class VM:
         self.swtpm = None
         self.extra_disk, self.extra_bus = extra_disk, extra_bus  # a second disk, attached as it is (a stranger's USB stick)
         self.console_input = console_input  # keys can be typed on the serial console (type_console); otherwise stdin is empty
+        # a second network card on a wire of its own ({"mac", "own", "peer"}: this end's and the other end's UDP socket,
+        # host:port), the netdev up0; none by default
+        self.link = link
+        self.restrict = restrict  # the slirp card carries the forwarded ports and nothing else out (no time server)
+        self.rtc = rtc  # the clock the machine starts with ("YYYY-MM-DDTHH:MM:SS", UTC), read at every start; None: now
         if image:  # a finished unit image: used as it is, nothing added
             sh(["mv", image, self.disk])
             unit, add_key = None, False
@@ -121,11 +133,24 @@ class VM:
             sh(f"mcopy -o -i {self.disk}@@{esp * 512} /tmp/urban-unit.txt ::/urban-unit.txt")
         if not os.path.exists(KEY):  # a maintenance key on the data partition, for the scenarios only
             sh(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", KEY])
-        if add_key:
+        if add_key or data_files:
             size = parts["urban-data"]["size"]
             sh(f"dd if={self.disk} of=/tmp/data.part bs=512 skip={data} count={size} status=none")
-            sh(["debugfs", "-w", "-R", "mkdir ssh", "/tmp/data.part"])
-            sh(["debugfs", "-w", "-R", f"write {KEY}.pub ssh/authorized_keys", "/tmp/data.part"])
+            if add_key:
+                sh(["debugfs", "-w", "-R", "mkdir ssh", "/tmp/data.part"])
+                sh(["debugfs", "-w", "-R", f"write {KEY}.pub ssh/authorized_keys", "/tmp/data.part"])
+            # what else the installer puts on the data partition (e.g. etc/network/*.network): {path there: text}
+            made = set()
+            for rel, text in (data_files or {}).items():
+                folders = rel.split("/")[:-1]
+                for i in range(1, len(folders) + 1):
+                    if "/".join(folders[:i]) not in made:
+                        sh(["debugfs", "-w", "-R", f"mkdir {'/'.join(folders[:i])}", "/tmp/data.part"])
+                        made.add("/".join(folders[:i]))
+                with open("/tmp/data-file", "w") as f:
+                    f.write(text)
+                os.chmod("/tmp/data-file", 0o644)  # debugfs copies the mode; systemd-networkd reads as its own user
+                sh(["debugfs", "-w", "-R", f"write /tmp/data-file {rel}", "/tmp/data.part"])
             sh(f"dd if=/tmp/data.part of={self.disk} bs=512 seek={data} conv=notrunc status=none")
         if grow_mb:  # a disk bigger than the image, as every real one is
             sh(["truncate", "-s", f"+{grow_mb}M", self.disk])
@@ -199,18 +224,30 @@ class VM:
             return drive + ["-device", "qemu-xhci,id=xhcix", "-device", "usb-storage,drive=x0,bus=xhcix.0,removable=on"]
         return drive + ["-device", "virtio-blk-pci,drive=x0"]
 
+    def _link(self) -> list[str]:
+        """The second network card, if any: a wire of its own to one other machine (QEMU's socket netdev in UDP mode:
+        connectionless, so neither end has to start first, and a cold restart of one end does not break it). The
+        machine finds it by its MAC address."""
+        if not self.link:
+            return []
+        return ["-netdev", f"socket,id=up0,udp={self.link['peer']},localaddr={self.link['own']}",
+                "-device", f"virtio-net-pci,netdev=up0,mac={self.link['mac']}"]
+
     def start(self):
         accel = ["-enable-kvm", "-cpu", "host"] if os.environ.get("URBAN_KVM") == "1" else ["-cpu", "max"]
         machine, firmware = self._firmware()
         self.boots.append(len(self.lines))
         self.proc = subprocess.Popen(
             ["qemu-system-x86_64", *machine, "-m", str(self.mem), "-smp", "2", *accel,
+             *(["-rtc", f"base={self.rtc}"] if self.rtc else []),
              *firmware,
              *DISK_BUS[self.bus](self.disk),
              *self._extra(),
              *(self._tpm() if self.tpm else []),
-             "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{self.ssh_port}-:22"
+             "-netdev", "user,id=n0" + (",restrict=on" if self.restrict else "")
+             + f",hostfwd=tcp:127.0.0.1:{self.ssh_port}-:22"
              + "".join(f",hostfwd=tcp:{self.listen}:{h}-:{g}" for h, g in self.forward), "-device", f"{self.nic},netdev=n0",
+             *self._link(),
              "-device", "i6300esb", "-watchdog-action", "reset", "-no-reboot",
              *(["-vnc", f"127.0.0.1:{self.vnc}"] if self.vnc is not None else ["-display", "none"]),
              "-serial", "stdio", "-monitor", f"unix:/tmp/{self.name}.mon,server,nowait",
@@ -674,18 +711,31 @@ def roles_in(slot, listing):
         "the initramfs script that opens the root as a verity device": "etc/initramfs-tools/scripts/local-top/urban-verity",
         "the signature of the kernel": "boot/vmlinuz.sig",
         "the signature of the initrd": "boot/initrd.img.sig",
+        # step 8: the tunnel between a junction unit and its district
+        "wireguard-tools (wg)": "usr/bin/wg",
+        "the tunnel's root helper": "usr/local/bin/urban-wg",
+        "the tunnel helper's path unit (messages from the centre)": "etc/systemd/system/urban-wg.path",
+        "the tunnel helper's timer": "etc/systemd/system/urban-wg.timer",
+        "the tunnel helper's service": "etc/systemd/system/urban-wg.service",
+        "the tunnel helper's program": "opt/urban/backend/urban/net/wghelper.py",
+        "the tunnel's keys, addresses and signed messages": "opt/urban/backend/urban/net/wireguard.py",
     }
     for what, path in need.items():
         if not re.search(r"(^|/)" + re.escape(path) + r"$", listing, re.M):
             raise Fail(f"the image lacks {what} ({path})")
+    if not re.search(r"kernel/drivers/net/wireguard/wireguard\.ko(\.xz|\.zst)?$", listing, re.M):
+        raise Fail("the image lacks the WireGuard kernel module (kernel/drivers/net/wireguard/wireguard.ko)")
     links = sh(["unsquashfs", "-lls", slot, "opt/urban/data"]).stdout
     if "-> /var/lib/urban/platform" not in links:
         raise Fail("the control centre's data does not live on the data partition")
     shutil.rmtree("/tmp/sq2", ignore_errors=True)
     sh(["unsquashfs", "-q", "-n", "-d", "/tmp/sq2", slot, "etc/nftables.conf", "usr/local/bin/urban-prepare",
-        "opt/urban/web/dist/index.html", "etc/modules", "etc/fstab", "usr/local/bin/urban-grow"])
-    if "dm_crypt" not in open("/tmp/sq2/etc/modules").read():
+        "opt/urban/web/dist/index.html", "etc/modules", "etc/fstab", "usr/local/bin/urban-grow", "usr/local/bin/urban-relay"])
+    modules = open("/tmp/sq2/etc/modules").read()
+    if "dm_crypt" not in modules:
         raise Fail("dm-crypt is not loaded at boot: the encrypted data partition could not be opened")
+    if not re.search(r"^wireguard\s*$", modules, re.M):
+        raise Fail("the WireGuard module is not loaded at boot (etc/modules)")
     if not re.search(r"^/dev/disk/urban/data-fs\s+/var/lib/urban\s", open("/tmp/sq2/etc/fstab").read(), re.M):
         raise Fail("the data partition is not mounted from /dev/disk/urban/data-fs (the boot disk's plain partition "
                    "or the LUKS volume opened from it)")
@@ -704,10 +754,23 @@ def roles_in(slot, listing):
                  "MODULE", "urban-lighting@$UNIT.service", "/run/urban/light", "--keygen", "--tpm auto"):
         if need not in prepare:
             raise Fail(f"urban-prepare does not start or open {need}")
+    # step 8: the tunnel's pieces at every boot of a tunnel role (its inbox, key, helper and firewall fragment), and
+    # the relay's modes
+    for need in ("wg-inbox", "urban-wg.path", "urban-wg.timer", "urban.net.wireguard keygen", "urban-wg boot",
+                 "/run/urban/nft/wg.nft", "udp dport 51820", "oifname != "):
+        if need not in prepare:
+            raise Fail(f"urban-prepare does not set up the tunnel: no {need!r}")
+    relay = open("/tmp/sq2/usr/local/bin/urban-relay").read()
+    for need in ("/run/urban/relay-mode", 'iifname "wg0"'):
+        if need not in relay:
+            raise Fail(f"urban-relay has no mode only (no {need!r})")
     if "<html" not in open("/tmp/sq2/opt/urban/web/dist/index.html").read().lower():
         raise Fail("the interface in the image is not a page")
     print("   roles: unit, district, center in one image; power manager, control centre, relay and district link; "
           "cryptsetup with the TPM2 libraries; dm-crypt at boot", flush=True)
+    print("   tunnel: wireguard-tools, the WireGuard module (loaded at boot), the root helper urban-wg with its path unit, "
+          "timer and service; urban-prepare makes the inbox, the key and the firewall fragment and starts the helper; "
+          "the relay knows mode only", flush=True)
 
 
 def boot():
@@ -834,6 +897,9 @@ def hardware():
 # made on the unit for the unit's own key, by the same code the platform uses. The unit's public key is asked of the
 # device signer (it is a TPM key, whose private half nobody can read, or an Ed25519 file; the signer says which).
 # KIT_REC (environment, JSON) adds to the unit's record: a lighting cabinet is {"kind": "lighting", "cabinet": ...}.
+# The stand's root key and gateway key stay in /tmp/pki (step 8: the hardened unit gets a tunnel message signed as the
+# centre would sign it); a junction unit's kit goes through a made-up district (district-x, 192.0.2.1), so its
+# PLATFORM is 192.0.2.1:8443, the address its tunnel link must name. A lighting cabinet's kit is as before.
 STAND_KIT = r"""set -e
 mkdir -p /tmp/pki
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout /tmp/pki/ca.key -out /tmp/pki/ca.pem   -days 30 -subj /CN=stand-platform 2>/dev/null
@@ -844,10 +910,14 @@ from urban.devices import crypto
 from urban.devices.enrolment import make_kit
 pub = subprocess.run([sys.executable, "-m", "urban.devices.signer", "--pki", "/var/lib/urban/etc/pki", "--unit", "UNIT", "--public"],
                      capture_output=True, text=True, check=True).stdout.split()[-1]
-Path("/tmp/pki/root.pub").write_text(crypto.public_hex(crypto.new_key()))
+for name in ("root", "gateway"):
+    key = crypto.new_key()
+    Path(f"/tmp/pki/{name}.key").write_text(crypto.private_hex(key))
+    Path(f"/tmp/pki/{name}.pub").write_text(crypto.public_hex(key))
 rec = {"id": "UNIT", "junction": "J-07", "name": "stand", "public_key": pub}
 rec.update(json.loads(os.environ.get("KIT_REC") or "{}"))
-kit = make_kit(rec, Path("/tmp/pki"), "platform.invalid", 8443)
+via = None if rec.get("kind") == "lighting" else {"id": "district-x", "address": "192.0.2.1"}
+kit = make_kit(rec, Path("/tmp/pki"), "platform.invalid", 8443, via=via)
 Path("/var/lib/urban/update/kit.json").write_text(json.dumps(kit))
 PY
 """
@@ -1389,9 +1459,33 @@ say jail_signs_with_tss_control "$(try inside_tss $signer)"
 say jail_signs_without_tss "$(try inside $signer)"
 say jail_sees_pid1 "$(try inside test -e /proc/1/status)"
 say jail_sees_itself_control "$(try inside test -e /proc/$pid/status)"
+# The tunnel (a junction unit, step 8): its private key is root's alone; the service reads the helper's status and sees
+# wg0 (controls) but changes neither the interface nor its peers; it may write its inbox (control), which the root helper
+# does not trust. Forwarding is on for wg0 and the cabinet network only, never globally nor for the slirp card.
+wgsvc=
+if [ "$svc" = "urban-edge@$unit" ]; then
+  wgsvc=urban-wg
+  say jail_reads_tunnel_key "$(try inside cat /var/lib/urban/wg/key)"
+  say root_reads_tunnel_key_control "$(try cat /var/lib/urban/wg/key)"
+  say jail_lists_tunnel_dir "$(try inside ls /var/lib/urban/wg)"
+  say jail_reads_wg_status_control "$(try inside cat /run/urban/wg.json)"
+  say jail_reads_interface_control "$(try inside ip link show wg0)"
+  say jail_changes_interface "$(try inside ip link set dev wg0 mtu 1300)"
+  say jail_wg_runs_control "$(try inside wg --version)"
+  say jail_adds_peer "$(try inside wg set wg0 peer "$(wg genkey | wg pubkey)" allowed-ips 10.77.9.9/32)"
+  say root_wg_control "$(try wg show wg0 public-key)"
+  say jail_writes_wg_inbox_control "$(try inside touch /var/lib/urban/wg-inbox/.probe)"
+  rm -f /var/lib/urban/wg-inbox/.probe
+  say wg_listen_port "$(wg show wg0 listen-port 2>/dev/null)"
+  n0=$(ip -o link | awk -F': ' 'tolower($0) ~ /52:54:00:12:34:56/ {sub(/@.*/, "", $2); print $2; exit}')
+  say n0_nic "$n0"
+  for k in net.ipv4.conf.all.forwarding net.ipv4.conf.wg0.forwarding net.ipv4.conf.cab0.forwarding "net.ipv4.conf.$n0.forwarding"; do
+    say "sysctl:$k" "$(sysctl -n "$k" 2>/dev/null)"
+  done
+fi
 say listening "$(ss -Hltun | awk '{print $1 "/" $5}' | sort -u | tr '\n' ' ')"
 echo exposure
-for u in urban-edge@$unit urban-vision@$unit urban-district@district-x urban-lighting@$unit urban-platform urban-power urban-relay ssh; do
+for u in urban-edge@$unit urban-vision@$unit urban-district@district-x urban-lighting@$unit urban-platform urban-power urban-relay ssh $wgsvc; do
   systemd-analyze security --no-pager "$u.service" 2>/dev/null | sed -n "s/.*Overall exposure level for \(\S*\): \([0-9.]*\).*/\1 \2/p"
 done
 """
@@ -1646,6 +1740,126 @@ def copied_key_is_useless(unit, tar_b64, sums, pub):
             os.remove(other.disk)
 
 
+# ---- step 8: the tunnel's pieces the scenarios share (hardened here, check-wireguard in vm_wireguard.py)
+
+WG_INBOX = "/var/lib/urban/wg-inbox"  # the unit service's inbox for the centre's tunnel messages (the root helper's input)
+
+# the unit's cabinet network (cameras, controller): a systemd-networkd file the installer puts on the data partition
+# (VM data_files), for the card cab0; in the checks cab0 is one end of a veth pair whose other end, cam0, sits in the
+# network namespace cab with the camera's address
+CAB_NETWORK = ("[Match]\nName=cab0\n\n[Link]\nRequiredForOnline=no\n\n[Network]\nAddress=192.168.50.1/24\nDHCP=no\n"
+               "LinkLocalAddressing=no\nIPv6AcceptRA=no\nConfigureWithoutCarrier=yes\n")
+CABINET = ("set -e; ip netns add cab; ip link add cab0 type veth peer name cam0; ip link set cam0 netns cab; "
+           "ip -n cab addr add 192.168.50.11/24 dev cam0; ip -n cab link set lo up; ip -n cab link set cam0 up; "
+           "ip link set cab0 up")
+# the unit's forward list (root's, written by the installer): one camera of the cabinet on tunnel port 8551
+CAMERAS = ("printf '[{\"name\":\"cam1\",\"host\":\"192.168.50.11\",\"port\":554,\"tunnel_port\":8551}]' "
+           "> /var/lib/urban/etc/wg-cameras.json && chmod 644 /var/lib/urban/etc/wg-cameras.json")
+
+# the gateway certificate a unit's service keeps once the centre presented it (pki/edge/<unit>.gateway.json), here
+# signed by the stand kit's root key for the stand's gateway key, epoch 1: the root helper's way to the gateway key
+STAND_CERT = r"""set -e
+/opt/urban/.venv/bin/python - "$1" <<'PY'
+import json, sys
+from pathlib import Path
+from urban.devices import crypto, trust
+root = crypto.load_private(Path("/tmp/pki/root.key").read_text())
+cert = trust.issue(root, Path("/tmp/pki/gateway.pub").read_text(), 1)
+Path(f"/var/lib/urban/etc/pki/edge/{sys.argv[1]}.gateway.json").write_text(json.dumps(cert))
+PY
+chown urban:urban "/var/lib/urban/etc/pki/edge/$1.gateway.json"
+chmod 600 "/var/lib/urban/etc/pki/edge/$1.gateway.json"
+"""
+
+# a tunnel link for the stand unit (args: unit, version, address, endpoint, stand|forged) to the made-up district-x
+# (tunnel number 9), signed by the stand's gateway key as the centre signs it, or by a key nobody knows (forged);
+# the district's tunnel key is made up once and is the same in every link. Written to /tmp, its path printed.
+STAND_LINK = r"""/opt/urban/.venv/bin/python - "$@" <<'PY'
+import json, sys, time
+from pathlib import Path
+from urban.devices import crypto
+from urban.net import wireguard as wg
+unit, version, address, endpoint, signer = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5]
+server = Path("/tmp/pki/wg-district.pub")
+if not server.exists():
+    server.write_text(wg.new_keypair()[1])
+key = crypto.load_private(Path("/tmp/pki/gateway.key").read_text()) if signer == "stand" else crypto.new_key()
+link = wg.make_link(wg.Plan.of(), unit, "district-x", 9, version, int(time.time()), address, server.read_text().strip(),
+                    endpoint)
+path = Path(f"/tmp/wg-link-{signer}-{version}.json")
+path.write_text(json.dumps(wg.sign_message(key, link.body())))
+print(path)
+PY
+"""
+
+# what a hijacked unit service can do with the tunnel: a file of its choosing (root's /tmp file $1) into its own inbox,
+# as message.json, the way the service writes it (a temporary name, then renamed), as its user in its own mount
+# namespace and without capabilities
+JAIL_WG_MESSAGE = r"""set -eu
+unit=$(sed -n 's/^UNIT=//p' /var/lib/urban/etc/unit.conf)
+pid=$(systemctl show -p MainPID --value urban-edge@$unit.service)
+nsenter -t "$pid" -m -- setpriv --reuid=urban --regid=urban --clear-groups --inh-caps=-all --bounding-set=-all -- \
+  sh -c 'cat > /var/lib/urban/wg-inbox/message.json.tmp && mv -f /var/lib/urban/wg-inbox/message.json.tmp /var/lib/urban/wg-inbox/message.json' < "$1"
+"""
+
+
+def wg_verdict(vm, since, timeout=300):
+    """The root helper's first word on a tunnel message after console line `since` (taken before the message was put in
+    the inbox): 'refused <reason>' or 'applied unit ...'."""
+    vm.mark = since
+    return vm.wait(r"URBAN-WG (refused .*|applied unit .*)", timeout).group(1).strip()
+
+
+def stand_tunnel(vm, unit):
+    """The hardened unit's tunnel, as the centre would give it: the gateway certificate its service keeps, a link to the
+    kit's district (district-x at 192.0.2.1, where nobody answers) signed by the stand's gateway key and put into the
+    inbox as the service puts it; then its cabinet network with one camera. The root helper applies the link (wg0 up
+    with 10.77.9.2) and forwards the camera."""
+    run_script(vm, STAND_CERT, unit)
+    path = run_script(vm, STAND_LINK, unit, "1", "10.77.9.2", "192.0.2.1:51820", "stand").stdout.split()[-1]
+    since = len(vm.lines)
+    vm.ssh(f"install -m 600 -o urban -g urban {path} {WG_INBOX}/message.json.tmp && "
+           f"mv -f {WG_INBOX}/message.json.tmp {WG_INBOX}/message.json")
+    said = wg_verdict(vm, since)
+    if said.split() != "applied unit version=1 address=10.77.9.2 endpoint=192.0.2.1:51820".split():
+        raise Fail(f"the root helper did not apply the stand's link: 'URBAN-WG {said}'")
+    vm.wait(r"URBAN-WG up unit address=10\.77\.9\.2", 300)
+    vm.ssh(CABINET)
+    vm.ssh(CAMERAS)
+    vm.wait(r"URBAN-WG cameras 1 forwarded", 300)
+
+
+def stand_tunnel_probes(vm, unit):
+    """What the hijacked service can do with its inbox (the jail writes each file as message.json): a link signed by a
+    key that is not the gateway's, and a genuine newer one naming another endpoint than the kit's district, are refused
+    by the root helper, and wg0 stays exactly as it was; a genuine newer link with the kit's endpoint (the control: the
+    same way in works) is applied. Returns a sentence for the summary."""
+    def wg0():
+        return (vm.ssh("ip -4 -o addr show dev wg0", check=False).stdout.strip(),
+                vm.ssh("wg show wg0 endpoints", check=False).stdout.strip())
+
+    before = wg0()
+    if "10.77.9.2/32" not in before[0] or "192.0.2.1:51820" not in before[1]:
+        raise Fail(f"control failed: wg0 is not the stand's link before the probes: {before}")
+    for what, args, want in (
+            ("a link with address 10.77.9.3 signed by a key that is not the gateway's",
+             ("5", "10.77.9.3", "192.0.2.1:51820", "forged"), "refused bad signature"),
+            ("a genuine link, version 3, naming the endpoint 198.51.100.1:51820",
+             ("3", "10.77.9.2", "198.51.100.1:51820", "stand"), "refused wrong endpoint"),
+            ("the control: a genuine link, version 2, the kit's endpoint",
+             ("2", "10.77.9.2", "192.0.2.1:51820", "stand"), "applied unit version=2 address=10.77.9.2 endpoint=192.0.2.1:51820")):
+        path = run_script(vm, STAND_LINK, unit, *args).stdout.split()[-1]
+        since = len(vm.lines)
+        run_script(vm, JAIL_WG_MESSAGE, path)
+        said = wg_verdict(vm, since)
+        if said.split() != want.split():
+            raise Fail(f"{what}: the root helper said 'URBAN-WG {said}', want 'URBAN-WG {want}'")
+        if wg0() != before:
+            raise Fail(f"{what}: wg0 changed: {before} -> {wg0()}")
+    return ("a forged link (bad signature) and a genuine one for another endpoint (wrong endpoint), written by the jail, "
+            "are refused with wg0 unchanged; the genuine version 2 is applied (control)")
+
+
 def hardened(kind="unit"):
     """An intruder on a junction unit (kind unit) or on a street-lighting cabinet (kind lighting). As root: no kernel
     memory, no other process's memory (the service holds the key's session), no loading another kernel, no core dumps,
@@ -1653,7 +1867,11 @@ def hardened(kind="unit"):
     nowhere but on this machine. As the hijacked service: no maintenance keys, no boot files, nothing writable but its
     own folders, no other process, no rauc install or reboot; it can still sign with the TPM (it is the unit), and no
     other urban process can. Every probe has a control that must succeed. Every network-facing URBAN service sandboxed
-    to systemd's 'OK' or better. SSH: modern cryptography only. Nothing listens but SSH."""
+    to systemd's 'OK' or better. SSH: modern cryptography only. Nothing listens but SSH.
+    The junction unit also gets its tunnel (step 8), from a link signed as the centre would sign it, and a camera in its
+    cabinet network: the hijacked service cannot read the tunnel key, change wg0 or its peers; a link it writes into its
+    inbox that is forged or names another endpoint is refused by the root helper; forwarding is on for wg0 and the
+    cabinet network only; beside SSH only wg0's own UDP port listens."""
     lighting = kind == "lighting"
     if kind not in ("unit", "lighting"):
         raise Fail(f"hardened: unknown kind {kind!r} (unit or lighting)")
@@ -1661,7 +1879,7 @@ def hardened(kind="unit"):
     service = f"urban-lighting@{unit}" if lighting else f"urban-edge@{unit}"
     who = "cabinet" if lighting else "unit"
     vm = (VM("hardened-lighting", unit=unit, serial="URB-L9", module="lighting", mem=1024) if lighting
-          else VM("hardened", unit=unit, serial="URB-9"))
+          else VM("hardened", unit=unit, serial="URB-9", data_files={"etc/network/10-cab.network": CAB_NETWORK}))
     try:
         vm.start()
         vm.booted("1", "A")
@@ -1691,6 +1909,8 @@ def hardened(kind="unit"):
         # the device key is in the TPM: on disk only a wrapped blob, no key file, no private key of the unit in any
         # form on the machine (controls beside each); then the hijacked service and root, below
         pub, scanned = key_in_tpm_probes(vm, unit)
+        if not lighting:  # only now: the key probes want nothing in the key folder but the TPM key
+            stand_tunnel(vm, unit)
         out = vm.ssh(ATTACK, check=False).stdout
         seen, exposure, section = {}, {}, None
         for line in out.splitlines():
@@ -1720,13 +1940,27 @@ def hardened(kind="unit"):
             "root_finds_key_file": "no", "root_reads_host_key_control": "yes",
             "jail_signs_with_tss_control": "yes", "jail_signs_without_tss": "no",
         }
+        n0, wg_port = seen.get("n0_nic", ""), seen.get("wg_listen_port", "")
+        if not lighting:  # the tunnel (step 8): its key, its interface, its inbox; forwarding per interface
+            want.update({
+                "jail_reads_tunnel_key": "no", "root_reads_tunnel_key_control": "yes", "jail_lists_tunnel_dir": "no",
+                "jail_reads_wg_status_control": "yes", "jail_reads_interface_control": "yes",
+                "jail_changes_interface": "no", "jail_wg_runs_control": "yes", "jail_adds_peer": "no",
+                "root_wg_control": "yes", "jail_writes_wg_inbox_control": "yes",
+                "sysctl:net.ipv4.conf.all.forwarding": "0", "sysctl:net.ipv4.conf.wg0.forwarding": "1",
+                "sysctl:net.ipv4.conf.cab0.forwarding": "1", f"sysctl:net.ipv4.conf.{n0}.forwarding": "0"})
         wrong = {k: (seen.get(k), v) for k, v in want.items() if seen.get(k) != v}
         if "[confidentiality]" not in seen.get("lockdown", ""):
             wrong["lockdown"] = (seen.get("lockdown"), "[confidentiality]")
         if seen.get("sysctl:kernel.unprivileged_bpf_disabled") not in ("1", "2"):
             wrong["unprivileged_bpf_disabled"] = (seen.get("sysctl:kernel.unprivileged_bpf_disabled"), "1 or 2")
+        if not lighting and not n0:
+            wrong["n0_nic"] = (n0, "the slirp card's name (MAC 52:54:00:12:34:56)")
+        if not lighting and not wg_port.isdigit():
+            wrong["wg_listen_port"] = (wg_port, "wg0's UDP port (wg show wg0 listen-port)")
         # every TCP and UDP socket that is not loopback-only: SSH on TCP 22 and the DHCP client on UDP 68 are
-        # the only ones allowed; the control is that SSH really shows up in the list (the probe sees sockets)
+        # the only ones allowed (on a junction unit also wg0's own UDP port, v4 and v6); the control is that SSH
+        # really shows up in the list (the probe sees sockets)
         sockets = [e.partition("/")[::2] for e in seen.get("listening", "").split()]
         extra, ssh_seen = [], False
         for netid, local in sockets:
@@ -1736,20 +1970,22 @@ def hardened(kind="unit"):
                 continue
             if netid == "tcp" and port == "22":
                 ssh_seen = True
-            elif not (netid == "udp" and port == "68"):
+            elif not (netid == "udp" and (port == "68" or (not lighting and port == wg_port))):
                 extra.append(f"{netid}/{local}")
         if not ssh_seen:
             wrong["listening_control"] = (seen.get("listening"), "SSH on TCP 22 in the list (else the probe is blind)")
         if extra:
-            wrong["listening"] = (extra, "only SSH (tcp 22) and the DHCP client (udp 68)")
+            wrong["listening"] = (extra, "only SSH (tcp 22) and the DHCP client (udp 68)"
+                                  + ("" if lighting else f" and wg0 (udp {wg_port})"))
         if wrong:
             raise Fail("an intruder gets more than nothing: " + "; ".join(f"{k}: got {g!r}, want {w!r}" for k, (g, w) in wrong.items()))
         urban = {k: float(v) for k, v in exposure.items() if k.startswith("urban-")}
-        if len(urban) < 7:
+        if len(urban) < (7 if lighting else 8) or (not lighting and "urban-wg.service" not in urban):
             raise Fail(f"systemd did not rate every URBAN service: {exposure}")
         loose = {k: v for k, v in urban.items() if v > EXPOSURE_MAX}
         if loose:
             raise Fail(f"services exposed above {EXPOSURE_MAX}: {loose}")
+        tunnel = None if lighting else stand_tunnel_probes(vm, unit)
         infer_ms, found = None, {}
         if not lighting:  # (a cabinet has no cameras: vision's own sandbox is the junction unit's business)
             # the detector runs inside vision's own sandbox (no executable memory, its system call filter, no devices):
@@ -1878,8 +2114,13 @@ def hardened(kind="unit"):
         if infer_ms is not None:
             print(f"   the detector runs inside vision's sandbox, replayed from its unit file ({', '.join(sorted(found))}): "
                   f"{infer_ms} ms a frame, emulated CPU", flush=True)
+        if tunnel is not None:
+            print("   TUNNEL: the hijacked unit service cannot read the tunnel key (root can), list /var/lib/urban/wg, change "
+                  "wg0's mtu or add a peer (wg runs in its jail: yes); it reads wg.json, sees wg0 and writes its inbox "
+                  f"(controls: yes); {tunnel}; forwarding on for wg0 and cab0 only (all 0, {n0} 0, ip_forward 0)", flush=True)
         print("   SSH refuses CBC and non-AEAD ciphers, SHA-1 key exchange and RSA host keys; no SHA-1 MAC configured; "
-              "only SSH (tcp 22) and the DHCP client (udp 68) listen", flush=True)
+              "only SSH (tcp 22) and the DHCP client (udp 68) listen"
+              + ("" if lighting else f", and wg0's own port (udp {wg_port})"), flush=True)
         print("HARDENING CHECK PASSED", flush=True)
     finally:
         vm.stop()
@@ -1954,28 +2195,53 @@ PROVISION = ("cd /opt/urban && runuser -u urban -- env $(grep -v '^#' /var/lib/u
              "/opt/urban/.venv/bin/python -m urban.provision")
 
 
-def chain_vms(prefix, listen="127.0.0.1", vnc=False):
+# step 8 (check-wireguard): the district and its unit on a wire of their own, as on a street: a QEMU socket card each,
+# sending each other UDP on the container's loopback. Inside, the card is found by its MAC and takes its address from a
+# systemd-networkd file the installer put on the data partition (no DHCP, no IPv6 on the wire).
+WIRE = {"district": {"mac": "52:54:00:77:00:01", "own": "127.0.0.1:10771", "peer": "127.0.0.1:10772"},
+        "unit": {"mac": "52:54:00:77:00:02", "own": "127.0.0.1:10772", "peer": "127.0.0.1:10771"}}
+
+
+def wire_network(mac, address):
+    """The networkd file of a machine's card on the wire (address with its prefix, e.g. 192.168.77.1/24)."""
+    return (f"[Match]\nMACAddress={mac}\n\n[Link]\nRequiredForOnline=no\n\n"
+            f"[Network]\nAddress={address}\nDHCP=no\nLinkLocalAddressing=no\nIPv6AcceptRA=no\n")
+
+
+def chain_vms(prefix, listen="127.0.0.1", vnc=False, link=False):
     """The three machines of the chain: the centre (the pilot's district,center), a district with its relay to the
     centre's forwarded port, a light unit. Each has its own SSH port; the district's 8443 is the container's 8443,
-    which is where the unit's kit sends it (10.0.2.2:8443 from inside a VM)."""
+    which is where the unit's kit sends it (10.0.2.2:8443 from inside a VM).
+    link=True (step 8, check-wireguard): the district (192.168.77.1) and the unit (192.168.77.2) also share a wire of
+    their own; the unit has its cabinet network's file (cab0), and its slirp card carries SSH and nothing else
+    (restrict: no time server, no way out but the wire)."""
+    to_district, to_unit = {}, {}
+    if link:
+        to_district = {"link": WIRE["district"],
+                       "data_files": {"etc/network/10-link.network": wire_network(WIRE["district"]["mac"], "192.168.77.1/24")}}
+        to_unit = {"link": WIRE["unit"], "restrict": True,
+                   "data_files": {"etc/network/10-link.network": wire_network(WIRE["unit"]["mac"], "192.168.77.2/24"),
+                                  "etc/network/10-cab.network": CAB_NETWORK}}
     centre = VM(f"{prefix}-center", unit="center", serial="PILOT-1", role="district,center", host="urban-center",
                 grow_mb=2048, forward=[(2443, 443), (28443, 8443)], ssh_port=2222, listen=listen, vnc=0 if vnc else None)
     district = VM(f"{prefix}-district", unit="district-1", serial="SRV-1", role="district", center="10.0.2.2:28443",
-                  forward=[(8443, 8443)], ssh_port=2223, mem=1024, listen=listen, vnc=1 if vnc else None)
-    unit = VM(f"{prefix}-unit", unit="edge-J-01", serial="URB-1", vision="off", ssh_port=2224, mem=1024, vnc=2 if vnc else None)
+                  forward=[(8443, 8443)], ssh_port=2223, mem=1024, listen=listen, vnc=1 if vnc else None, **to_district)
+    unit = VM(f"{prefix}-unit", unit="edge-J-01", serial="URB-1", vision="off", ssh_port=2224, mem=1024, vnc=2 if vnc else None,
+              **to_unit)
     return centre, district, unit
 
 
-def enrol_chain(centre, district, unit, junction="J-01"):
+def enrol_chain(centre, district, unit, junction="J-01", address="10.0.2.2"):
     """What the administrator does in the UI, done by the centre's CLI: the district with the address its units
-    use, the unit at its junction through the district; then each kit onto its machine."""
+    use (`address`: 10.0.2.2, the container's side of slirp; check-wireguard: 192.168.77.1, the district on the wire),
+    the unit at its junction through the district; then each kit onto its machine."""
     codes = {}
     for dev, vm in (("district-1", district), (f"edge-{junction}", unit)):
         code = vm.ssh("urban-unit code").stdout.strip()
         if not code.startswith(f"URBAN1:{dev}:"):
             raise Fail(f"{dev} printed no enrolment code: {code!r}")
         codes[dev] = code
-    centre.ssh(f"{PROVISION} enroll-district district-1 --address 10.0.2.2 --public {codes['district-1'].split(':')[3]} --serial SRV-1")
+    centre.ssh(f"{PROVISION} enroll-district district-1 --address {address} --public {codes['district-1'].split(':')[3]} --serial SRV-1")
     centre.ssh(f"{PROVISION} enroll edge-{junction} --junction {junction} --public {codes[f'edge-{junction}'].split(':')[3]} --serial URB-1")
     centre.ssh(f"{PROVISION} assign edge-{junction} --district district-1")
     for dev, vm in (("district-1", district), (f"edge-{junction}", unit)):
@@ -3204,6 +3470,9 @@ if __name__ == "__main__":
         elif what == "pcr7":  # step 7, G4: the data key sealed to PCR 7; locked when Secure Boot changes; the recovery key
             import vm_pcr7
             vm_pcr7.pcr7()
+        elif what == "wireguard":  # step 8, G5: the tunnel between the unit and its district (os/tests/vm_wireguard.py)
+            import vm_wireguard
+            vm_wireguard.wireguard()
         elif what == "update":
             if sys.argv[2] == "foreign":
                 foreign_bundle()

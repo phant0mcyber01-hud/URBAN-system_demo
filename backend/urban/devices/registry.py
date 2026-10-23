@@ -5,6 +5,15 @@ it has one: ECDSA P-256, else an Ed25519 file) and only the public half is enrol
 The demo instead generates every unit's key on one machine under data/pki, which is not in git.
 The registry file is re-read when another process changes it, so enrolment works while the
 platform runs.
+
+Units and district servers also keep their WireGuard tunnel here (urban/net/wireguard.py, docs/wireguard-design.md),
+in optional fields that old records simply lack ("not yet"):
+- district: wg_index (its tunnel number, given once), wg_public (its accepted tunnel key), wg_pending (a different
+  key it reported, waiting for an admin), wg_mode ("allow" or "only"; absent is "allow"), wg_retired (unit addresses
+  of this district that are never given again);
+- unit: wg_ip (10.77.<district>.<n>, given once), wg_public, wg_pending.
+The numbers are given lazily and kept: a district's when its own key is accepted or a unit of it needs an address,
+a unit's when it has an accepted key and an active district. Only retirement takes a unit's address away.
 """
 import datetime
 import ipaddress
@@ -19,12 +28,14 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
+from ..net import wireguard
 from . import crypto, trust
 from .enrolment import CABINET, DEVICE, LIGHT_DEVICE, SERIAL, check_address
 
 ACTIVE, REVOKED = "active", "revoked"
 UNIT, DISTRICT, LIGHTING = "unit", "district", "lighting"  # kinds of record: a junction's unit, a district server
 # units connect through, or the unit in a street-lighting cabinet (the lighting module, urban/modules/lighting)
+WG_MODES = ("allow", "only")  # a district's relay: still open to units outside the tunnel, or only through it
 
 
 def device_id(junction_id: str) -> str:
@@ -85,6 +96,14 @@ class Registry:
         if rec["status"] == REVOKED:
             raise ValueError(f"{district} is revoked: restore it first, or route the unit directly")
 
+    def _retire(self, rec: dict):
+        """A unit leaves its district (moved, routed directly, removed): its tunnel address is never given again there,
+        so no other unit inherits what that address was trusted with."""
+        ip = rec.pop("wg_ip", None)
+        old = self.devices.get(rec.get("district") or "")
+        if ip and old is not None and kind_of(old) == DISTRICT and ip not in old.get("wg_retired", []):
+            old["wg_retired"] = [*old.get("wg_retired", []), ip]
+
     def _check_key(self, device: str, public: str):
         """One key, one device: the same key under two ids would let one box act as two."""
         for other in self.devices.values():
@@ -109,6 +128,7 @@ class Registry:
         rec = self.devices.get(device, {})
         if rec.get("public_key") != public.strip().lower():
             rec.pop("first_seen", None)
+            _forget_tunnel_key(rec)
         rec.update({"id": device, "kind": DISTRICT, "junction": None, "tls": None, "name": "", "address": address,
                     "public_key": public.strip().lower(), "status": ACTIVE,
                     "serial": serial or rec.get("serial") or f"URB-{secrets.token_hex(3).upper()}",
@@ -162,6 +182,8 @@ class Registry:
             return None
         if district is not None:
             self._usable_district(district)
+        if rec.get("district") != district:
+            self._retire(rec)
         if district is None:
             rec.pop("district", None)
         else:
@@ -185,6 +207,9 @@ class Registry:
         rec = self.devices.get(device, {})
         if rec.get("public_key") != public.strip().lower():
             rec.pop("first_seen", None)  # a new key is a new box: it has not been seen yet
+            _forget_tunnel_key(rec)
+        if rec.get("district") != district:
+            self._retire(rec)
         rec.update({"id": device, "kind": UNIT, "junction": junction["id"], "tls": junction["tls"],
                     "name": junction.get("name", ""), "public_key": public.strip().lower(), "status": ACTIVE,
                     "serial": serial or rec.get("serial") or f"URB-{secrets.token_hex(3).upper()}",
@@ -226,6 +251,9 @@ class Registry:
             for other in self.devices.values():
                 if other.get("district") == device:
                     other.pop("district", None)
+                    other.pop("wg_ip", None)  # the district and its tunnel network are gone
+        else:
+            self._retire(rec)
         self._save()
         return rec
 
@@ -236,6 +264,116 @@ class Registry:
             rec["status"] = status
             self._save()
         return rec
+
+    # ---- the WireGuard tunnel: keys come from health reports, numbers are given once (the module docstring)
+    def _tunnel_key_holder(self, device: str, public: str) -> str | None:
+        """Another record that holds this tunnel key, accepted or waiting: one tunnel key, one record."""
+        for other in self.devices.values():
+            if other["id"] != device and public in (other.get("wg_public"), other.get("wg_pending")):
+                return other["id"]
+        return None
+
+    def wg_report(self, device: str, public: str, may_pend: bool = True) -> tuple[str, str | None]:
+        """A tunnel key a unit or a district server reported in its health (authenticated by its session). What
+        happened, as (what, detail):
+        ("accepted", None)  it had none: its first key is taken as it is (trust on first use);
+        ("same", None)      its accepted key; a different one that waited for an admin is dropped;
+        ("waiting", None)   the key that already waits for an admin;
+        ("pending", old)    a different key, kept waiting for an admin (old: the accepted one);
+        ("ignored", None)   a different key while may_pend is False (the hub lets one key wait per session);
+        ("in use", other)   another record holds this key: it is not stored;
+        ("none", None)      no such unit or district server."""
+        self._reload()
+        rec = self.devices.get(device)
+        if rec is None or kind_of(rec) not in (UNIT, DISTRICT):
+            return "none", None
+        if public == rec.get("wg_public"):
+            if rec.pop("wg_pending", None) is not None:
+                self._save()
+            return "same", None
+        if (other := self._tunnel_key_holder(device, public)) is not None:
+            return "in use", other
+        if not rec.get("wg_public"):
+            rec["wg_public"] = public
+            self._save()
+            return "accepted", None
+        if public == rec.get("wg_pending"):
+            return "waiting", None
+        if not may_pend:
+            return "ignored", None
+        rec["wg_pending"] = public
+        self._save()
+        return "pending", rec["wg_public"]
+
+    def wg_confirm(self, device: str) -> tuple[dict, str | None] | None:
+        """An admin confirms the tunnel key that waits: it becomes the accepted one. (record, the key it replaces), or
+        None when no key waits. ValueError if another record holds that key by now."""
+        self._reload()
+        rec = self.devices.get(device)
+        if rec is None or not rec.get("wg_pending"):
+            return None
+        if (other := self._tunnel_key_holder(device, rec["wg_pending"])) is not None:
+            raise ValueError(f"this tunnel key is in use by {other}")
+        old = rec.get("wg_public")
+        rec["wg_public"] = rec.pop("wg_pending")
+        self._save()
+        return rec, old
+
+    def wg_set_mode(self, device: str, mode: str) -> tuple[dict, str] | None:
+        """Whether a district's relay still answers units outside the tunnel ("allow") or only through it ("only").
+        (record, the mode it had), or None for an unknown device; ValueError for a unit or a word that is not a mode."""
+        self._reload()
+        rec = self.devices.get(device)
+        if rec is None:
+            return None
+        if kind_of(rec) != DISTRICT:
+            raise ValueError("not a district")
+        if mode not in WG_MODES:
+            raise ValueError("mode must be allow or only")
+        was = rec.get("wg_mode", "allow")
+        rec["wg_mode"] = mode
+        self._save()
+        return rec, was
+
+    def wg_number(self, device: str) -> list[tuple[str, str]]:
+        """Give this unit or district server the tunnel numbers it is due now, and keep them: a district its number
+        once its own key is accepted, a unit its address once it has an accepted key and an active district (which
+        then gets its number too, if it has none). Returns [(device, "<id> -> <number>")] for each number given now."""
+        self._reload()
+        rec = self.devices.get(device)
+        given = []
+        if rec is None or rec["status"] != ACTIVE or not rec.get("wg_public"):
+            return given
+        try:
+            if kind_of(rec) == DISTRICT and "wg_index" not in rec:
+                given.append(self._give_index(rec))
+            elif kind_of(rec) == UNIT and not rec.get("wg_ip"):
+                district = self.devices.get(rec.get("district") or "")
+                if district is not None and kind_of(district) == DISTRICT and district["status"] == ACTIVE:
+                    if "wg_index" not in district:
+                        given.append(self._give_index(district))
+                    taken = {d["id"]: d["wg_ip"] for d in self.devices.values()
+                             if d.get("district") == district["id"] and d.get("wg_ip")}  # revoked units keep theirs
+                    rec["wg_ip"] = wireguard.assign_unit(wireguard.Plan.of(), district["wg_index"], device, taken,
+                                                         district.get("wg_retired", []))
+                    given.append((device, f"{device} -> {rec['wg_ip']}"))
+        except wireguard.WireGuardError as err:  # a damaged number in the file, or a full network: nothing more is given
+            print(f"registry: no tunnel number for {device}: {err}", flush=True)
+        if given:
+            self._save()
+        return given
+
+    def _give_index(self, district: dict) -> tuple[str, str]:
+        numbers = {d["id"]: d["wg_index"] for d in self.devices.values() if kind_of(d) == DISTRICT and "wg_index" in d}
+        district["wg_index"] = wireguard.assign_index(district["id"], numbers)
+        return district["id"], f"{district['id']} -> {district['wg_index']}"
+
+
+def _forget_tunnel_key(rec: dict):
+    """A new device key is a new box: the tunnel key the old box reported is no longer trusted, and the new box's first
+    one is accepted by itself. Its tunnel address and its district's number stay."""
+    rec.pop("wg_public", None)
+    rec.pop("wg_pending", None)
 
 
 def save(path: Path, devices: dict[str, dict]):

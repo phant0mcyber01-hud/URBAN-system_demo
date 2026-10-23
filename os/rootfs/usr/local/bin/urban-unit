@@ -119,6 +119,10 @@ case "${1:-status}" in
   setup)
     [ -n "$UNIT" ] || { echo "no unit identity yet" >&2; exit 1; }
     /opt/urban/.venv/bin/python -I -m urban.edge --setup "$2" --unit "$UNIT" --pki /etc/urban/pki --env "/etc/urban/edge-$UNIT.env"
+    # the tunnel's root helper pins the kit's root.pub / gateway.pub as its own anchor while they are still root's (the
+    # service could rewrite its copies later); a kit for the same district keeps the tunnel link (proven again by the
+    # next handshake), a kit for another district or for the centre directly drops it
+    case "$UNIT" in edge-*|district-*) /usr/local/bin/urban-wg pin --replace || echo "URBAN-WG could not pin the kit's keys" ;; esac
     chown -R urban:urban "$D/etc/pki"
     # not "enable": /etc is read-only; urban-prepare starts a set-up unit at every boot
     case "$UNIT" in

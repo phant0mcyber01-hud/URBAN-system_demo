@@ -1,0 +1,10 @@
+#!/bin/bash
+# The root helper of the WireGuard tunnel between a junction unit and its district server (the logic and its tests:
+# backend/urban/net/wghelper.py; design: docs/wireguard-design.md). Only a junction unit and a district server have one.
+#   urban-wg run              the message the service put in /var/lib/urban/wg-inbox, checked again and applied; wg0,
+#                             its peers, the district's relay mode and the unit's camera forwards kept in line
+#                             (urban-wg.service, started by urban-wg.path and every 30 s by urban-wg.timer)
+#   urban-wg boot             every boot, from urban-prepare before the role's services: the status file
+#   urban-wg pin [--replace]  the kit's root.pub / gateway.pub pinned as the helper's own anchor (urban-unit setup)
+#   urban-wg status           the status (/run/urban/wg.json)
+exec /opt/urban/.venv/bin/python -I -m urban.net.wghelper "$@"

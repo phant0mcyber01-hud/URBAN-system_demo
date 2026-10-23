@@ -12,6 +12,9 @@
 #   center    the control centre: the platform and its interface over HTTPS
 #   district,center   both on one machine (the pilot)
 # A unit with VISION=off is a light unit: no camera work, ever.
+# A junction unit (not a lighting cabinet) and a district server also get the WireGuard tunnel between them
+# (docs/wireguard-design.md): a key of their own, an inbox for the centre's signed messages, the root helper urban-wg
+# and its firewall pieces. The pilot (district,center), a centre and a lighting cabinet get none of it.
 set -eu
 D=/var/lib/urban
 install -d -m 755 "$D" "$D/etc" "$D/rauc"
@@ -53,10 +56,13 @@ elif [ -f /boot/efi/maintenance.pub ]; then
   echo "URBAN-MAINTENANCE-KEYS added=$added total=$(grep -c . "$D/ssh/authorized_keys")"
 fi
 
-if compgen -G "$D/etc/network/*.network" >/dev/null; then
+# the static networks (a unit's cabinet network and its link to the district: two cards, or two VLANs whose virtual
+# links are *.netdev files), before networkd starts
+for f in "$D"/etc/network/*.network "$D"/etc/network/*.netdev; do
+  [ -f "$f" ] || continue
   install -d /run/systemd/network
-  cp "$D"/etc/network/*.network /run/systemd/network/
-fi
+  cp "$f" /run/systemd/network/
+done
 
 # KEY=value from the installer's text file on the ESP: CR/LF tolerant, only safe characters, never executed
 value() {
@@ -108,6 +114,13 @@ HOST=$(sed -n 's/^HOST=//p' "$D/etc/unit.conf")
 CENTER=$(sed -n 's/^CENTER=//p' "$D/etc/unit.conf")
 VISION=$(sed -n 's/^VISION=//p' "$D/etc/unit.conf")
 MODULE=$(sed -n 's/^MODULE=//p' "$D/etc/unit.conf")
+# the tunnel's two ends: exactly ROLE=unit without MODULE=lighting, or exactly ROLE=district (as urban-wg reads it)
+TUNNEL=""
+case "$(sed -n 's/^ROLE=//p' "$D/etc/unit.conf" | tail -n 1):$MODULE" in
+  unit:lighting) ;;
+  unit:*) TUNNEL=unit ;;
+  district:*) TUNNEL=district ;;
+esac
 hostname "$UNIT"  # /etc/hostname is read-only; the name is this machine's own
 echo "URBAN-ROLE role=$ROLE name=$UNIT${MODULE:+ module=$MODULE}${VISION:+ vision=$VISION}${CENTER:+ center=$CENTER}"
 # the only place the lighting program writes (its state, a screen line): on a lighting cabinet only, so that no
@@ -134,6 +147,46 @@ case ",$ROLE," in *,center,*)
 esac
 # a district's relay opens nothing here: urban-relay forwards 8443 from private networks to the centre in the
 # kernel (its own nat table and one forward rule), so no port of this machine answers its units at all
+
+# The tunnel's firewall pieces (a junction unit and a district server only). Tunnel addresses (10.77.0.0/16, inside the
+# private networks the base rules open) leave only through wg0, whatever route anyone adds; a closed port stays silent
+# (no ICMP answer gives a dead tunnel end away); WireGuard's UDP 51820 between the unit and its district. A unit forwards
+# only the district's connections to its cameras (DNATed by urban-wg's own table) and their answers. A district takes
+# nothing new from the tunnel into itself (its relay's 8443 is DNATed before input, a ping still answers), its units do
+# not reach each other through it, and its camera vision (user urban-vision, uid 991) reaches only the cameras' tunnel
+# ports and the loopback. The comments name the rules for the checks.
+wg_nft_unit() {
+  cat <<'EOF'
+insert rule inet urban output ip daddr 10.77.0.0/16 oifname != { "wg0", "lo" } counter drop comment "urban-wg: tunnel addresses only through the tunnel"
+insert rule inet urban output icmp type destination-unreachable icmp code port-unreachable counter drop comment "urban-wg: closed ports stay silent"
+add rule inet urban output udp dport 51820 accept comment "urban-wg: WireGuard to the district"
+insert rule inet urban forward ip daddr 10.77.0.0/16 oifname != "wg0" counter drop comment "urban-wg: tunnel addresses only through the tunnel"
+add rule inet urban forward iifname "wg0" ct status dnat accept comment "urban-wg: the district to the cabinet cameras"
+add rule inet urban forward oifname "wg0" ct state established,related accept comment "urban-wg: the cameras' answers"
+EOF
+}
+wg_nft_district() {
+  cat <<'EOF'
+insert rule inet urban input iifname "wg0" meta l4proto != icmp ct state new counter drop comment "urban-wg: nothing new from the tunnel into the district itself"
+add rule inet urban input udp dport 51820 accept comment "urban-wg: WireGuard from the units"
+add rule inet urban output udp sport 51820 accept comment "urban-wg: WireGuard to the units"
+insert rule inet urban output ip daddr 10.77.0.0/16 oifname != { "wg0", "lo" } counter drop comment "urban-wg: tunnel addresses only through the tunnel"
+insert rule inet urban output icmp type destination-unreachable icmp code port-unreachable counter drop comment "urban-wg: closed ports stay silent"
+add chain inet urban wg_vision
+add rule inet urban wg_vision oifname "lo" return
+add rule inet urban wg_vision oifname "wg0" ip daddr 10.77.0.0/16 tcp dport 8551-8599 return
+add rule inet urban wg_vision udp sport 51820 return comment "urban-wg: WireGuard's own packets (the kernel keeps the sender's socket on them)"
+add rule inet urban wg_vision counter drop comment "urban-wg: the district's vision reads cameras only through the tunnel"
+insert rule inet urban output meta skuid 991 jump wg_vision comment "urban-wg: the district's vision"
+insert rule inet urban forward ip daddr 10.77.0.0/16 oifname != "wg0" counter drop comment "urban-wg: tunnel addresses only through the tunnel"
+add rule inet urban forward iifname "wg0" oifname "wg0" counter drop comment "urban-wg: units do not reach each other"
+EOF
+}
+case "$TUNNEL" in
+  unit) wg_nft_unit > /run/urban/nft/wg.nft && chmod 644 /run/urban/nft/wg.nft || echo "URBAN-WG could not write the firewall pieces" ;;
+  district) wg_nft_district > /run/urban/nft/wg.nft && chmod 644 /run/urban/nft/wg.nft || echo "URBAN-WG could not write the firewall pieces" ;;
+  *) rm -f /run/urban/nft/wg.nft ;;
+esac
 
 case "$ROLE" in unit|district)  # a unit and a district have a key of their own and enrol with a code (the pilot's centre has neither)
   # The device key: made inside the TPM when the machine has one (a folder <unit>.tpm of TPM-wrapped blobs that no
@@ -162,6 +215,28 @@ case "$ROLE" in unit|district)  # a unit and a district have a key of their own 
   code=$(grep -o 'URBAN1:[^[:space:]]*' "$D/etc/enrolment.txt" || true)
   echo "URBAN-ENROLMENT unit=$UNIT serial=${SERIAL:--} fingerprint=$fingerprint code=$code key=$keyin" ;;
 esac
+# The tunnel's pieces on the data partition: the inbox the service puts the centre's signed messages in (the service's
+# own), and root's folder with the tunnel key (made here once, never replaced: X25519 has no place in the TPM, so it
+# is a root-only file, inside LUKS where there is a TPM), the helper's pinned anchor and what it applied. Then the
+# helper's boot step: the status the services read, before any of them starts. Nothing here may stop this script.
+if [ -n "$TUNNEL" ]; then
+  install -d -m 700 -o urban -g urban "$D/wg-inbox" || echo "URBAN-WG could not make the inbox"
+  install -d -m 700 -o root -g root "$D/wg" "$D/wg/trust" || echo "URBAN-WG could not make its folder"
+  if [ ! -s "$D/wg/key.pub" ]; then
+    { if [ -f "$D/wg/key" ]; then /opt/urban/.venv/bin/python -I -m urban.net.wireguard pubkey "$D/wg/key";
+      else /opt/urban/.venv/bin/python -I -m urban.net.wireguard keygen "$D/wg/key"; fi; } > "$D/wg/key.pub.tmp" \
+      && chmod 644 "$D/wg/key.pub.tmp" && mv -f "$D/wg/key.pub.tmp" "$D/wg/key.pub" || echo "URBAN-WG key could not be made"
+  fi
+  # fingerprint in bash (no Python): sha256 of the 32 raw bytes, first 16 hex, upper case, 4-4-4-4 (= wireguard.fingerprint)
+  wgpub=$(head -n 1 "$D/wg/key.pub" 2>/dev/null || true)
+  wgfp=none
+  if [ -n "$wgpub" ]; then
+    wgfp=$(printf '%s' "$wgpub" | base64 -d 2>/dev/null | sha256sum | cut -c1-16 | tr 'a-f' 'A-F' \
+      | sed 's/^\(....\)\(....\)\(....\)\(....\)$/\1-\2-\3-\4/' || true)
+  fi
+  echo "URBAN-WG key fingerprint=${wgfp:-none}"
+  /usr/local/bin/urban-wg boot || echo "URBAN-WG boot failed"
+fi
 /usr/local/bin/urban-console  # the same, on the machine's own screen
 
 # The role's services. They cannot be "enabled" (that writes into the read-only /etc), so they are started
@@ -214,3 +289,8 @@ elif [ "$ROLE" = unit ] && [ -f "$D/etc/edge-$UNIT.env" ]; then
 fi
 # the root helper for those updates waits for the client's request (a path unit: it cannot be "enabled" either)
 case ",$ROLE," in *,unit,*|*,district,*) systemctl start --no-block urban-update.path ;; esac
+# the tunnel's root helper: at once when the service has put a message in the inbox, and every 30 s (the clock, the
+# handshake, a firewall reload, a silent peer)
+if [ -n "$TUNNEL" ]; then
+  systemctl start --no-block urban-wg.path urban-wg.timer || echo "URBAN-WG the tunnel helper could not be started"
+fi

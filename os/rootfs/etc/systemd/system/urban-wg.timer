@@ -1,0 +1,12 @@
+# The tunnel helper every 30 s: the inbox once more, a clock that has become right (wg0 waits for a time not before the
+# build), the unit's handshake that proves its link, a firewall reload that took the camera table, a district peer that
+# has gone silent. Started by urban-prepare for a junction unit and a district server (the root is read-only, so it
+# cannot be "enabled"). The run itself is urban-wg.service.
+[Unit]
+Description=URBAN OS: keep the tunnel in line with the applied message
+
+[Timer]
+OnActiveSec=5s
+OnUnitActiveSec=30s
+AccuracySec=1s
+Unit=urban-wg.service

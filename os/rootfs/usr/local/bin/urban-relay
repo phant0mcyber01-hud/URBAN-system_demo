@@ -9,6 +9,13 @@ district sees only ciphertext passing through its kernel.
 Sets the rules once (re-resolving the centre's name until it resolves), then every few seconds writes what the
 relay does to /run/urban/relay.json for the district's report: units seen in the last 30 s, connections since
 start, bytes each way. Runs as root (nftables), with no network access of its own beyond the rule set.
+
+Its mode comes from the WireGuard tunnel between the district and its units (docs/wireguard-design.md): the root
+helper urban-wg writes /run/urban/relay-mode from the peer list the centre signed for this district.
+    off    no peer list applied (no file): units connect from any private network, as before the tunnel
+    allow  the move to the tunnel: the same, and from the tunnel too (the rules are the same as off)
+    only   from the tunnel only (wg0), that is units whose keys are in the district's list; a session that came in
+           another way before the switch is cut
 """
 import json
 import os
@@ -20,6 +27,17 @@ import time
 PORT = 8443          # where the district's units connect
 PRIVATE = "{ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 }"
 STATS = "/run/urban/relay.json"
+MODE = "/run/urban/relay-mode"  # written by the tunnel's root helper (urban-wg); /run/urban is root's alone
+
+
+def read_mode() -> str:
+    """allow or only as the tunnel helper wrote it; no file, or anything else, is off."""
+    try:
+        with open(MODE, encoding="ascii") as f:
+            mode = f.read(16).strip()
+    except (OSError, ValueError):
+        return "off"
+    return mode if mode in ("allow", "only") else "off"
 
 
 def resolve(host: str) -> str:
@@ -31,7 +49,15 @@ def resolve(host: str) -> str:
             time.sleep(5)
 
 
-def rules(ip: str, port: int) -> str:
+def rules(ip: str, port: int, mode: str = "off") -> str:
+    """The relay's table. off and allow give the same text (so the table is not rebuilt between them and its counters
+    and the units seen stay); only takes units from the tunnel alone, and its first forward rule cuts the sessions
+    that came in another way before the switch."""
+    if mode == "only":
+        dnat = f'iifname "wg0" tcp dport {PORT} dnat to {ip}:{port}'
+        cut = f'\n        ip daddr {ip} tcp dport {port} ct status dnat iifname != "wg0" counter drop'
+    else:
+        dnat, cut = f"ip saddr {PRIVATE} tcp dport {PORT} dnat to {ip}:{port}", ""
     return f"""
 table ip urban_relay
 delete table ip urban_relay
@@ -42,14 +68,14 @@ table ip urban_relay {{
     counter down {{ }}
     chain prerouting {{
         type nat hook prerouting priority dstnat; policy accept;
-        ip saddr {PRIVATE} tcp dport {PORT} dnat to {ip}:{port}
+        {dnat}
     }}
     chain postrouting {{
         type nat hook postrouting priority srcnat; policy accept;
         ip daddr {ip} tcp dport {port} ct status dnat masquerade
     }}
     chain forward {{
-        type filter hook forward priority -10; policy accept;
+        type filter hook forward priority -10; policy accept;{cut}
         ip daddr {ip} tcp dport {port} ct status dnat ct state new counter name sessions
         ip daddr {ip} tcp dport {port} ct status dnat update @units {{ ip saddr }} counter name up
         ip saddr {ip} tcp sport {port} ct status dnat counter name down
@@ -89,9 +115,9 @@ def drop_forward_rules():
             subprocess.run(["nft", "delete", "rule", "inet", "urban", "forward", "handle", handle], capture_output=True)
 
 
-def apply(ip: str, port: int):
+def apply(ip: str, port: int, mode: str = "off"):
     """The relay's table and its two forward rules, exactly once (a restart or a re-resolved centre replaces them)."""
-    r = subprocess.run(["nft", "-f", "-"], input=rules(ip, port), capture_output=True, text=True)
+    r = subprocess.run(["nft", "-f", "-"], input=rules(ip, port, mode), capture_output=True, text=True)
     if r.returncode != 0:
         raise SystemExit(f"URBAN-RELAY rules refused: {r.stderr.strip()}")
     drop_forward_rules()
@@ -122,11 +148,21 @@ def main():
     ip = resolve(host)
     with open("/proc/sys/net/ipv4/ip_forward", "w") as f:  # only a district forwards, and only this
         f.write("1")
-    apply(ip, port)
+    mode = read_mode()
+    apply(ip, port, mode)
     print(f"URBAN-RELAY units -> {ip}:{port} in the kernel (no relay process)", flush=True)
+    if mode != "off":
+        print(f"URBAN-RELAY mode {mode}: units -> {ip}:{port}", flush=True)
     started = checked = time.monotonic()
     os.makedirs(os.path.dirname(STATS), exist_ok=True)
     while True:
+        # the tunnel helper switched the mode: the table is rebuilt only if its text changes (to or from only)
+        wanted = read_mode()
+        if wanted != mode:
+            if rules(ip, port, wanted) != rules(ip, port, mode):
+                apply(ip, port, wanted)
+            mode = wanted
+            print(f"URBAN-RELAY mode {mode}: units -> {ip}:{port}", flush=True)
         # a firewall reload flushes the relay's table, and the centre's address may change: both mended here
         missing = subprocess.run(["nft", "list", "table", "ip", "urban_relay"], capture_output=True).returncode != 0
         if missing or time.monotonic() - checked > 300:
@@ -134,12 +170,12 @@ def main():
             now = resolve(host)
             if missing or now != ip:
                 ip = now
-                apply(ip, port)
+                apply(ip, port, mode)
                 print(f"URBAN-RELAY rules set again: units -> {ip}:{port}", flush=True)
         s, u, d = counter("sessions"), counter("up"), counter("down")
         stats = {"units": units(), "sessions": s.get("packets", 0), "refused": 0,
                  "bytes_up": u.get("bytes", 0), "bytes_down": d.get("bytes", 0),
-                 "centre": f"{ip}:{port}", "uptime": round(time.monotonic() - started), "kernel": True}
+                 "centre": f"{ip}:{port}", "uptime": round(time.monotonic() - started), "kernel": True, "mode": mode}
         for target, text in ((STATS, json.dumps(stats)),
                              (STATS[:-5] + ".txt", f"{stats['units']} unit(s) connected through it now, "
                                                    f"{stats['sessions']} session(s) since start\n")):

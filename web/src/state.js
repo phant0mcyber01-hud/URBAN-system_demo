@@ -43,7 +43,8 @@ export function createState(scene) {
     if (JSON.stringify(next) !== JSON.stringify(S.camStatus)) { S.camStatus = next; S.camVersion++; }
   }
 
-  // dev: junction id -> brief of its URBAN Edge unit: {id, o: online, s: status, v, t, d, c, l, u, a, n, al, lock}
+  // dev: junction id -> brief of its URBAN Edge unit: {id, o: online, s: status, v, t, d, c, l, u, a, n, al, lock,
+  // wg: its tunnel to the district, if it has one}; a district server's brief is under its own id
   function setDev(dev) {
     const sig = (d) => Object.entries(d).map(([k, v]) => `${k}:${v.o}${v.s}${v.lock}${v.al.length}`).join();
     if (sig(dev) !== sig(S.dev)) S.devVersion++;

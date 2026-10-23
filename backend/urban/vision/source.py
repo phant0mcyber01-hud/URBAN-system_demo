@@ -1,4 +1,5 @@
 """Frames from a camera: an RTSP stream from an IP camera in the cabinet's network, or a video file.
+RTSP is always read over TCP, the only way a district reads a junction's camera through the tunnel.
 
 Frames live in memory only, a few per second, and are dropped as soon as the detector is done with
 them. Nothing is recorded. A stream that breaks is reopened with a growing pause; while it is down
@@ -42,6 +43,10 @@ class VideoSource:
         url = expand(self.source)
         pause = 1.0
         while not stop.is_set():
+            if url.lower().startswith("rtsp://"):
+                # RTSP over TCP only (interleaved): a district reads a junction's camera through the unit's DNAT inside
+                # the tunnel, where UDP media never passes (docs/wireguard-design.md)
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
             cap = cv2.VideoCapture(url)
             if not cap.isOpened():
                 self.error = f"cannot open {redact(self.source)}"

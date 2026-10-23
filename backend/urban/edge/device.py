@@ -6,6 +6,8 @@ A command is obeyed only if all of this holds:
 - its sequence number is higher than anything seen before (no replays);
 - it is fresh: issued within MAX_SKEW seconds of the wall clock of the unit.
 Everything else is refused and reported. Leases then run exactly as in EdgeController.
+Two kinds of command are about the unit itself, not its junction, and skip the junction check: an OS update offer
+(edge/update.py) and the tunnel link {"wg": ...} (edge/tunnel.py). Neither ever reaches the controller.
 
 The sequence high-water mark survives restarts (it is written to `state_path`), so a command
 captured before a restart cannot be replayed after it.
@@ -47,7 +49,7 @@ def envelope_refusal(env: dict, device: str, public, last_seq: int, wall) -> str
 class EdgeDevice:
     def __init__(self, device_id: str, tls: str | None, key, gateway_public, adapter: ControllerAdapter,
                  state_path: Path | None = None, wall=time.time, script: dict | None = None,
-                 root_public=None, gateway_state: Path | None = None, probe=None, updater=None):
+                 root_public=None, gateway_state: Path | None = None, probe=None, updater=None, tunnel=None):
         """tls: the junction this unit is installed at, or None to take it from the platform's welcome;
         gateway_public: gateway.pub, or None for a unit that takes the gateway key from the root's certificate;
         state_path: where the last accepted sequence number is kept; wall(): wall-clock seconds;
@@ -56,7 +58,9 @@ class EdgeDevice:
         gateway_state: where the accepted gateway certificate is kept;
         probe(): {"temp", "door"} from the cabinet's real sensors (edge/probe.py), None in either when absent.
         Without a probe the unit is a demo one and its temperature and door follow `script`;
-        updater: takes the centre's signed OS update offers and reports the system version (edge/update.py)."""
+        updater: takes the centre's signed OS update offers and reports the system version (edge/update.py);
+        tunnel: takes the centre's signed tunnel link and reports the root helper's state (edge/tunnel.py). Without
+        one a {"wg": ...} body is an ordinary command, refused as not for this junction."""
         self.id, self.tls, self.key = device_id, tls, key
         self.trust = GatewayTrust(root_public, gateway_public, gateway_state)
         self.adapter = adapter
@@ -64,6 +68,7 @@ class EdgeDevice:
         self.script = script or {}
         self.probe = probe
         self.updater = updater
+        self.tunnel = tunnel
         self.started = time.monotonic()
         self.state_path, self.wall = state_path, wall
         self.last_seq = 0
@@ -107,7 +112,8 @@ class EdgeDevice:
     def on_command(self, env: dict) -> bool:
         body = env.get("body") if isinstance(env, dict) else None
         offer = isinstance(body, dict) and "update" in body  # an OS update offer: for this unit, not for its junction
-        why = self._refusal(env, junction=not offer)
+        link = self.tunnel is not None and isinstance(body, dict) and set(body) == {"wg"}  # its tunnel link: the same
+        why = self._refusal(env, junction=not (offer or link))
         if why:
             self.outbox.append({"type": "edge", "status": "refused", "device": self.id, "reason": why})
             return False
@@ -117,6 +123,12 @@ class EdgeDevice:
         if offer:  # never reaches the controller
             if self.updater is not None:
                 self.updater.offer(body["update"])
+            return True
+        if link:  # nor does this: the root helper checks it again and sets up wg0
+            why = self.tunnel.take(body["wg"], self.gateway_public, self.trust.epoch)
+            if why:
+                self.outbox.append({"type": "edge", "status": "refused", "device": self.id, "reason": why})
+                return False
             return True
         self.outbox += self.controller.handle(env["body"], self.clock)
         return True
@@ -159,7 +171,8 @@ class EdgeDevice:
                 "health": {"version": VERSION, "temp": temp, "door": door,
                            "controller": getattr(self.adapter, "last_error", None) or "ok",
                            "leases": len(self.controller.leases), "uptime": round(time.monotonic() - self.started),
-                           **(self.updater.health() if self.updater is not None else {})}}
+                           **(self.updater.health() if self.updater is not None else {}),
+                           **(self.tunnel.health() if self.tunnel is not None else {})}}
 
     def reset(self):
         """The street was reset (scenario restart in the demo): nothing is leased any more."""

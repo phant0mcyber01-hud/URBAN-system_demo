@@ -23,7 +23,10 @@ LINKTYPE_ETHERNET = 1
 ETH_ARP, ETH_IPV4, ETH_IPV6 = 0x0806, 0x0800, 0x86DD
 UDP, TCP, ICMPV6 = 17, 6, 58
 ND_TYPES = range(133, 138)   # router/neighbour solicitation and advertisement, redirect
+HOP_BY_HOP = 0
+MLD_TYPES = (130, 131, 132, 143)  # multicast listener query, report, done; MLDv2 report
 WG_PORT = 51820
+WG_MTU = 1420               # wireguard.MTU: a full packet is padded only up to it, so not always to a multiple of 16
 
 
 class CaptureError(ValueError):
@@ -82,6 +85,10 @@ def classify(frame: bytes) -> Packet:
     if ether == ETH_IPV6:
         if len(body) >= 41 and body[6] == ICMPV6 and len(body) > 40 and body[40] in ND_TYPES:
             return Packet("ipv6-nd")
+        # multicast listener reports (MLD, ICMPv6 behind a hop-by-hop header): a NIC's own link control, like ND
+        # (a firmware's network stack sends them at power-on, before any system runs)
+        if len(body) >= 49 and body[6] == HOP_BY_HOP and body[40] == ICMPV6 and body[48] in MLD_TYPES:
+            return Packet("ipv6-nd")
         return Packet("ipv6")
     if ether != ETH_IPV4 or len(body) < 20 or body[0] >> 4 != 4:
         return Packet("other")
@@ -104,13 +111,14 @@ def classify(frame: bytes) -> Packet:
 
 def wg_message_type(payload: bytes) -> int | None:
     """The WireGuard message type (1..4) if the UDP payload has the shape of one, else None. The shape: the type byte,
-    three zero bytes, and a length fixed per type (data messages are 32 bytes plus a multiple of 16)."""
+    three zero bytes, and a length fixed per type (data messages are 32 bytes plus a multiple of 16, or plus the tunnel's
+    MTU exactly: WireGuard pads to 16 only up to the MTU, so a full packet of 1420 bytes stays 1420)."""
     if len(payload) < 32 or payload[1:4] != b"\x00\x00\x00":
         return None
     kind, size = payload[0], len(payload)
     if (kind, size) in ((1, 148), (2, 92), (3, 64)):
         return kind
-    if kind == 4 and (size - 32) % 16 == 0:
+    if kind == 4 and ((size - 32) % 16 == 0 or size - 32 == WG_MTU):
         return 4
     return None
 

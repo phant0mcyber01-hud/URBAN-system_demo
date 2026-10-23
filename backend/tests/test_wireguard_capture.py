@@ -95,6 +95,31 @@ def test_anything_but_wireguard_between_the_machines_is_a_violation(frame, why):
     assert not v.clean and why in v.violations[0] and v.wg_frames == 0
 
 
+def test_a_full_mtu_data_message_is_wireguard():
+    # WireGuard pads to 16 only up to the MTU: a full 1420-byte packet travels as a 1452-byte message (seen in QEMU)
+    assert cap.wg_message_type(wg(4, 32 + 1420)) == 4
+    frames = [udp(UNIT, DISTRICT, 43887, 51820, wg(4, 32 + 1420)) for _ in range(3)]
+    assert cap.audit(cap.read_pcap(pcap(frames)), [UNIT, DISTRICT]).clean
+    # one byte off either way is not a WireGuard shape
+    assert cap.wg_message_type(wg(4, 32 + 1419)) is None and cap.wg_message_type(wg(4, 32 + 1421)) is None
+
+
+def test_a_multicast_listener_report_is_link_control_but_still_searched():
+    # MLDv2 report as a firmware sends it at power-on (seen in QEMU): IPv6, hop-by-hop header, ICMPv6 type 143
+    def mld(extra=b""):
+        hop = bytes([58, 0, 5, 2, 0, 0, 1, 0])  # next ICMPv6, router alert
+        icmp = bytes([143, 0, 0, 0]) + b"\x00\x00\x00\x01" + b"\x00" * 20 + extra
+        ip6 = b"\x60\x00\x00\x00" + (len(hop) + len(icmp)).to_bytes(2, "big") + bytes([0, 1]) + b"\x00" * 32
+        return ether(ip6 + hop + icmp, 0x86DD)
+    assert cap.audit(cap.read_pcap(pcap([mld()])), [UNIT, DISTRICT]).clean
+    # a pattern inside one is still a leak
+    v = cap.audit(cap.read_pcap(pcap([mld(b"URBAN-MARK-x")])), [UNIT, DISTRICT], [b"URBAN-MARK-x"])
+    assert v.leaks and not v.clean
+    # another IPv6 packet behind a hop-by-hop header is not
+    other = ether(b"\x60\x00\x00\x00\x00\x10\x00\x01" + b"\x00" * 32 + bytes([17, 0, 5, 2, 0, 0, 1, 0]) + b"\x00" * 8, 0x86DD)
+    assert not cap.audit(cap.read_pcap(pcap([other])), [UNIT, DISTRICT]).clean
+
+
 def test_neighbour_discovery_and_arp_are_not_data():
     nd = ether(b"\x60\x00\x00\x00\x00\x20\x3a\xff" + b"\x00" * 32 + bytes([135]) + b"\x00" * 31, 0x86DD)
     assert cap.audit(cap.read_pcap(pcap([nd, ether(b"\x00" * 28, 0x0806)])), [UNIT, DISTRICT]).clean

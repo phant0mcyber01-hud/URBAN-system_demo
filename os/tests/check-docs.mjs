@@ -34,8 +34,13 @@ const rest = text.slice(heading.index + heading[0].length);
 const nextH2 = /^## /m.exec(rest);
 const unverified = nextH2 ? rest.slice(0, nextH2.index) : rest;
 const word = (t, w) => new RegExp(`(?<![A-Za-z0-9])${w}(?![A-Za-z0-9])`).test(t);  // whole word (JS \b does not know Cyrillic neighbours)
-for (const [what, ok] of [["Secure Boot", unverified.includes("Secure Boot")], ["ARM", word(unverified, "ARM")], ["WireGuard", unverified.includes("WireGuard")]])
+// step 8 built the tunnel: its bullet says it was checked only in QEMU and what stays open, not that it is missing
+const wgBullet = unverified.split(/\n- /).find((b) => b.includes("WireGuard")) || "";
+const wgLimits = [/только в QEMU/, /настоящ\S* камер/, /VLAN/, /PresharedKey/, /IPv6/].every((rx) => rx.test(wgBullet));
+for (const [what, ok] of [["Secure Boot", unverified.includes("Secure Boot")], ["ARM", word(unverified, "ARM")],
+  ["WireGuard (checked only in QEMU: real camera, VLAN, PresharedKey, IPv6)", wgLimits]])
   if (!ok) fail(`the «Что не проверено» section of docs/edge-os.md does not mention ${what}`);
+if (/Канала WireGuard между перекрёстком и районом нет/.test(text)) fail("docs/edge-os.md still says there is no WireGuard tunnel to the district");
 
 // step 3: updates delivered by the centre are described, and no longer listed as missing
 if (!headings.some((h) => /обновлени.*(из центра|центр)/.test(h))) fail("docs/edge-os.md has no section on updates from the centre");
@@ -72,7 +77,11 @@ for (const must of ["## Три уровня", "Решения владельца
 // the "Не сделано" paragraph (up to the next blank line) names the two big gaps
 const todo = /\*\*Не сделано[^\n]*(?:\n(?!\n)[^\n]*)*/.exec(context);
 if (!todo) fail("CONTEXT.md has no «Не сделано» paragraph");
-if (!todo[0].includes("WireGuard")) fail("the «Не сделано» paragraph of CONTEXT.md does not mention WireGuard");
+// step 8 built the tunnel: the paragraph keeps WireGuard only for what stays open (hardware, PresharedKey, IPv6)
+if (!/WireGuard[^;]*на железе/.test(todo[0]) || !/PresharedKey/.test(todo[0]) || !/IPv6/.test(todo[0]))
+  fail("the «Не сделано» paragraph of CONTEXT.md does not say what stays open of the WireGuard tunnel (hardware, PresharedKey, IPv6)");
+if (context.includes("защищённый канал перекрёсток — район (WireGuard, отдельная сеть камер)"))
+  fail("CONTEXT.md still lists the WireGuard channel between the junction and the district as not done");
 if (!word(todo[0], "ARM")) fail("the «Не сделано» paragraph of CONTEXT.md does not mention ARM");
 if (/обновлени/i.test(todo[0]) && /платформ|центр/i.test(todo[0]) && /не раздаёт|по SSH/i.test(todo[0]))
   fail("the «Не сделано» paragraph of CONTEXT.md still lists updates from the centre as missing");
@@ -121,4 +130,53 @@ if (!/старый подписанный выпуск|старую подпис
   fail("docs/edge-os.md does not say that booting an old signed release with the disk in hand stays open (measured boot is later)");
 if (!/перемонтир/i.test(text)) fail("docs/edge-os.md does not say why the ESP is not made read-only (root can remount it)");
 if (!context.includes("(шаг 7)")) fail("CONTEXT.md does not record step 7");
+
+// step 8: the WireGuard tunnel between each junction unit and its district; its intruder row and its honest limits
+const sectionOf = (doc, rx) => {  // a "## " section up to the next "## " heading, or ""
+  const h = rx.exec(doc);
+  if (!h) return "";
+  const after = doc.slice(h.index + h[0].length);
+  const next = /^## /m.exec(after);
+  return next ? after.slice(0, next.index) : after;
+};
+const tunnel = sectionOf(text, /^## Туннель до района.*$/m);
+if (!tunnel) fail("docs/edge-os.md has no section on the tunnel to the district («Туннель до района»)");
+for (const must of ["51820", "10.77.0.0/16", "wg-peers", "wg-link", "wg-inbox", "urban-wg.path", "urban-wg.timer",
+  "urban-wg.service", "urban-wg boot", "plain_relay", "/run/urban/relay-mode", "wg-cameras.json", "rtsp_transport",
+  "check-wireguard.mjs", "wireguard-tools", "urban.net.wireguard keygen", "net.ipv4.conf.wg0.forwarding",
+  "/var/lib/urban/wg", "URBAN-WG", "Принять ключ туннеля", "Закрыть открытый порт района"])
+  if (!text.includes(must)) fail(`docs/edge-os.md never says ${JSON.stringify(must)} (the tunnel to the district)`);
+// the honest limits, one marker each: what the tunnel does not close or what was not tried
+for (const [what, rx] of [["checked only in QEMU", /Проверено только в QEMU/], ["the tunnel key is a root file, not in the TPM", /Curve25519/],
+  ["no PresharedKey, no IPv6", /PresharedKey[\s\S]*IPv6/], ["the first key is trusted on first use", /на доверии/],
+  ["the helper's trust anchor is pinned at setup", /[Яя]корь доверия помощника/], ["the clock rule knows only the build date", /только дату сборки/],
+  ["mode only is an admin's switch", /Режим `only`/], ["message versions are the centre's clock (rotate-gateway)", /rotate-gateway/],
+  ["the district endpoint is an IPv4 address, no DNS name", /имени DNS/], ["a camera cabled straight to the district is no longer read", /напрямую/],
+  ["SSH stays open, cookie replies under load", /cookie/], ["registry races, reused district numbers", /assign_index/],
+  ["gateway key rotation", /Смена ключа шлюза/], ["re-sent until applied («не применено»)", /не применено/],
+  ["revoking a district does not cut its units' tunnels", /Отзыв или удаление района/]])
+  if (!rx.test(tunnel)) fail(`the tunnel section of docs/edge-os.md does not state the limit: ${what}`);
+// the intruder table has a row for the wire between the unit and the district
+const intruderRows = sectionOf(text, /^## .*взломщик.*$/m).split("\n").filter((l) => l.startsWith("|"));
+if (!intruderRows.some((l) => /район/.test(l) && /WireGuard/.test(l) && /не видео/.test(l)))
+  fail("the intruder table of docs/edge-os.md has no row for the wire between the unit and the district");
+// the mini-PC guide: the unit's two networks, UDP 51820 and the stand checklist
+if (!gh.some((h) => /две сети/.test(h) && /туннел/.test(h))) fail("mini-pc.md has no section on the two networks and the tunnel");
+for (const must of ["UDP 51820", "wg-cameras.json", "/var/lib/urban/etc/network/"])
+  if (!g.includes(must)) fail(`mini-pc.md never says ${JSON.stringify(must)} (the tunnel to the district)`);
+const checklist = sectionOf(g, /^## Чек-лист.*$/m);
+if (!/51820/.test(checklist) || !/туннел/.test(checklist) || !/две сети/i.test(checklist))
+  fail("the stand checklist of mini-pc.md does not check the two networks and the tunnel");
+// vision: RTSP over TCP, through the tunnel
+const vision = readFileSync(join(ROOT, "docs", "vision.md"), "utf8");
+for (const must of ["rtsp_transport", "10.77.", "wg-cameras.json", "через туннель"])
+  if (!vision.includes(must)) fail(`docs/vision.md never says ${JSON.stringify(must)} (RTSP through the tunnel)`);
+// the design doc says it was built in step 8, points to GATES.md and no longer teaches what was not built
+const design = readFileSync(join(ROOT, "docs", "wireguard-design.md"), "utf8");
+if (!/построен на шаге 8/.test(design) || !design.includes("GATES.md")) fail("docs/wireguard-design.md does not say it was built in step 8 and point to GATES.md");
+if (!design.includes("/var/lib/urban/wg/key") || /pki\/wg\/|wg syncconf wg0|проект шага 7|Ворота шага 7/.test(design))
+  fail("docs/wireguard-design.md still describes the first draft (key in pki/wg, wg syncconf, step 7 gates)");
+if (!context.includes("(шаг 8)") || !/\| [0-9–]+ октября \| шаг 8/.test(context)) fail("CONTEXT.md does not record step 8 (section and history row)");
+for (const must of ["UDP 51820", "10.77.0.0/16", "urban-wg", "wg-inbox", "check-wireguard.mjs", "PresharedKey"])
+  if (!context.includes(must)) fail(`CONTEXT.md does not record ${JSON.stringify(must)} (step 8)`);
 console.log("DOCS CHECK PASSED");

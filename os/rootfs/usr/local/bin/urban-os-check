@@ -108,7 +108,8 @@ service_check() {  # $1 unit, $2 what
     warn+=("$2 does not stay up (see journalctl -u $1)")
   fi
 }
-python_ok urban.edge.__main__ urban.node.power urban.node.district urban.platform urban.devices.signer || fail+=("URBAN software does not start")
+python_ok urban.edge.__main__ urban.node.power urban.node.district urban.platform urban.devices.signer \
+  urban.net.wireguard urban.net.wghelper || fail+=("URBAN software does not start")
 systemctl cat urban-edge@check.service >/dev/null 2>&1 || fail+=("urban-edge@ service missing")
 systemctl cat urban-lighting@check.service urban-lighting-screen.timer urban-lighting-screen.service >/dev/null 2>&1 || fail+=("lighting services missing")
 systemctl cat urban-relay.service urban-district@check.service >/dev/null 2>&1 || fail+=("district services missing")
@@ -129,6 +130,23 @@ case ",$role," in *,unit,*|*,district,*)
     [ "$(stat -c %U:%a /var/lib/urban/update-inbox 2>/dev/null)" = urban:700 ] || warn+=("the update inbox is missing")
   fi ;;
 esac
+# The WireGuard tunnel between a junction unit and its district: the root helper's units, wireguard-tools and the kernel
+# module are in every image (an update without them must not stay); where the tunnel's inbox is (a junction unit, a
+# district server) the helper has written its status at boot. A tunnel that is not up is never a failure: it waits for
+# the centre's message, the clock or the district.
+systemctl cat urban-wg.path urban-wg.service urban-wg.timer >/dev/null 2>&1 || fail+=("tunnel helper units missing")
+command -v wg >/dev/null || fail+=("wireguard-tools missing")
+ip link del urban-wgchk >/dev/null 2>&1 || true  # one left by a check that was cut short
+{ ip link add urban-wgchk type wireguard && ip link del urban-wgchk; } >/dev/null 2>&1 || fail+=("the WireGuard module does not load")
+if [ -e /var/lib/urban/wg-inbox ] && [ ! -e /run/urban/wg.json ]; then fail+=("the tunnel helper wrote no status"); fi
+# the tunnel's state for the OK line: - where this machine has no tunnel (the pilot, a centre, a lighting cabinet)
+wg=-
+case "$(sed -n 's/^ROLE=//p' /var/lib/urban/etc/unit.conf 2>/dev/null | tail -n 1):$module" in
+  unit:lighting) ;;
+  unit:*|district:*)
+    wg=$(sed -n 's/.*"state": *"\([a-z]*\)".*/\1/p' /run/urban/wg.json 2>/dev/null | head -n 1)
+    case "$wg" in none|clock|up|down) ;; *) wg=none ;; esac ;;
+esac
 if [ "$role" = unit ] && [ "$module" = lighting ]; then
   # a street-lighting cabinet runs its lighting program instead of the junction unit (and has no cameras)
   python_ok urban.modules.lighting.__main__ || fail+=("the lighting software does not start")
@@ -147,7 +165,7 @@ esac
 install -d /run/urban
 if [ ${#fail[@]} -eq 0 ]; then
   note=""; [ ${#warn[@]} -gt 0 ] && note=" warn=$(IFS=';'; echo "${warn[*]}" | tr ' ' '_')"
-  echo "URBAN-OS-CHECK OK version=$version slot=$slot root=ro data=rw,$crypt firewall=on watchdog=$wd secureboot=$sb verity=$verity unit=$unit role=$role${module:+ module=$module}$note"
+  echo "URBAN-OS-CHECK OK version=$version slot=$slot root=ro data=rw,$crypt firewall=on watchdog=$wd secureboot=$sb verity=$verity unit=$unit role=$role${module:+ module=$module} wg=$wg$note"
   echo "OK - read-only system, data writable, firewall on, watchdog $wd${warn:+; WARNING: $(IFS=';'; echo "${warn[*]}")}" > /run/urban/os-check
   echo "$crypt" > /run/urban/data-crypt
   echo "secureboot=$sb verity=$verity" > /run/urban/boot-state

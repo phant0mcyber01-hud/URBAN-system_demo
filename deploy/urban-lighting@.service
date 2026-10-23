@@ -34,7 +34,7 @@ RestartSec=2
 NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths=/etc/urban/pki -/var/lib/urban/update-inbox -/run/urban/light
-InaccessiblePaths=-/var/lib/urban/ssh -/var/lib/urban/update -/var/lib/urban/rauc -/var/lib/urban/platform -/boot
+InaccessiblePaths=-/var/lib/urban/ssh -/var/lib/urban/update -/var/lib/urban/rauc -/var/lib/urban/platform -/boot -/var/lib/urban/wg
 ProtectHome=yes
 PrivateTmp=yes
 # the cabinet's contactor board on a serial line or a GPIO relay board: those devices only; and the TPM's resource

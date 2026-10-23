@@ -273,6 +273,10 @@ class Platform:
                 # it showed in its current session, fl: the floor
                 "bf": int(bool(row.get("below_floor"))), "fl": row.get("floor"), "po": row.get("os_proven"),
                 **({"cab": row["cabinet"]} if row.get("cabinet") else {}),  # a lighting unit: its cabinet
+                # its tunnel to the district (DeviceHub._wg_row): a district's always, a unit's once it is routed through
+                # a district or has reported a tunnel key (a unit straight to the centre on an older system has none)
+                **({"wg": wg} if (wg := row.get("wg")) and ("index" in wg or wg.get("district") or wg.get("fingerprint")
+                                                            or wg.get("pending")) else {}),
             }
         present = {row["junction"] if (row.get("kind") or "unit") == "unit" else row["id"] for row in rows}
         for key in [k for k in self.dev if k not in present]:  # removed from the registry

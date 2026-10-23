@@ -33,8 +33,10 @@ e2fsprogs,dosfstools,util-linux,fdisk,procps,libglib2.0-0,libgomp1,firmware-real
 # (systemd-cryptenroll / systemd-cryptsetup load libtss2 at run time); tpm2-tools: the device key of every unit,
 # district and lighting cabinet is made inside the TPM and signs there (urban.devices.signer drives tpm2_createprimary,
 # tpm2_create, tpm2_load, tpm2_sign). Its other libraries (libtss2-sys1, -fapi1, -tctildr0, libcurl4, ...) are Depends
-# of the package and come with it; libtss2-tcti-device0 (the /dev/tpmrm0 transport) is listed above
-EXTRA_PACKAGES="cryptsetup-bin libcryptsetup12 libtss2-esys-3.0.2-0 libtss2-mu0 libtss2-rc0 libtss2-tcti-device0 tpm2-tools"
+# of the package and come with it; libtss2-tcti-device0 (the /dev/tpmrm0 transport) is listed above.
+# wireguard-tools: `wg`, with which the root helper urban-wg sets up the tunnel between a junction unit and its district
+# (the WireGuard module itself is in Debian's kernel)
+EXTRA_PACKAGES="cryptsetup-bin libcryptsetup12 libtss2-esys-3.0.2-0 libtss2-mu0 libtss2-rc0 libtss2-tcti-device0 tpm2-tools wireguard-tools"
 # real mini-PCs: Realtek network chips want their firmware, and the CPU its microcode fixes (Debian's
 # non-free-firmware section, redistributable); Intel network chips need nothing
 ESP_MB=128; SLOT_MB=1536; DATA_MB=2048  # data: keys, kit, cameras and room for one update bundle
@@ -122,11 +124,13 @@ chroot "$ROOT" python3 -m venv /opt/urban/.venv
 chroot "$ROOT" /opt/urban/.venv/bin/pip install --quiet --upgrade pip
 chroot "$ROOT" /opt/urban/.venv/bin/pip install --quiet -e "/opt/urban/backend[edge,vision]"
 chroot "$ROOT" /opt/urban/.venv/bin/python -m compileall -q /opt/urban/backend/urban >/dev/null
-chroot "$ROOT" /opt/urban/.venv/bin/python -c "import urban.edge.__main__, urban.vision.__main__, urban.modules.lighting.__main__, urban.devices.signer, cv2, onnxruntime"
+chroot "$ROOT" /opt/urban/.venv/bin/python -c "import urban.edge.__main__, urban.vision.__main__, urban.modules.lighting.__main__, urban.devices.signer, urban.net.wireguard, urban.net.wghelper, cv2, onnxruntime"
 # the TPM tools the signer drives must be in the image and start (no TPM here: --version never opens a device)
 for t in tpm2_createprimary tpm2_create tpm2_load tpm2_sign; do
   chroot "$ROOT" "$t" --version >/dev/null || { echo "tpm2-tools: $t does not run in the image" >&2; exit 1; }
 done
+# the tunnel's tool runs in the image (--version needs no kernel module)
+chroot "$ROOT" wg --version >/dev/null || { echo "wireguard-tools: wg does not run in the image" >&2; exit 1; }
 # the control centre's interface (role center): built on the host with `npm run build` in web/
 [ -f /work/web/dist/index.html ] || { echo "web/dist is missing: run npm run build in web/ first" >&2; exit 1; }
 mkdir -p "$ROOT/opt/urban/web"; cp -r /work/web/dist "$ROOT/opt/urban/web/dist"; chmod -R a+rX,go-w "$ROOT/opt/urban/web"
@@ -144,6 +148,12 @@ cp /work/deploy/urban-edge@.service /work/deploy/urban-vision@.service /work/dep
 # the data partition is mounted from the boot disk's link /dev/disk/urban/data-fs (fstab): the plain partition or the
 # LUKS volume urban-grow opened; systemd-cryptsetup needs the dm-crypt module early
 echo dm_crypt >> "$ROOT/etc/modules"
+# the WireGuard module, loaded at boot: the tunnel helper's sandbox may not load modules (ProtectKernelModules), and the
+# self-check makes a WireGuard interface to see that it works
+echo wireguard >> "$ROOT/etc/modules"
+compgen -G "$ROOT/lib/modules/*/kernel/drivers/net/wireguard/wireguard.ko*" >/dev/null \
+  || compgen -G "$ROOT/usr/lib/modules/*/kernel/drivers/net/wireguard/wireguard.ko*" >/dev/null \
+  || { echo "the kernel has no WireGuard module (lib/modules/*/kernel/drivers/net/wireguard/wireguard.ko)" >&2; exit 1; }
 cp "$OUT/keys/ca.pem" "$ROOT/etc/rauc/keyring.pem"
 # the recovery escrow key's public half: urban-grow encrypts each unit's recovery key to it with the image's own openssl
 # (RSA-OAEP, SHA-256). Tried here once the way a unit will, and opened again when the private half is on this machine.

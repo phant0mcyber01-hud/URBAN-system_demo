@@ -1,0 +1,15 @@
+# A message from the control centre for the tunnel is waiting: the unit's or the district's service (user urban,
+# sandboxed) has checked it and put it into the tunnel inbox. Started by urban-prepare for a junction unit and a district
+# server (the root is read-only, so it cannot be "enabled"). The root helper behind it is urban-wg.service; the 30 s
+# timer runs it too, so a path unit stopped by anything only delays the message to the next tick.
+[Unit]
+Description=URBAN OS: a tunnel message from the control centre is waiting in the inbox
+DefaultDependencies=no
+Conflicts=shutdown.target
+Before=shutdown.target
+# an intruder's endless messages must not make systemd give up on the next real one
+StartLimitIntervalSec=0
+
+[Path]
+PathExists=/var/lib/urban/wg-inbox/message.json
+Unit=urban-wg.service

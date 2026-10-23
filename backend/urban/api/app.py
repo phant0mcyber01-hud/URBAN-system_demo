@@ -540,13 +540,17 @@ def history_queues(junction: str, hours: float = 24, who: str = Depends(viewer))
 
 @app.get("/api/devices")
 def devices(who: str = Depends(viewer)):
-    """The registry with live health: enrolment data, session, last report and alerts per unit."""
+    """The registry with live health: enrolment data, session, last report and alerts per unit; wg: the tunnel of a
+    unit or district server (DeviceHub._wg_row), null for a lighting cabinet."""
     from ..devices.health import assess
     return [{**row, "alerts": assess(row)} for row in hub.status()]
 
 
 # the version floor: GET /api/os-floor (anyone signed in), POST /api/os-floor {"floor": N | null} (admin, audited)
 app.include_router(hub.floor_routes(viewer, admin))
+# the tunnel between a unit and its district (admin, audited): POST /api/devices/{id}/wg-accept confirms a changed
+# tunnel key, POST /api/devices/{id}/wg-mode {"mode": "allow" | "only"} opens or closes a district's relay port
+app.include_router(hub.wg_routes(viewer, admin))
 
 
 class Link(BaseModel):

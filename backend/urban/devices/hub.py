@@ -10,8 +10,19 @@ a device that cannot show it runs at least system N gets no commands at all, onl
 The rule is DeviceHub.floor_verdict. It is a mitigation for a unit put back on an old, possibly vulnerable, signed
 release by someone with its disk in hand; it relies on what the device reports, so it does not stop a device that
 lies about its version (that needs measured boot, a later step).
+
+The hub also runs the centre's end of the WireGuard tunnel between each junction unit and its district server
+(urban/net/wireguard.py, docs/wireguard-design.md). A unit or district reports its tunnel public key in its health;
+the first one is accepted by itself, a changed one waits for an admin (POST /api/devices/{id}/wg-accept). The hub
+numbers the district and the unit's tunnel address once (devices/registry.py) and sends, inside an ordinary signed
+command {"wg": <message signed by the gateway key>}, the district its peer list and the unit its link: after the first
+report of each session, again whenever the content changes, and again while the device reports an older one applied.
+Only a device whose current session reported a tunnel key gets anything, so an older system, the pilot and a lighting
+cabinet see no change.
 """
 import asyncio
+import dataclasses
+import ipaddress
 import json
 import secrets
 import time
@@ -22,15 +33,42 @@ from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisco
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, StrictInt
 
+from ..net import wireguard
 from ..release import ReleaseError
 from . import crypto
+from .enrolment import has_port
 from .health import clean
-from .registry import ACTIVE, REVOKED, Registry, kind_of
+from .registry import ACTIVE, DISTRICT, REVOKED, UNIT, Registry, kind_of
 
 HELLO_TIMEOUT = 10  # seconds a connection may stay unauthenticated
 LINK_TTL = 3600     # seconds a download link for an update package stays valid
 REOFFER = 600       # seconds before the same release is offered to the same device again (it may be downloading)
 FLOOR_KINDS = ("unit", "district", "lighting")  # the devices that run URBAN OS: the version floor applies to them
+WG_KINDS = (UNIT, DISTRICT)  # the records with a tunnel; a lighting cabinet and the centre have none
+WG_PLAN = wireguard.Plan.of()  # 10.77.0.0/16: the district is 10.77.<number>.1, its units .2 to .254
+WG_RESEND, WG_RESEND_MAX = 30, 960  # seconds: a tunnel message not applied goes again, the pause doubling up to 960
+
+
+def wg_endpoint(address) -> str | None:
+    """Where a unit finds its district's WireGuard listener: the district's enrolled address without its port, on UDP
+    51820. Only an IPv4 literal outside the tunnel network qualifies (the helper on the unit holds the link to the same
+    host as its kit); a host name or anything else is None: no link is built for it."""
+    host = str(address or "").strip()
+    if has_port(host):
+        host = host.rpartition(":")[0]
+    try:
+        ipaddress.IPv4Address(host)
+        return wireguard.check_endpoint(WG_PLAN, host)
+    except ValueError:  # not an IPv4 literal, or inside 10.77.0.0/16 (wireguard.WireGuardError)
+        return None
+
+
+def wg_fingerprint(public) -> str | None:
+    """wireguard.fingerprint of a tunnel key from the registry, or None (no key, or not one)."""
+    try:
+        return wireguard.fingerprint(public) if public else None
+    except wireguard.WireGuardError:
+        return None
 
 
 def floor_words(floor: int, have: int | None) -> str:
@@ -42,6 +80,10 @@ def floor_words(floor: int, have: int | None) -> str:
 
 class FloorChange(BaseModel):
     floor: StrictInt | None  # the new minimum system version; null clears it
+
+
+class WgMode(BaseModel):
+    mode: str  # "allow": the district's relay still answers units outside the tunnel; "only": through the tunnel only
 
 
 class DeviceHub:
@@ -72,6 +114,17 @@ class DeviceHub:
         self._stale: set[str] = set()  # sessions opened on a key or status that has since changed
         self.epochs: dict[str, int | None] = {}  # device id -> gateway key epoch it trusted when it connected
         self._seq = time.time_ns() // 1_000_000  # survives restarts without going backwards
+        # the tunnel, in memory only (the registry keeps keys and numbers): devices whose current session reported a
+        # tunnel key; the last message built for each ({"content", "msg"}); what went to it in this session
+        # ({"version", "at", "pause"}); devices that got a key set waiting in this session; keys ignored after that
+        # (device -> (last such key, how many)); wg-key-refused audited this session; wg-link-refused audited
+        self._wg_live: set[str] = set()
+        self._wg_built: dict[str, dict] = {}
+        self._wg_sent: dict[str, dict] = {}
+        self._wg_pended: set[str] = set()
+        self._wg_ignored: dict[str, tuple[str, int]] = {}
+        self._wg_key_refused: set[str] = set()
+        self._wg_link_refused: set[tuple[str, str]] = set()  # (unit, district address), once per process
 
     # ---- towards devices: this is gateway.send
     def online(self, tls: str) -> bool:
@@ -328,6 +381,245 @@ class DeviceHub:
             return FileResponse(path, media_type="application/octet-stream", filename=name)
         return router
 
+    # ---- the tunnel between a unit and its district: keys in from health reports, signed messages out
+    def _wg_session(self, device: str):
+        """A new session proves its tunnel key anew, gets its message again and starts a new resend schedule."""
+        self._wg_live.discard(device)
+        self._wg_sent.pop(device, None)
+        self._wg_pended.discard(device)
+        self._wg_ignored.pop(device, None)
+        self._wg_key_refused.discard(device)
+
+    def _wg_report(self, device: str, ws):
+        """Key intake, after heard(): the tunnel key in this report goes to the registry (Registry.wg_report). The first
+        key is accepted; a different one is set waiting for an admin once per session, and any further one in that
+        session is only counted; a key another record holds is refused. Audited on the event loop. ws: the session
+        the report came on; one that is no longer the device's session takes nothing."""
+        wg = self.seen.get(device, {}).get("health", {}).get("wg")
+        if wg is None:
+            return
+        self._sync()  # a change made with the CLI counts from this report on
+        if self.sessions.get(device) is not ws:  # closed by that change: a re-enrolled box's first key is the new box's
+            return
+        rec = self.registry.devices.get(device)
+        if rec is None or kind_of(rec) not in WG_KINDS:
+            return
+        self._wg_live.add(device)
+        public = wg["public"]
+        try:
+            what, detail = self.registry.wg_report(device, public, may_pend=device not in self._wg_pended)
+            if what == "accepted":
+                self.audit("wg-key-accepted", device, wireguard.fingerprint(public), actor="platform")
+                self._wg_number(device)
+            elif what == "pending":
+                self._wg_pended.add(device)
+                self.audit("wg-key-pending", device, f"{wg_fingerprint(detail)} -> {wireguard.fingerprint(public)}",
+                           actor="platform")
+            elif what == "ignored":
+                last, count = self._wg_ignored.get(device, (None, 0))
+                if public != last:
+                    self._wg_ignored[device] = (public, count + 1)
+            elif what == "in use" and device not in self._wg_key_refused:
+                self._wg_key_refused.add(device)
+                self.audit("wg-key-refused", device, f"in use by {detail}", actor="platform")
+        except (KeyError, TypeError, OSError):  # a damaged registry entry or a failed write must not end the session
+            print(f"hub: could not take the tunnel key of {device}", flush=True)
+            traceback.print_exc()
+
+    def _wg_number(self, device: str):
+        """The tunnel numbers this device is due now (Registry.wg_number); each one given is audited once, here."""
+        for target, note in self.registry.wg_number(device):
+            self.audit("wg-address-assigned", target, note, actor="platform")
+
+    def _wg_problem(self, rec: dict) -> str | None:
+        """Why a unit gets no tunnel link now, in the fixed words of its Devices row, or None."""
+        if rec["status"] != ACTIVE:
+            return "revoked"
+        if not rec.get("district"):
+            return "no district"
+        district = self.registry.devices.get(rec["district"])
+        if district is None or kind_of(district) != DISTRICT or district["status"] != ACTIVE:
+            return "district not active"
+        if not district.get("wg_public"):
+            return "district has no tunnel key yet"
+        if wg_endpoint(district.get("address")) is None:
+            return "district address is not IPv4"
+        if not rec.get("wg_public"):
+            return "no tunnel key yet"
+        return None
+
+    def _wg_due(self, rec: dict) -> bool:
+        """Whether this record should hold a tunnel message now: a district with an accepted key and a number, a unit
+        with an accepted key and an address, routed through such a district at an IPv4 address."""
+        if rec["status"] != ACTIVE or not rec.get("wg_public"):
+            return False
+        if kind_of(rec) == DISTRICT:
+            return "wg_index" in rec
+        if kind_of(rec) != UNIT or not rec.get("wg_ip") or self._wg_problem(rec) is not None:
+            return False
+        return "wg_index" in self.registry.devices.get(rec["district"], {})  # status() also runs in a worker thread
+
+    def _wg_draft(self, device: str):
+        """The PeerList or Link this device should hold, as the registry is now (version and time still 0), or None.
+        Numbers it is due are given first: a district's units that have a key but no address yet get one here too."""
+        self._wg_number(device)
+        rec = self.registry.devices.get(device)
+        if rec is None:
+            return None
+        if kind_of(rec) == UNIT:
+            if self._wg_problem(rec) == "district address is not IPv4":
+                address = str(self.registry.devices[rec["district"]].get("address"))
+                if (device, address) not in self._wg_link_refused:
+                    self._wg_link_refused.add((device, address))
+                    self.audit("wg-link-refused", device, f"{rec['district']} address {address[:60]}: not an IPv4 "
+                               f"address outside {WG_PLAN.base}", actor="platform")
+            if not self._wg_due(rec):
+                return None
+            district = self.registry.devices[rec["district"]]
+            return wireguard.make_link(WG_PLAN, device, district["id"], district["wg_index"], 0, 0, rec["wg_ip"],
+                                       district["wg_public"], wg_endpoint(district["address"]))
+        for d in self._wg_units(device):
+            if not d.get("wg_ip"):
+                self._wg_number(d["id"])
+        rec = self.registry.devices.get(device)  # read again: numbering may have re-read the file
+        if rec is None or kind_of(rec) != DISTRICT or not self._wg_due(rec):
+            return None
+        peers = [wireguard.Peer(d["id"], d["wg_public"], d["wg_ip"]) for d in self._wg_units(device) if d.get("wg_ip")]
+        return wireguard.make_peer_list(WG_PLAN, device, rec["wg_index"], 0, 0, peers,
+                                        plain_relay=rec.get("wg_mode", "allow") != "only")
+
+    def _wg_units(self, district: str) -> list[dict]:
+        """The active units routed through this district that have an accepted tunnel key: its peers once numbered.
+        A key that waits for an admin never replaces the accepted one here."""
+        return [d for d in self.registry.devices.values() if kind_of(d) == UNIT and d.get("district") == district
+                and d["status"] == ACTIVE and d.get("wg_public")]
+
+    def _wg_build(self, device: str) -> dict | None:
+        """The signed tunnel message for this device now (wg-peers for a district, wg-link for a unit), or None. A new
+        version (max(last + 1, wall clock in ms)) is minted only when the content changed; otherwise the message built
+        last time is returned unchanged, signature and all. Versions live in memory: after a restart they continue
+        from the wall clock, like the command sequence."""
+        draft = self._wg_draft(device)
+        if draft is None:
+            return None
+        content = {k: v for k, v in draft.body().items() if k not in ("version", "t")}
+        built = self._wg_built.get(device)
+        if built is not None and built["content"] == content:
+            return built["msg"]
+        now = self.wall()
+        version = max(built["msg"]["version"] + 1 if built else 0, int(now * 1000))
+        msg = wireguard.sign_message(self.key, dataclasses.replace(draft, version=version, issued=int(now)).body())
+        self._wg_built[device] = {"content": content, "msg": msg}
+        return msg
+
+    def _wg_applied(self, device: str) -> int:
+        """The version the device reported applied in its latest report, -1 if none."""
+        applied = (self.seen.get(device, {}).get("health", {}).get("wg") or {}).get("applied")
+        return applied if applied is not None else -1
+
+    async def _wg_push(self, device: str, ws):
+        """After every report: the device's tunnel message goes out if none went in this session or the content
+        changed, and the same message goes again while the device reports an older one applied (WG_RESEND after the
+        last send, then twice that, up to WG_RESEND_MAX). That covers a refusal on the device for a reason outside the
+        message and a lost write. Like an update offer it bypasses the version floor: a revocation must reach a
+        district that runs an old system. A device whose current session reported no tunnel key gets nothing, and
+        neither does a session that is no longer the device's (ws: the session the report came on)."""
+        if device not in self._wg_live or self.sessions.get(device) is not ws:
+            return
+        try:
+            msg = self._wg_build(device)
+        except (KeyError, TypeError, ValueError, OSError):  # a damaged entry or a failed write must not end the session
+            print(f"hub: could not build the tunnel message for {device}", flush=True)
+            traceback.print_exc()
+            return
+        if msg is None:
+            return
+        now, sent = self.wall(), self._wg_sent.get(device)
+        if sent is not None and sent["version"] == msg["version"]:
+            if self._wg_applied(device) >= msg["version"] or 0 <= now - sent["at"] < sent["pause"]:
+                return
+            pause = min(sent["pause"] * 2, WG_RESEND_MAX)
+        else:
+            pause = WG_RESEND
+        self._wg_sent[device] = {"version": msg["version"], "at": now, "pause": pause}
+        await self._deliver(device, json.dumps({"type": "cmd", **self.envelope(device, {"wg": msg})}, ensure_ascii=False))
+
+    def _wg_proven(self, unit: str) -> bool:
+        """The unit's current session says its tunnel is proven (it reaches the centre through it)."""
+        wg = self.seen.get(unit, {}).get("health", {}).get("wg") or {}
+        return unit in self.sessions and unit in self._wg_live and wg.get("proven") is True
+
+    def _wg_unproven(self, district: str) -> list[str]:
+        """The active units of this district that have not shown a proven tunnel in their current session (offline
+        ones included): what closing its relay port (mode only) would cut off."""
+        return sorted(d["id"] for d in self.registry.devices.values()
+                      if kind_of(d) == UNIT and d.get("district") == district and d["status"] == ACTIVE
+                      and not self._wg_proven(d["id"]))
+
+    def _wg_row(self, rec: dict) -> dict | None:
+        """The tunnel part of a Devices row (None for a lighting cabinet or the centre): the keys and numbers of the
+        registry and what the device last reported. behind: its current session shows the message built for it not
+        yet applied."""
+        if kind_of(rec) not in WG_KINDS:
+            return None
+        device = rec["id"]
+        wg = self.seen.get(device, {}).get("health", {}).get("wg") or {}
+        built = self._wg_built.get(device)
+        behind = bool(device in self.sessions and device in self._wg_live and wg and built is not None
+                      and self._wg_due(rec) and self._wg_applied(device) < built["msg"]["version"])
+        common = {"fingerprint": wg_fingerprint(rec.get("wg_public")), "pending": wg_fingerprint(rec.get("wg_pending")),
+                  "state": wg.get("state"), "applied": wg.get("applied"), "epoch": wg.get("epoch"),
+                  "reason": wg.get("reason"), "behind": behind,
+                  "ignored_keys": self._wg_ignored.get(device, (None, 0))[1]}
+        if kind_of(rec) == DISTRICT:
+            index = rec.get("wg_index")
+            try:
+                address = WG_PLAN.server(index) if index is not None else None
+            except wireguard.WireGuardError:
+                address = None
+            return {"index": index, "address": address, **common, "mode": rec.get("wg_mode", "allow"),
+                    "peers": wg.get("peers"), "peers_up": wg.get("peers_up"), "unproven": self._wg_unproven(device)}
+        handshake = wg.get("handshake")
+        return {"address": rec.get("wg_ip"), **common, "proven": wg.get("proven"),
+                "handshake_age": max(0, round(self.wall() - handshake)) if handshake else None,
+                "district": rec.get("district"), "problem": self._wg_problem(rec)}
+
+    def wg_routes(self, viewer, admin) -> APIRouter:
+        """POST /api/devices/{id}/wg-accept: the admin confirms the tunnel key that waits; POST /api/devices/{id}/wg-mode
+        {"mode": "allow" | "only"}: the admin opens or closes a district's relay port to units outside the tunnel. Both
+        reach the devices at their next reports. Viewers see the tunnel in GET /api/devices (status())."""
+        router = APIRouter()
+
+        @router.post("/api/devices/{device}/wg-accept")
+        async def wg_accept(device: str, who: str = Depends(admin)):
+            self._sync()
+            if device not in self.registry.devices:
+                raise HTTPException(404, "unknown device")
+            try:
+                done = self.registry.wg_confirm(device)
+            except ValueError as err:
+                raise HTTPException(409, str(err))
+            if done is None:
+                raise HTTPException(409, "no tunnel key waits for confirmation")
+            rec, old = done
+            fingerprint = wireguard.fingerprint(rec["wg_public"])
+            self.audit("wg-key-confirmed", device, f"{wg_fingerprint(old)} -> {fingerprint}", actor=who)
+            return {"id": device, "fingerprint": fingerprint}
+
+        @router.post("/api/devices/{device}/wg-mode")
+        async def wg_mode(device: str, body: WgMode, who: str = Depends(admin)):
+            self._sync()
+            try:
+                done = self.registry.wg_set_mode(device, body.mode)
+            except ValueError as err:  # not a district, or not a mode
+                raise HTTPException(400, str(err))
+            if done is None:
+                raise HTTPException(404, "unknown device")
+            _, was = done
+            self.audit("wg-mode-set", device, f"{body.mode} (was {was})", actor=who)
+            return {"id": device, "mode": body.mode, "unproven": self._wg_unproven(device)}
+        return router
+
     async def _deliver(self, device: str, text: str):
         ws = self.sessions.get(device)
         if ws is None:
@@ -370,11 +662,13 @@ class DeviceHub:
                 welcome["cabinet"] = rec.get("cabinet")
             await ws.send_text(json.dumps(welcome))
             self._offered.pop(device, None)  # a new session may have a device that lost its download
+            self._wg_session(device)  # its tunnel message goes again after its first report
             await self._offer(device, rec)
             while True:
                 report = json.loads(await ws.receive_text())
                 if isinstance(report, dict) and report.get("type") == "report":
                     self.heard(device, report.get("health"))
+                    self._wg_report(device, ws)
                     if isinstance(report.get("epoch"), int) and not isinstance(report["epoch"], bool):
                         self.epochs[device] = report["epoch"]  # the gateway key epoch the unit obeys now
                     if kind_of(rec) == "district":  # which junctions it is trusted for, from the registry as it is now
@@ -383,6 +677,7 @@ class DeviceHub:
                                                     and d["status"] == ACTIVE]}  # a revoked unit is no one's junction
                     self.on_report(rec, report)
                     await self._offer(device, rec)
+                    await self._wg_push(device, ws)
         except (WebSocketDisconnect, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError):
             pass  # the usual ends of a session: gone, silent, or talking nonsense
         except Exception:  # a bug in report handling must not look like a flaky network
@@ -456,6 +751,8 @@ class DeviceHub:
         self.seen.pop(device, None)
         self.proven.pop(device, None)
         self._refused.discard(device)
+        self._wg_session(device)
+        self._wg_built.pop(device, None)
         return rec
 
     async def set_status(self, device: str, status: str) -> dict | None:
@@ -468,7 +765,8 @@ class DeviceHub:
 
     def status(self) -> list[dict]:
         """One row per device; below_floor: it gets no commands now (floor_verdict), floor: the minimum or None,
-        os_proven: the system version it reported in its current (or last) session."""
+        os_proven: the system version it reported in its current (or last) session; wg: its tunnel (_wg_row), None
+        for a lighting cabinet."""
         self._sync()
         now = time.time()
         floor = self.floor()
@@ -486,7 +784,7 @@ class DeviceHub:
                         "age": round(now - seen["at"]) if "at" in seen else None,
                         "health": seen.get("health", {}),
                         "floor": floor, "below_floor": self._verdict(rec["id"], rec, floor) is not None,
-                        "os_proven": self.proven.get(rec["id"])})
+                        "os_proven": self.proven.get(rec["id"]), "wg": self._wg_row(rec)})
         return out
 
 
