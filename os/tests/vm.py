@@ -35,8 +35,10 @@
     python3 vm.py demo [pilot]          the three machines (or the pilot's one) kept running, screens over VNC
     python3 vm.py demo-enrol            enrol the demo's district and unit at its centre, by the centre's CLI
     python3 vm.py demo-kit FILE DEVICE  put a kit downloaded from the demo's centre onto that machine
-    python3 vm.py unitimage IMG.xz SUMS KEY UNIT SERIAL
-                                        a unit image as shipped: identity and maintenance key from its ESP only
+    python3 vm.py unitimage IMG.xz SUMS KEY UNIT SERIAL OTHER.xz
+                                        a unit image as shipped: its own disk and partition GUIDs and GRUB password (against
+                                        a second unit's image, OTHER.xz, and the fleet image), boot disk named by its own
+                                        GUID, identity and maintenance key from its ESP only
 
 Each scenario starts from a fresh copy of the built image, with a software TPM (swtpm) unless told otherwise,
 as a real mini-PC has one, and with Secure Boot enforced (URBAN's keys enrolled in the firmware; VM(secure_boot=False)
@@ -972,9 +974,9 @@ def run_dir_shared(vm, what=None):
         raise Fail(f"{what or vm.name}: /run/urban and /run/urban/q are {got!r}, want root:root 755 and urban-vision:urban 755")
 
 
-def unitimage(xz, sums, key, unit, serial):
-    """The file a person writes onto a mini-PC: unpacked, compared with its published checksums, booted from
-    NVMe with an Intel network card. Its name and maintenance key come from its ESP, nothing is added here."""
+def unpacked(xz, sums):
+    """A shipped image (IMG.xz) unpacked into /tmp, sparse, and compared with its published checksums (the packed and
+    the unpacked image). Returns the unpacked image's path."""
     name = os.path.basename(xz)[:-3]
     img = f"/tmp/{name}"
     sh(["bash", "-c", f"set -o pipefail; xz -dc {xz} | cp --sparse=always /dev/stdin {img}"])
@@ -983,6 +985,158 @@ def unitimage(xz, sums, key, unit, serial):
         got = sh(["sha256sum", path]).stdout.split()[0]
         if want.get(label) != got:
             raise Fail(f"{label}: sha256 {got} is not the published {want.get(label)}")
+    return img
+
+
+def disk_guids(disk):
+    """The disk GUID ("disk") and every partition's GUID (by partition name), lower case, from the image's GPT."""
+    table = json.loads(sh(["sfdisk", "-J", disk]).stdout)["partitiontable"]
+    return {"disk": table["id"].lower(), **{p["name"]: p["uuid"].lower() for p in table["partitions"]}}
+
+
+GRUB_HASH = re.compile(rb"password_pbkdf2 urban (grub\.pbkdf2\.sha512\.\d+\.[0-9A-Fa-f]+\.[0-9A-Fa-f]+)")
+
+
+def grub_opens(hash_, password):
+    """Whether the GRUB maintenance password opens the PBKDF2 hash (grub.pbkdf2.sha512.<rounds>.<salt>.<key>) GRUB
+    checks it against: PBKDF2-HMAC-SHA512, as grub-mkpasswd-pbkdf2 made it."""
+    rounds, salt, key = hash_.split(".")[3:6]
+    return hashlib.pbkdf2_hmac("sha512", password.encode(), bytes.fromhex(salt), int(rounds), len(key) // 2) == bytes.fromhex(key)
+
+
+def found_in(path, needles):
+    """Which of the needles (bytes) occur anywhere in the file, read as raw bytes (a whole disk image: in pieces)."""
+    found, keep, tail = set(), max(map(len, needles)) - 1, b""
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(64 << 20), b""):
+            block = tail + chunk
+            found.update(n for n in needles if n in block)
+            tail = block[-keep:] if keep else b""
+    return found
+
+
+def own_images(images, fleet):
+    """G3 before the boot: every unit image ({unit: (unpacked image, its GRUB password file)}) is its own. Its disk GUID
+    and every partition GUID differ from the other's and from the fleet image's, on the same layout; its GRUB password
+    hash (the boot loader's embedded config and grub.cfg: the same one in both) differs from the other's and from the
+    fleet's, and is opened by the password in its file and by no other; its BOOTX64.EFI verifies against the db
+    certificate and its grub.cfg against the boot key (one changed byte fails), and grub.cfg is the fleet's but for the
+    hash; the slot files on its ESP are the fleet's; its password is nowhere inside it, not in the raw image and not in a
+    file of its ESP. The fleet image's own password (data/os/keys/grub-password) opening the fleet's hash is the control
+    that the PBKDF2 check itself is right."""
+    keys, sb, work = f"{OUT}/keys", f"{OUT}/keys/sb", "/tmp/own"
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    gh = f"{work}/gnupg"
+    os.makedirs(gh, mode=0o700)
+    sh(["gpg", "--homedir", gh, "--batch", "--quiet", "--import", f"{keys}/boot.pub.gpg"])
+
+    def gpg_good(sig, f):
+        r = sh(["gpg", "--homedir", gh, "--batch", "--status-fd", "1", "--verify", sig, f], check=False)
+        return r.returncode == 0 and "GOODSIG" in r.stdout and "VALIDSIG" in r.stdout
+
+    passwords = {"fleet": open(f"{keys}/grub-password").read().strip()}
+    for unit, (_, pwfile) in images.items():
+        if not os.path.isfile(pwfile):
+            raise Fail(f"{unit}: no GRUB password file {pwfile} next to the image")
+        lines = open(pwfile).read().splitlines()
+        if len(lines) != 1 or len(lines[0]) < 16 or lines[0] != lines[0].strip():
+            raise Fail(f"{unit}: {pwfile} is not one line holding the password")
+        passwords[unit] = lines[0]
+    if len(set(passwords.values())) != len(passwords):
+        raise Fail("two of the GRUB passwords (the units' and the fleet image's) are the same")
+
+    disks = {"fleet": fleet, **{unit: img for unit, (img, _) in images.items()}}
+    layout = {n: {k: p[k] for k in ("start", "size", "type")} for n, p in partitions(fleet).items()}
+    guids, hashes, cfgs, efis = {}, {}, {}, {}
+    for who, disk in disks.items():
+        guids[who] = disk_guids(disk)
+        got = {n: {k: p[k] for k in ("start", "size", "type")} for n, p in partitions(disk).items()}
+        if got != layout:
+            raise Fail(f"{who}: the partitions are not the fleet image's layout: {got}")
+        d = f"{work}/{who}"
+        os.makedirs(d)
+        for f in ("BOOTX64.EFI", "grub.cfg", "grub.cfg.sig"):
+            esp_get(disk, f"/EFI/BOOT/{f}", f"{d}/{f}")
+        efis[who] = open(f"{d}/BOOTX64.EFI", "rb").read()
+        cfgs[who] = open(f"{d}/grub.cfg", "rb").read()
+        in_efi, in_cfg = GRUB_HASH.findall(efis[who]), GRUB_HASH.findall(cfgs[who])
+        if len(in_efi) != 1 or len(in_cfg) != 1 or in_efi != in_cfg:
+            raise Fail(f"{who}: the boot loader and grub.cfg do not carry one and the same GRUB password hash "
+                       f"(BOOTX64.EFI {len(in_efi)}, grub.cfg {len(in_cfg)})")
+        hashes[who] = in_cfg[0].decode()
+        if sh(["sbverify", "--cert", f"{sb}/db.crt", f"{d}/BOOTX64.EFI"], check=False).returncode != 0:
+            raise Fail(f"{who}: BOOTX64.EFI does not verify against our db certificate")
+        if not gpg_good(f"{d}/grub.cfg.sig", f"{d}/grub.cfg"):
+            raise Fail(f"{who}: grub.cfg has no valid signature of the boot key")
+        flip_byte(f"{d}/grub.cfg", f"{d}/grub.cfg.tampered", len(cfgs[who]) // 2)
+        if gpg_good(f"{d}/grub.cfg.sig", f"{d}/grub.cfg.tampered"):
+            raise Fail(f"control: {who}'s grub.cfg still verifies with one byte changed")
+        opens = sorted(w for w, pw in passwords.items() if grub_opens(hashes[who], pw))
+        if opens != [who]:
+            raise Fail(f"{who}: the GRUB password hash is opened by {opens or 'no password'}, want {who}'s alone")
+    for unit in images:
+        if cfgs[unit] != cfgs["fleet"].replace(hashes["fleet"].encode(), hashes[unit].encode()):
+            raise Fail(f"{unit}: grub.cfg is not the fleet image's with the unit's password hash")
+        if efis[unit] == efis["fleet"]:
+            raise Fail(f"{unit}: BOOTX64.EFI is the fleet image's")
+        for f in ("EFI/URBAN/slot-A.cfg", "EFI/URBAN/slot-A.cfg.sig", "EFI/URBAN/slot-A.sha256", "EFI/URBAN/slot-A.sha256.sig",
+                  "EFI/BOOT/grubenv"):
+            esp_get(fleet, f"/{f}", f"{work}/fleet.part")
+            esp_get(images[unit][0], f"/{f}", f"{work}/unit.part")
+            if sha(f"{work}/fleet.part") != sha(f"{work}/unit.part"):
+                raise Fail(f"{unit}: {f} on the ESP is not the fleet image's")
+    every = [g for who in disks for g in guids[who].values()]
+    if len(set(every)) != len(every):
+        raise Fail(f"a disk or partition GUID is shared between the images: {guids}")
+    if len(set(hashes.values())) != len(hashes):
+        raise Fail(f"a GRUB password hash is shared between the images: {hashes}")
+    print("   own disk: " + "; ".join(f"{who} disk {g['disk'][:8]}, rootfs-a {g['rootfs-a'][:8]}" for who, g in guids.items())
+          + ": every disk and partition GUID differs, same layout", flush=True)
+    print("   own GRUB password: each image's hash (boot loader and grub.cfg alike) differs and opens with its own password "
+          "file only (the fleet's with data/os/keys/grub-password, the control); BOOTX64.EFI verifies against db, grub.cfg "
+          "against the boot key", flush=True)
+
+    # the password is not inside the image: neither in its raw bytes nor in a file of its ESP
+    needles = {pw.encode(): who for who, pw in passwords.items()}
+    for unit, (img, _) in images.items():
+        inside = found_in(img, list(needles))
+        esp = f"{work}/{unit}-esp"
+        os.makedirs(esp)
+        # (the wildcard quoted: mtools expands it on the ESP, not the shell here)
+        sh(f"mcopy -s -n -i {img}@@{partitions(img)['esp']['start'] * 512} '::/*' {esp}/")
+        copied = set()
+        for root, _, files in os.walk(esp):
+            for f in files:
+                copied.add(os.path.relpath(os.path.join(root, f), esp).lower())  # (FAT: the case of a short name may vary)
+                data = open(os.path.join(root, f), "rb").read()
+                inside.update(n for n in needles if n in data)
+        if not {"efi/boot/bootx64.efi", "efi/boot/grub.cfg", "urban-unit.txt"} <= copied:
+            raise Fail(f"{unit}: the ESP's files were not copied out to be searched: {sorted(copied)}")
+        if inside:
+            raise Fail(f"{unit}: the image holds the GRUB password of {sorted(needles[n] for n in inside)}")
+    print("   no GRUB password inside an image (raw bytes and the ESP's files searched for each unit's and the fleet's)",
+          flush=True)
+    shutil.rmtree(work, ignore_errors=True)
+    return guids
+
+
+def unitimage(xz, sums, key, unit, serial, other_xz):
+    """The file a person writes onto a mini-PC, and a second unit's: each unpacked and compared with its published
+    checksums, each its own (own_images: disk and partition GUIDs, GRUB password). The first is then booted from NVMe with
+    an Intel network card: its boot disk named by its own partition GUID, its name and maintenance key from its ESP,
+    nothing added here."""
+    # urban-edge-<version>-<unit>.img.xz, with <name>.sha256 and <name>.grub-password next to it (os/unit-image.mjs)
+    version = os.path.basename(xz)[len("urban-edge-"):-len(f"-{unit}.img.xz")]
+    other = os.path.basename(other_xz)[len(f"urban-edge-{version}-"):-len(".img.xz")]
+    img = unpacked(xz, sums)
+    second = unpacked(other_xz, other_xz[:-len(".img.xz")] + ".sha256")
+    try:
+        guids = own_images({unit: (img, xz[:-len(".img.xz")] + ".grub-password"),
+                            other: (second, other_xz[:-len(".img.xz")] + ".grub-password")},
+                           f"{OUT}/urban-edge-{version}.img")
+    finally:
+        os.remove(second)
     parts = partitions(img)
     esp, data = parts["esp"]["start"] * 512, parts["urban-data"]
     said = sh(f"mtype -i {img}@@{esp} ::/urban-unit.txt").stdout
@@ -996,6 +1150,12 @@ def unitimage(xz, sums, key, unit, serial):
     vm = VM("unit", image=img, key="/tmp/maintenance", bus="nvme", nic="e1000e")
     try:
         vm.start()
+        # the initramfs opened the slot GRUB named by the GUID it read from this disk: the image's own, not the fleet's
+        m = vm.wait(r"URBAN-BOOTDISK: slot (\S+) is (\S+) \(partition GUID (\S+)\) on disk (\S+)")
+        if m.group(1) != "rootfs-a" or m.group(3).lower() != guids[unit]["rootfs-a"] or not m.group(4).startswith("nvme"):
+            raise Fail(f"the boot disk is not named by this image's own rootfs-a GUID {guids[unit]['rootfs-a']} on NVMe: "
+                       f"{m.group(0)}")
+        print(f"   {m.group(0)}", flush=True)
         m = vm.wait(r"URBAN-MAINTENANCE-KEYS added=(\d+) total=(\d+)")
         if m.group(1) != "1":
             raise Fail(f"maintenance keys from the ESP: {m.group(0)}")
@@ -3461,7 +3621,7 @@ if __name__ == "__main__":
         elif what == "hardware":
             hardware()
         elif what == "unitimage":
-            unitimage(*sys.argv[2:7])
+            unitimage(*sys.argv[2:8])
         elif what == "bootdisk":  # step 7: partitions only from the boot disk, a stranger's disk attached
             import vm_bootdisk
             vm_bootdisk.bootdisk()

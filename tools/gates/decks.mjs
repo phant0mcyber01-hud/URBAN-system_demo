@@ -89,6 +89,15 @@ const videoClosed = Object.values(pub).flatMap((t) => t.split(/[.!?]/))
   .some((s) => /видео/i.test(s) && /перекрёст/i.test(s) && /район/i.test(s) && /закрыт/i.test(s) && /теперь/i.test(s));
 if (!videoClosed) problems.push("public deck does not say that camera video between the junction and the district is now closed");
 
+// step 9: the team deck shows the stand kit (per-unit GUIDs and GRUB password, the key backup, the install order) and
+// what stays open (production keys are the owner's step, the hardware is untested)
+for (const [what, re] of [["step 9", /шаг\s*9/i], ["per-unit GUIDs", /GUID/], ["per-unit GRUB password", /пароль GRUB/],
+  ["the key backup", /keys-backup\.mjs/], ["the install order", /BIOS[^.]{0,40}Rufus/]])
+  if (!re.test(changesText)) problems.push(`team deck's changes slides do not show what step 9 changed: ${what}`);
+const open9 = changes.find(([id]) => id === "changes9")?.[1] || "";
+if (!/Открыто:[^.]*боевые ключи[^.]*владел/.test(open9) || !/Открыто:[^.]*(железо|QEMU)/.test(open9))
+  problems.push("the step-9 changes slide does not say what stays open (production keys are the owner's step, hardware untested)");
+
 if (problems.length) {
   for (const p of problems) console.log(`FAIL ${p}`);
   process.exit(1);

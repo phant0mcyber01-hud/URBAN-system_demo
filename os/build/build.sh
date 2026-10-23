@@ -62,16 +62,10 @@ OWNER=$(cat "$SB/owner.guid")
 virt-fw-vars --input "$OVMF_VARS" --output "$OUT/ovmf-vars-urban.fd.tmp" \
   --set-pk "$OWNER" "$SB/PK.crt" --add-kek "$OWNER" "$SB/KEK.crt" --add-db "$OWNER" "$SB/db.crt" --secure-boot
 mv "$OUT/ovmf-vars-urban.fd.tmp" "$OUT/ovmf-vars-urban.fd"
-# What GRUB loads is signed with the GnuPG boot key. gpg-agent needs a socket in its home, which the folder shared from
-# the host cannot hold, so the key ring is used from a copy in the container.
-GPGW=/tmp/boot-gpg
-rm -rf "$GPGW"; mkdir -p "$GPGW"; cp -r "$OUT/keys/boot-gpg/." "$GPGW/"; chmod -R go-rwx "$GPGW"; chmod 700 "$GPGW"
-boot_gpg() { gpg --homedir "$GPGW" --batch --yes --quiet "$@"; }
-boot_gpg --export | cmp -s - "$OUT/keys/boot.pub.gpg" || { echo "boot-gpg and boot.pub.gpg are not the same key" >&2; exit 1; }
-boot_sign() {  # FILE -> FILE.sig, a detached binary signature (what GRUB's pgp module reads)
-  rm -f "$1.sig"
-  boot_gpg --digest-algo SHA256 --detach-sign --output "$1.sig" "$1" && [ -s "$1.sig" ] || { echo "could not sign $1" >&2; exit 1; }
-}
+# What GRUB loads is signed with the GnuPG boot key (boot_sign). The boot loader and its config are made by
+# boot-loader.sh, which os/unit-image.mjs uses as well to give every unit's image its own GRUB password.
+. /work/os/build/boot-loader.sh
+boot_gpg_init "$OUT/keys"
 
 # ---- base system, cached by its package list; the extras on top, cached again
 COMPONENTS=main,non-free-firmware
@@ -281,37 +275,15 @@ rauc --conf /tmp/verify.conf info "$OUT/urban-edge-$VERSION.raucb" >/dev/null  #
 if [ "$IMAGE" = 1 ]; then
   log "disk image"
   E=/tmp/esp; rm -rf "$E"; mkdir -p "$E/EFI/BOOT" "$E/EFI/URBAN"
-  # the GRUB maintenance password: made once, kept with the other keys (data/os/keys, never in git); only its
-  # PBKDF2 hash goes into the image
+  # the fleet image's GRUB maintenance password: made once, kept with the other keys (data/os/keys, never in git); only
+  # its PBKDF2 hash goes into the image. os/unit-image.mjs replaces it with a password of the unit's own.
   if [ ! -f "$OUT/keys/grub-password" ]; then
     ( umask 077; head -c 18 /dev/urandom | base64 > "$OUT/keys/grub-password" )
   fi
   pw=$(cat "$OUT/keys/grub-password")
-  hash=$(printf '%s\n%s\n' "$pw" "$pw" | grub-mkpasswd-pbkdf2 | sed -n 's/.*is \(grub\.pbkdf2\..*\)$/\1/p')
-  [ -n "$hash" ] || { echo "grub-mkpasswd-pbkdf2 gave no hash" >&2; exit 1; }
-  # The boot loader: a standalone GRUB with URBAN's boot key built in. Its embedded config runs first, before anything
-  # on the disk is read: signatures are enforced from then on and the maintenance password is set (so a config that
-  # fails its signature leaves a locked GRUB prompt, not an open one), then the signed grub.cfg is loaded. The boot
-  # loader itself is signed with the Secure Boot db key; the firmware runs nothing else. Plain commands only: the
-  # embedded config is read by GRUB's simple parser.
-  cat > /tmp/early.cfg <<EOF
-set check_signatures=enforce
-export check_signatures
-set superusers="urban"
-export superusers
-password_pbkdf2 urban $hash
-configfile /EFI/BOOT/grub.cfg
-EOF
-  grub-mkimage -O x86_64-efi -o /tmp/BOOTX64.unsigned.EFI -p /EFI/BOOT -c /tmp/early.cfg \
-    --pubkey "$OUT/keys/boot.pub.gpg" --disable-shim-lock \
-    part_gpt fat squash4 normal linux echo test loadenv configfile regexp search all_video efi_gop gzio \
-    boot cat sleep reboot halt password_pbkdf2 pbkdf2 gcry_sha512 pgp gcry_rsa gcry_sha256 hashsum probe
-  sbsign --key "$SB/db.key" --cert "$SB/db.crt" --output "$E/EFI/BOOT/BOOTX64.EFI" /tmp/BOOTX64.unsigned.EFI >/dev/null
-  sbverify --cert "$SB/db.crt" "$E/EFI/BOOT/BOOTX64.EFI" >/dev/null || { echo "BOOTX64.EFI does not verify against db.crt" >&2; exit 1; }
-  rm -f /tmp/BOOTX64.unsigned.EFI
-  sed "s|^# URBAN-GRUB-PASSWORD\$|set superusers=\"urban\"\npassword_pbkdf2 urban $hash|" /work/os/build/grub.cfg > "$E/EFI/BOOT/grub.cfg"
-  grep -q '^password_pbkdf2 urban grub.pbkdf2' "$E/EFI/BOOT/grub.cfg" || { echo "grub.cfg has no password" >&2; exit 1; }
-  boot_sign "$E/EFI/BOOT/grub.cfg"
+  hash=$(grub_password_hash "$pw")
+  # the signed boot loader with the hash in its embedded config, and the signed grub.cfg (boot-loader.sh)
+  boot_loader "$hash" "$E" "$OUT/keys"
   cp "$SLOTCFG" "$E/EFI/URBAN/slot-A.cfg"; cp "$SLOTCFG.sig" "$E/EFI/URBAN/slot-A.cfg.sig"  # slot B's pair is written by its first update
   cp "$SLOTSUMS" "$E/EFI/URBAN/slot-A.sha256"; cp "$SLOTSUMS.sig" "$E/EFI/URBAN/slot-A.sha256.sig"
   grub-editenv "$E/EFI/BOOT/grubenv" create

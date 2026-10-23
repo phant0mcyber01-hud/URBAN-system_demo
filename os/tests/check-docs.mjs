@@ -179,4 +179,58 @@ if (!design.includes("/var/lib/urban/wg/key") || /pki\/wg\/|wg syncconf wg0|пр
 if (!context.includes("(шаг 8)") || !/\| [0-9–]+ октября \| шаг 8/.test(context)) fail("CONTEXT.md does not record step 8 (section and history row)");
 for (const must of ["UDP 51820", "10.77.0.0/16", "urban-wg", "wg-inbox", "check-wireguard.mjs", "PresharedKey"])
   if (!context.includes(must)) fail(`CONTEXT.md does not record ${JSON.stringify(must)} (step 8)`);
+
+// step 9: the stand kit. Every unit's image from unit-image.mjs has its own GUIDs and GRUB password (kept next to the
+// image, then in the unit's passport); the keys get an encrypted off-line backup; the stand's installation order; the
+// production keys stay the owner's decision. The old limits (one GRUB password for the fleet, identical GUIDs) are closed.
+const order = sectionOf(g, /^## Порядок установки стенда.*$/m);
+if (!order) fail("mini-pc.md has no section «Порядок установки стенда»");
+// the steps, in this order: BIOS before the first boot (fTPM, Secure Boot keys with PK last, Secure Boot on, USB and PXE off, BIOS password), Rufus,
+// first boot, urban-recovery.enc, the two networks and cameras, enrolment, the per-unit GRUB password
+const steps = [["BIOS before the first boot from the internal disk", /BIOS[^\n]*до первой загрузки с внутреннего диска/],
+  ["fTPM on", /fTPM/], ["URBAN Secure Boot keys enrolled", /ключи Secure Boot URBAN внесены/], ["PK last", /PK\.cer/],
+  ["Secure Boot on", /Secure Boot —\s+Enabled/], ["USB boot off", /USB Boot/], ["PXE off", /PXE/],
+  ["BIOS password", /пароль на настройки BIOS/i], ["Rufus", /Rufus/], ["first boot", /Первая загрузка/], ["urban-recovery.enc", /urban-recovery\.enc/],
+  ["two networks and cameras", /wg-cameras\.json/], ["enrolment", /Подключение в центре/], ["the GRUB password file", /\.grub-password/]];
+let at = 0;
+for (const [what, rx] of steps) {
+  const m = rx.exec(order.slice(at));
+  if (!m) fail(`the «Порядок установки стенда» of mini-pc.md does not give, in order, the step: ${what}`);
+  at += m.index + m[0].length;
+}
+for (const must of ["node os/unit-image.mjs", "data/os/release/", ".grub-password", "паспорт блока", "keys-backup.mjs"])
+  if (!order.includes(must)) fail(`the «Порядок установки стенда» of mini-pc.md never says ${JSON.stringify(must)}`);
+if (/У копий одного образа\s+одинаковые GUID/.test(g)) fail("mini-pc.md still says every copy of one image has the same GUIDs (images from unit-image.mjs have their own)");
+for (const must of ["unit-image.mjs", ".grub-password", "keys-backup.mjs", "check-keys-backup.mjs", "URBAN_KEYS_PASSPHRASE",
+  "--cipher-algo AES256", "боевые", "не сделано"])
+  if (!text.includes(must)) fail(`docs/edge-os.md never says ${JSON.stringify(must)} (step 9)`);
+const keysSection = sectionOf(text, /^## Ключи: копия вне ноутбука.*$/m);
+if (!keysSection) fail("docs/edge-os.md has no section on the key backup («Ключи: копия вне ноутбука …»)");
+for (const [what, rx] of [["backup", /keys-backup\.mjs backup/], ["list", /keys-backup\.mjs list/], ["restore", /keys-backup\.mjs restore/],
+  ["a wrong passphrase writes nothing", /неверная фраза[^.]*не пишут ничего/], ["two copies off the laptop", /две копии/],
+  ["production keys: a fresh key folder on an offline machine", /без\s+сети/], ["every unit written again", /записываются заново/],
+  ["the owner's decision, not done in step 9", /решение владельца[^.]*в шаге 9 оно не сделано/]])
+  if (!rx.test(keysSection)) fail(`the key backup section of docs/edge-os.md does not say: ${what}`);
+// «Известные пределы защищённой загрузки»: the fleet's one GRUB password and the identical GUIDs are closed, and say by what
+const limits = (/\*\*Известные пределы защищённой загрузки\.\*\*[\s\S]*?(?=\n## )/.exec(text) || [""])[0];
+if (!limits) fail("docs/edge-os.md has no «Известные пределы защищённой загрузки»");
+if (/Один пароль обслуживания GRUB на весь парк\.\*\*|Узнавший его на одном блоке может править строку загрузки на любом/.test(text))
+  fail("docs/edge-os.md still lists one GRUB password for the whole fleet as an open limit");
+if (/все блоки, записанные с одного образа, имеют одинаковые GUID|случайные GUID на каждый блок при\s+установке \(следующий шаг\)/.test(text))
+  fail("docs/edge-os.md still says every unit has identical partition GUIDs (closed for images from unit-image.mjs)");
+if (/один пароль GRUB на весь парк/.test(text)) fail("the «Что не проверено» summary of docs/edge-os.md still says one GRUB password for the fleet");
+const gpLimit = limits.split(/\n(?=\d+\. )/).find((b) => /пароль обслуживания GRUB/i.test(b)) || "";
+if (!/свой у каждого блока/.test(gpLimit) || !gpLimit.includes("unit-image.mjs") || !gpLimit.includes(".grub-password") || !/node os\/build\.mjs/.test(gpLimit))
+  fail("the GRUB password limit of docs/edge-os.md does not say it is closed per unit by unit-image.mjs and that the fleet image keeps the shared one");
+const guidLimit = limits.split(/\n(?=\d+\. )/).find((b) => /GUID/.test(b)) || "";
+if (!/закрыты для образов из/.test(guidLimit) || !guidLimit.includes("unit-image.mjs"))
+  fail("the boot-disk limit of docs/edge-os.md does not say identical GUIDs are closed for images from unit-image.mjs");
+// CONTEXT.md: the step-9 section, its history row, and «Не сделано» no longer lists what step 9 closed
+if (!context.includes("(шаг 9)") || !/\| 23 октября \| шаг 9/.test(context)) fail("CONTEXT.md does not record step 9 (section and history row)");
+for (const must of ["keys-backup.mjs", ".grub-password", "check-keys-backup.mjs", "Порядок установки стенда"])
+  if (!context.includes(must)) fail(`CONTEXT.md does not record ${JSON.stringify(must)} (step 9)`);
+const todo9 = /\*\*Не сделано[^\n]*(?:\n(?!\n)[^\n]*)*/.exec(context)[0];
+if (/случайные GUID разделов на каждый блок|отдельные пароли GRUB/.test(todo9))
+  fail("the «Не сделано» paragraph of CONTEXT.md still lists per-unit GUIDs or GRUB passwords as not done");
+if (!/боевые ключи/.test(todo9)) fail("the «Не сделано» paragraph of CONTEXT.md does not keep the production keys (the owner's step)");
 console.log("DOCS CHECK PASSED");
