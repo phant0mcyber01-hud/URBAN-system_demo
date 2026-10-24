@@ -233,4 +233,52 @@ const todo9 = /\*\*Не сделано[^\n]*(?:\n(?!\n)[^\n]*)*/.exec(context)[0
 if (/случайные GUID разделов на каждый блок|отдельные пароли GRUB/.test(todo9))
   fail("the «Не сделано» paragraph of CONTEXT.md still lists per-unit GUIDs or GRUB passwords as not done");
 if (!/боевые ключи/.test(todo9)) fail("the «Не сделано» paragraph of CONTEXT.md does not keep the production keys (the owner's step)");
+// step 10: measured boot - designed and proven on a software TPM (built into the OS is step 11)
+const mb = join(ROOT, "docs", "measured-boot-design.md");
+if (!existsSync(mb)) fail("docs/measured-boot-design.md is missing");
+const design10 = readFileSync(mb, "utf8");
+const h10 = [...design10.matchAll(/^##+ (.+)$/gm)].map((m) => m[1].toLowerCase());
+const need10 = {
+  "the two attacks": /две атаки/, "the pitfalls": /подводные камни/,
+  "the mechanism (every PCR, NV index, key, file and who writes each)": /механизм.*pcr.*nv|pcr.*nv.*ключ/,
+  "the boot-time sequence": /последовательность загрузки/, "the update-time sequence": /последовательность обновления/,
+  "recovery and failure cases": /восстановление и отказ/, "what bookworm lacks": /чего нет в bookworm/,
+  "the answers to the review (B1-B3, M1-M2)": /ответы на ревью/,
+  "what stays open": /остаётся открытым/, "the step-11 gates": /ворота шага 11/,
+};
+const miss10 = Object.entries(need10).filter(([, rx]) => !h10.some((h) => rx.test(h))).map(([k]) => k);
+if (miss10.length) fail("docs/measured-boot-design.md sections missing: " + miss10.join(", "));
+for (const must of ["PolicyAuthorize", "PolicyNV", "PolicyPCR", "PolicyCommandCode", "PolicyNvWritten",
+  "PCR 7", "PCR 11", "NV_FLOOR", "capped", "policywrite", "systemd-cryptenroll", "tpm2-tools", "swtpm",
+  "check-tpm-policy.mjs", "urban-recovery.enc", "urban-health", "старый подписанный выпуск", "флешк", "GUID",
+  "TPM2_Clear", "обрыв питания", "dbx", "ключ восстановления", "стадийн", "phase", "superusers", "init=",
+  "db-сертификат", "security version", "systemd 252", "base+", "LUKS2"]) {
+  if (!design10.includes(must)) fail(`docs/measured-boot-design.md never says ${JSON.stringify(must)}`);
+}
+// the attack section names both attacks plainly
+if (!/старый.*подписанн/i.test(design10) || !/подлинн\S* образ.*флешк|образ.*с флешки/i.test(design10))
+  fail("docs/measured-boot-design.md does not state both attacks (old signed release, genuine image from USB)");
+// the review answers name every finding
+for (const f of ["B1", "B2", "B3", "M1", "M2"])
+  if (!new RegExp(`\\*\\*${f}\\b`).test(design10)) fail(`the «Ответы на ревью» of docs/measured-boot-design.md does not answer ${f}`);
+// the second review: its own subsection answers N1-N4 and the dbx choice, and the decisions are in the mechanism and gates
+const second = (/^### Ответы на второе ревью[\s\S]*?(?=\n## )/m.exec(design10) || [""])[0];
+if (!second) fail("docs/measured-boot-design.md has no subsection «Ответы на второе ревью»");
+for (const f of ["N1", "N2", "N3", "N4"])
+  if (!new RegExp(`\\*\\*${f}\\b`).test(second)) fail(`«Ответы на второе ревью» does not answer ${f}`);
+for (const must of ["urban-phase-lock.service", "FailureAction=reboot", "serial-getty@", "emergency.target",
+  "rescue.target", "SYSTEMD_SULOGIN_FORCE", "debug-shell.service", "имя EK", "dbx", "OVMF", "HSM"])
+  if (!second.includes(must)) fail(`«Ответы на второе ревью» never says ${JSON.stringify(must)}`);
+const gates11 = (/^## Ворота шага 11[\s\S]*?(?=\n## )/m.exec(design10) || [""])[0];
+for (const g of ["S1", "S6", "S7", "S8", "S9"])
+  if (!gates11.includes(`**${g}.`)) fail(`the step-11 gates of docs/measured-boot-design.md have no ${g}`);
+if (!/Компрометация ключа владельца/.test(design10)) fail("docs/measured-boot-design.md does not name owner-key compromise as an open limit");
+if (design10.length < 8000) fail("docs/measured-boot-design.md is too short to be the design");
+// CONTEXT.md records step 10: section, history row, and the design doc + check are named
+if (!context.includes("Измеряемая загрузка (шаг 10)")) fail("CONTEXT.md has no «Измеряемая загрузка (шаг 10)» section");
+if (!context.includes("(шаг 10)") || !/\| 23 октября \| шаг 10/.test(context)) fail("CONTEXT.md does not record step 10 (section and history row)");
+for (const must of ["docs/measured-boot-design.md", "check-tpm-policy.mjs", "PCR 11", "NV_FLOOR",
+  "PolicyAuthorize", "стадийн", "ревью"])
+  if (!context.includes(must)) fail(`CONTEXT.md does not record ${JSON.stringify(must)} (step 10)`);
+
 console.log("DOCS CHECK PASSED");
