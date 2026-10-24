@@ -3,6 +3,8 @@
 # is encrypted with a key in the TPM). Secure Boot: sbsigntool signs the boot loader with our db key, gnupg signs
 # what GRUB loads, cryptsetup-bin makes the dm-verity tree of a slot, virt-firmware enrols our keys into the VMs'
 # UEFI variables. The demo's screens use os/demo/screen.py and noVNC from web/node_modules.
+# ARM (arm64): qemu-system-arm runs the arm64 images on QEMU's virt machine with the ARM UEFI firmware (qemu-efi-aarch64,
+# AAVMF); the arm64 system itself is installed, and its GRUB made, under emulation through the host's binfmt.
 FROM debian:bookworm
 
 # retries and short timeouts: a stalled mirror connection must not hang the build for hours
@@ -10,7 +12,7 @@ RUN apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update \
     && apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends \
         debootstrap squashfs-tools dosfstools mtools e2fsprogs fdisk \
         grub-efi-amd64-bin grub-common rauc openssl \
-        qemu-system-x86 qemu-utils ovmf openssh-client swtpm swtpm-tools \
+        qemu-system-x86 qemu-utils ovmf qemu-system-arm qemu-efi-aarch64 openssh-client swtpm swtpm-tools \
         python3 ca-certificates xz-utils \
         sbsigntool gnupg cryptsetup-bin python3-pip \
     && rm -rf /var/lib/apt/lists/* \

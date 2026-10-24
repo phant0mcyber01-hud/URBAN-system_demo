@@ -10,6 +10,10 @@
 #   grub_password_hash PASSWORD   prints GRUB's PBKDF2 hash of the maintenance password
 #   boot_loader HASH ESP KEYS     ESP/EFI/BOOT/BOOTX64.EFI, signed with the Secure Boot db key (KEYS/sb/db), and
 #                                 ESP/EFI/BOOT/grub.cfg with its .sig: the password hash HASH in both
+#   boot_loader HASH ESP KEYS arm64 ROOT DEB
+#                                 the same for arm64: ESP/EFI/BOOT/BOOTAA64.EFI, made by the grub-mkimage of the arm64
+#                                 system in ROOT (run under emulation) from the arm64-efi modules of DEB (the package
+#                                 grub-efi-arm64-bin), and a grub.cfg whose kernel line also names ARM's serial console
 #
 # The caller runs under set -euo pipefail; a step that fails stops it with the reason on stderr.
 
@@ -40,8 +44,10 @@ grub_password_hash() {  # PASSWORD
 # fails its signature leaves a locked GRUB prompt, not an open one), then the signed grub.cfg is loaded. The boot
 # loader itself is signed with the Secure Boot db key; the firmware runs nothing else. Plain commands only: the
 # embedded config is read by GRUB's simple parser.
-boot_loader() {  # HASH ESP KEYS
-  local hash="$1" esp="$2" keys="$3"
+boot_loader() {  # HASH ESP KEYS [arm64 ROOT DEB]
+  local hash="$1" esp="$2" keys="$3" arch="${4:-x86}" root="${5:-}" deb="${6:-}"
+  local efi=BOOTX64.EFI
+  [ "$arch" = arm64 ] && efi=BOOTAA64.EFI
   mkdir -p "$esp/EFI/BOOT"
   cat > /tmp/early.cfg <<EOF
 set check_signatures=enforce
@@ -51,15 +57,37 @@ export superusers
 password_pbkdf2 urban $hash
 configfile /EFI/BOOT/grub.cfg
 EOF
-  grub-mkimage -O x86_64-efi -o /tmp/BOOTX64.unsigned.EFI -p /EFI/BOOT -c /tmp/early.cfg \
-    --pubkey "$keys/boot.pub.gpg" --disable-shim-lock \
-    part_gpt fat squash4 normal linux echo test loadenv configfile regexp search all_video efi_gop gzio \
-    boot cat sleep reboot halt password_pbkdf2 pbkdf2 gcry_sha512 pgp gcry_rsa gcry_sha256 hashsum probe
-  sbsign --key "$keys/sb/db.key" --cert "$keys/sb/db.crt" --output "$esp/EFI/BOOT/BOOTX64.EFI" /tmp/BOOTX64.unsigned.EFI >/dev/null
-  sbverify --cert "$keys/sb/db.crt" "$esp/EFI/BOOT/BOOTX64.EFI" >/dev/null || { echo "BOOTX64.EFI does not verify against db.crt" >&2; exit 1; }
-  rm -f /tmp/BOOTX64.unsigned.EFI
+  local modules="part_gpt fat squash4 normal linux echo test loadenv configfile regexp search all_video efi_gop gzio
+    boot cat sleep reboot halt password_pbkdf2 pbkdf2 gcry_sha512 pgp gcry_rsa gcry_sha256 hashsum probe"
+  if [ "$arch" = arm64 ]; then
+    # GRUB's arm64-efi modules come only in an arm64 package: unpacked into the arm64 system for the moment, where its
+    # own grub-mkimage (the same GRUB version) builds the image, emulated
+    [ -x "$root/usr/bin/grub-mkimage" ] && [ -f "$deb" ] || { echo "arm64 boot loader: no grub-mkimage in '$root' or no '$deb'" >&2; exit 1; }
+    rm -rf "$root/tmp/grub-arm64"; mkdir -p "$root/tmp/grub-arm64"
+    dpkg-deb -x "$deb" "$root/tmp/grub-arm64"
+    cp /tmp/early.cfg "$keys/boot.pub.gpg" "$root/tmp/grub-arm64/"
+    # shellcheck disable=SC2086
+    chroot "$root" grub-mkimage -O arm64-efi -d /tmp/grub-arm64/usr/lib/grub/arm64-efi -o /tmp/grub-arm64/BOOTAA64.EFI \
+      -p /EFI/BOOT -c /tmp/grub-arm64/early.cfg --pubkey /tmp/grub-arm64/boot.pub.gpg --disable-shim-lock $modules
+    mv "$root/tmp/grub-arm64/BOOTAA64.EFI" /tmp/BOOTAA64.unsigned.EFI
+    rm -rf "$root/tmp/grub-arm64"
+  else
+    # shellcheck disable=SC2086
+    grub-mkimage -O x86_64-efi -o /tmp/BOOTX64.unsigned.EFI -p /EFI/BOOT -c /tmp/early.cfg \
+      --pubkey "$keys/boot.pub.gpg" --disable-shim-lock $modules
+  fi
+  sbsign --key "$keys/sb/db.key" --cert "$keys/sb/db.crt" --output "$esp/EFI/BOOT/$efi" "/tmp/${efi%.EFI}.unsigned.EFI" >/dev/null
+  sbverify --cert "$keys/sb/db.crt" "$esp/EFI/BOOT/$efi" >/dev/null || { echo "$efi does not verify against db.crt" >&2; exit 1; }
+  rm -f "/tmp/${efi%.EFI}.unsigned.EFI"
   # grub.cfg: the build's template with the password filled in, signed with the boot key
   sed "s|^# URBAN-GRUB-PASSWORD\$|set superusers=\"urban\"\npassword_pbkdf2 urban $hash|" /work/os/build/grub.cfg > "$esp/EFI/BOOT/grub.cfg"
   grep -q '^password_pbkdf2 urban grub.pbkdf2' "$esp/EFI/BOOT/grub.cfg" || { echo "grub.cfg has no password" >&2; exit 1; }
+  if [ "$arch" = arm64 ]; then
+    # the kernel's console also on ARM's serial port (ttyAMA0: the PL011 of QEMU's virt machine and of many boards), named
+    # last so that it is the system's console; vsyscall=none is x86's only
+    sed -i '/^set CMDLINE=/{s| console=ttyS0,115200| console=ttyS0,115200 console=ttyAMA0,115200|; s| vsyscall=none||}' "$esp/EFI/BOOT/grub.cfg"
+    grep -q '^set CMDLINE=".* console=ttyAMA0,115200 ' "$esp/EFI/BOOT/grub.cfg" && ! grep -q 'vsyscall=' "$esp/EFI/BOOT/grub.cfg" \
+      || { echo "grub.cfg: the arm64 kernel line was not made" >&2; exit 1; }
+  fi
   boot_sign "$esp/EFI/BOOT/grub.cfg"
 }

@@ -35,6 +35,14 @@
     python3 vm.py demo [pilot]          the three machines (or the pilot's one) kept running, screens over VNC
     python3 vm.py demo-enrol            enrol the demo's district and unit at its centre, by the centre's CLI
     python3 vm.py demo-kit FILE DEVICE  put a kit downloaded from the demo's centre onto that machine
+    python3 vm.py arm-image             step 11: the arm64 image's layout without booting it: aarch64 programs only, the
+                                        signed chain with BOOTAA64.EFI, its own update compatible, the platform's Python
+                                        importing inside it (os/tests/vm_arm.py)
+    python3 vm.py arm                   step 11: the arm64 light unit in QEMU aarch64 (virt, AAVMF with URBAN's keys,
+                                        swtpm, 1 GB): Secure Boot, verity, LUKS2 in the TPM, its screen; a foreign boot
+                                        loader refused; the x86 bundle refused by its RAUC
+    python3 vm.py arm-update            step 11: on that unit a signed arm64 update into the other slot, then a broken one
+                                        that rolls back by itself
     python3 vm.py unitimage IMG.xz SUMS KEY UNIT SERIAL OTHER.xz
                                         a unit image as shipped: its own disk and partition GUIDs and GRUB password (against
                                         a second unit's image, OTHER.xz, and the fleet image), boot disk named by its own
@@ -64,6 +72,11 @@ LOGS = f"{OUT}/logs"
 KEY = "/tmp/vm-key"
 STAGE = "/var/lib/urban/update"  # bundles are staged on the data partition: /tmp is a small tmpfs
 BOOT_TIMEOUT = 1500 if os.environ.get("URBAN_KVM") != "1" else 300  # seconds; emulation without KVM is slow
+# arm64 (step 11): QEMU's virt machine with a Cortex-A72 (the core of many cheap boards; no pointer authentication to
+# emulate, which makes "max" slow), always emulated on this x86 host. Every time a scenario waits for is multiplied by
+# ARM_PACE on such a machine.
+ARM_CPU = "cortex-a72"
+ARM_PACE = 3
 SHOW = re.compile(r"URBAN-|Kernel panic|watchdog|Emergency|Failed to start|rauc|end Kernel|Secure ?boot|Access Denied"
                   r"|Security Violation|failed to load Boot|bad signature|verity|not syncing")
 
@@ -105,8 +118,12 @@ class VM:
                  add_key=True, bus="virtio", nic="virtio-net-pci", role=None, host=None, grow_mb=0, forward=(),
                  listen="127.0.0.1", vnc=None, ssh_port=2222, mem=2048, tpm=True, center=None, vision=None, module=None,
                  secure_boot=True, extra_disk=None, extra_bus="usb", console_input=False, link=None, restrict=False,
-                 rtc=None, data_files=None):
+                 rtc=None, data_files=None, arch="x86"):
         os.makedirs(LOGS, exist_ok=True)
+        # x86: a mini-PC (q35, OVMF); arm64: an ARM board (virt, AAVMF), from urban-edge-arm64-<version>.img
+        if arch not in ("x86", "arm64"):
+            raise Fail(f"no architecture {arch}")
+        self.arch, self.pace = arch, ARM_PACE if arch == "arm64" else 1
         self.secure_boot = secure_boot  # firmware with URBAN's keys enrolled and Secure Boot enforced; False: the control
         self.name, self.disk, self.key, self.bus, self.nic = name, f"/tmp/{name}.img", key, bus, nic
         self.forward = forward  # more (host port, guest port) pairs than SSH
@@ -124,7 +141,7 @@ class VM:
             sh(["mv", image, self.disk])
             unit, add_key = None, False
         else:
-            sh(["cp", "--sparse=always", f"{OUT}/urban-edge-{version}.img", self.disk])
+            sh(["cp", "--sparse=always", f"{OUT}/urban-edge-{version if arch == 'x86' else f'{arch}-{version}'}.img", self.disk])
         parts = partitions(self.disk)
         esp, data = parts["esp"]["start"], parts["urban-data"]["start"]
         if unit:  # the installer's step: the unit id and serial on the ESP
@@ -187,8 +204,9 @@ class VM:
                 time.sleep(0.1)
         else:
             raise Fail(f"swtpm of {self.name} does not accept connections on {sock}")
+        # the virt machine has no ISA bus: its TPM is the memory-mapped TIS device
         return ["-chardev", f"socket,id=chrtpm,path={sock}", "-tpmdev", "emulator,id=tpm0,chardev=chrtpm",
-                "-device", "tpm-tis,tpmdev=tpm0"]
+                "-device", ("tpm-tis-device" if self.arch == "arm64" else "tpm-tis") + ",tpmdev=tpm0"]
 
     def _firmware(self) -> tuple[list[str], list[str]]:
         """(machine flags, pflash drives). Secure Boot on: the SMM-capable OVMF build, its variable store protected
@@ -197,6 +215,16 @@ class VM:
         # firmware variables of this machine, like a real board's NVRAM: one store per firmware, so the same machine can be
         # switched between them (set_secure_boot) and keep its disk and its TPM
         vars_ = f"/tmp/{self.name}-vars.fd" if self.secure_boot else f"/tmp/{self.name}-vars-nosb.fd"
+        if self.arch == "arm64":
+            # ARM's UEFI firmware (AAVMF): one build, Secure Boot by its variables alone (no SMM on ARM). With it on, the
+            # store holds URBAN's PK/KEK/db (aavmf-vars-urban.fd, made by the arm64 build); off, the empty store
+            if not os.path.exists(vars_):
+                src = f"{OUT}/aavmf-vars-urban.fd" if self.secure_boot else "/usr/share/AAVMF/AAVMF_VARS.fd"
+                if not os.path.exists(src):
+                    raise Fail(f"{src} is missing: the arm64 image build must enrol URBAN's keys for Secure Boot")
+                shutil.copyfile(src, vars_)
+            return ["-machine", "virt"], ["-drive", "if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/AAVMF/AAVMF_CODE.fd",
+                                          "-drive", f"if=pflash,format=raw,unit=1,file={vars_}"]
         if self.secure_boot:
             if not os.path.exists(vars_):
                 if not os.path.exists(f"{OUT}/ovmf-vars-urban.fd"):
@@ -236,11 +264,15 @@ class VM:
                 "-device", f"virtio-net-pci,netdev=up0,mac={self.link['mac']}"]
 
     def start(self):
-        accel = ["-enable-kvm", "-cpu", "host"] if os.environ.get("URBAN_KVM") == "1" else ["-cpu", "max"]
+        if self.arch == "arm64":
+            qemu, accel = "qemu-system-aarch64", ["-cpu", ARM_CPU]
+        else:
+            qemu = "qemu-system-x86_64"
+            accel = ["-enable-kvm", "-cpu", "host"] if os.environ.get("URBAN_KVM") == "1" else ["-cpu", "max"]
         machine, firmware = self._firmware()
         self.boots.append(len(self.lines))
         self.proc = subprocess.Popen(
-            ["qemu-system-x86_64", *machine, "-m", str(self.mem), "-smp", "2", *accel,
+            [qemu, *machine, "-m", str(self.mem), "-smp", "2", *accel,
              *(["-rtc", f"base={self.rtc}"] if self.rtc else []),
              *firmware,
              *DISK_BUS[self.bus](self.disk),
@@ -297,6 +329,7 @@ class VM:
 
     def wait(self, pattern, timeout=BOOT_TIMEOUT):
         """The first line matching `pattern` after the mark; the mark moves past it."""
+        timeout *= self.pace
         rx, end = re.compile(pattern), time.time() + timeout
         while time.time() < end:
             for i in range(self.mark, len(self.lines)):
@@ -323,7 +356,7 @@ class VM:
         return line
 
     def wait_ssh(self, timeout=300):
-        end, last = time.time() + timeout, ""
+        end, last = time.time() + timeout * self.pace, ""
         while time.time() < end:
             r = self.ssh("true", check=False)
             if r.returncode == 0:
@@ -333,7 +366,7 @@ class VM:
         raise Fail(f"SSH did not come up: {last}")
 
     def ssh(self, cmd, check=True, timeout=600):
-        return remote_ssh(self.ssh_port, self.key, cmd, check, timeout)
+        return remote_ssh(self.ssh_port, self.key, cmd, check, timeout * self.pace)
 
     def put(self, src, dst):
         remote_put(self.ssh_port, self.key, src, dst)
@@ -446,6 +479,21 @@ class Shell:
 
 def image():
     disk = f"{OUT}/urban-edge-1.img"
+    parts, esp = disk_layout(disk, "BOOTX64.EFI")
+    bundle_layout(f"{OUT}/urban-edge-1.raucb", "urban-edge-x86_64")
+    contents()
+    import vm_bootdisk  # step 7: the boot-disk pieces (os/tests/vm_bootdisk.py)
+    vm_bootdisk.image_pieces(disk, parts, esp)
+    signed_chain(disk, parts, esp)
+    import vm_pcr7  # step 7: the recovery escrow's public key in the image, its private key nowhere (os/tests/vm_pcr7.py)
+    vm_pcr7.escrow_in_image(disk, parts, esp)
+    print("IMAGE LAYOUT VERIFIED", flush=True)
+
+
+def disk_layout(disk, loader):
+    """The disk image as it is written onto a unit: the A/B partitions with slot A filled and slot B empty, the ESP with
+    the boot loader `loader` (BOOTX64.EFI; arm64: BOOTAA64.EFI), its config, slot A's signed files and the boot state,
+    the data partition. Returns the partitions and the ESP's byte offset (step 11: shared with the arm64 image)."""
     parts = partitions(disk)
     names = ["esp", "rootfs-a", "rootfs-b", "urban-data"]
     if list(parts) != names:
@@ -458,7 +506,7 @@ def image():
         raise Fail("slot B is not empty in a fresh image")
     esp = parts["esp"]["start"] * 512
     files = sh(f"mdir -/ -b -i {disk}@@{esp} ::/").stdout
-    for need in ("::/EFI/BOOT/BOOTX64.EFI", "::/EFI/BOOT/grub.cfg", "::/EFI/BOOT/grub.cfg.sig", "::/EFI/BOOT/grubenv",
+    for need in (f"::/EFI/BOOT/{loader}", "::/EFI/BOOT/grub.cfg", "::/EFI/BOOT/grub.cfg.sig", "::/EFI/BOOT/grubenv",
                  "::/EFI/URBAN/slot-A.cfg", "::/EFI/URBAN/slot-A.cfg.sig", "::/EFI/URBAN/slot-A.sha256",
                  "::/EFI/URBAN/slot-A.sha256.sig", "::/urban-unit.txt"):
         if need not in files:
@@ -473,16 +521,22 @@ def image():
     label = sh(["dumpe2fs", "-h", "/tmp/data.part"]).stdout
     if "urban-data" not in label:
         raise Fail("the data partition is not the ext4 file system urban-data")
+    return parts, esp
+
+
+def bundle_layout(bundle, compatible):
+    """The update bundle verifies against the URBAN update CA as a unit checks it, is made for `compatible` and carries
+    its hook with the slot's signed files (step 11: shared with the arm64 bundle)."""
     with open("/tmp/verify.conf", "w") as f:  # the unit's own trust: the URBAN update CA, code-signing purpose
-        f.write("[system]\ncompatible=urban-edge-x86_64\nbootloader=noop\n"
+        f.write(f"[system]\ncompatible={compatible}\nbootloader=noop\n"
                 f"[keyring]\npath={OUT}/keys/ca.pem\ncheck-purpose=codesign\n")
-    info = sh(["rauc", "--conf", "/tmp/verify.conf", "info", "--output-format=json", f"{OUT}/urban-edge-1.raucb"]).stdout
-    if json.loads(info).get("compatible") != "urban-edge-x86_64":
-        raise Fail("the update bundle is not for urban-edge-x86_64")
-    plain = sh(["rauc", "--conf", "/tmp/verify.conf", "info", f"{OUT}/urban-edge-1.raucb"]).stdout
+    info = sh(["rauc", "--conf", "/tmp/verify.conf", "info", "--output-format=json", bundle]).stdout
+    if json.loads(info).get("compatible") != compatible:
+        raise Fail(f"the update bundle is not for {compatible}")
+    plain = sh(["rauc", "--conf", "/tmp/verify.conf", "info", bundle]).stdout
     # rauc info names the image's hook but not the hook file: look inside the (signature-checked) bundle for it
     shutil.rmtree("/tmp/bundle-x", ignore_errors=True)
-    sh(["rauc", "--conf", "/tmp/verify.conf", "extract", f"{OUT}/urban-edge-1.raucb", "/tmp/bundle-x"])
+    sh(["rauc", "--conf", "/tmp/verify.conf", "extract", bundle, "/tmp/bundle-x"])
     manifest = open("/tmp/bundle-x/manifest.raucm").read() if os.path.exists("/tmp/bundle-x/manifest.raucm") else ""
     if ("post-install" not in plain or not re.search(r"^filename=hook\.sh$", manifest, re.M)
             or not os.access("/tmp/bundle-x/hook.sh", os.X_OK)
@@ -493,13 +547,6 @@ def image():
         raise Fail("the update bundle's hook does not run before the install (no hooks=install-check): a unit written "
                    "before step 7 would have its other slot written before the hook refuses it")
     shutil.rmtree("/tmp/bundle-x", ignore_errors=True)
-    contents()
-    import vm_bootdisk  # step 7: the boot-disk pieces (os/tests/vm_bootdisk.py)
-    vm_bootdisk.image_pieces(disk, parts, esp)
-    signed_chain(disk, parts, esp)
-    import vm_pcr7  # step 7: the recovery escrow's public key in the image, its private key nowhere (os/tests/vm_pcr7.py)
-    vm_pcr7.escrow_in_image(disk, parts, esp)
-    print("IMAGE LAYOUT VERIFIED", flush=True)
 
 
 def flip_byte(src, dst, pos):
@@ -512,11 +559,12 @@ def flip_byte(src, dst, pos):
         f.write(bytes([b[0] ^ 0xFF]))
 
 
-def signed_chain(disk, parts, esp):
+def signed_chain(disk, parts, esp, tag="1", loader="BOOTX64.EFI", fd="ovmf-vars-urban.fd"):
     """The boot chain is signed through, and every check has its control that must fail:
     BOOTX64.EFI against the db certificate (not against another one), grub.cfg / the slot file / kernel / initrd against
     the boot key (not when one byte is changed), the slot against the dm-verity root hash in its signed file (not when one
-    byte of the data or of the hash tree is changed), and the VMs' firmware variables hold our keys with Secure Boot on."""
+    byte of the data or of the hash tree is changed), and the VMs' firmware variables hold our keys with Secure Boot on.
+    The arm64 image (step 11): tag arm64-1 (build/rootfs-arm64-1.img), loader BOOTAA64.EFI, fd aavmf-vars-urban.fd."""
     keys, sb, work = f"{OUT}/keys", f"{OUT}/keys/sb", "/tmp/signed"
     shutil.rmtree(work, ignore_errors=True)
     os.makedirs(work)
@@ -526,17 +574,17 @@ def signed_chain(disk, parts, esp):
         sh(f"mcopy -n -o -i {disk}@@{esp} ::{path} {dst}")
         return dst
 
-    efi = from_esp("/EFI/BOOT/BOOTX64.EFI")
+    efi = from_esp(f"/EFI/BOOT/{loader}")
     if sh(["sbverify", "--cert", f"{sb}/db.crt", efi], check=False).returncode != 0:
-        raise Fail("BOOTX64.EFI is not signed by our db certificate")
+        raise Fail(f"{loader} is not signed by our db certificate")
     sh(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-sha256", "-days", "2", "-subj", "/CN=not URBAN",
         "-keyout", f"{work}/other.key", "-out", f"{work}/other.crt"])
     if sh(["sbverify", "--cert", f"{work}/other.crt", efi], check=False).returncode == 0:
-        raise Fail("control: BOOTX64.EFI verifies against a certificate that is not ours")
+        raise Fail(f"control: {loader} verifies against a certificate that is not ours")
     for other in ("PK", "KEK"):  # only db may sign boot code
         if sh(["sbverify", "--cert", f"{sb}/{other}.crt", efi], check=False).returncode == 0:
-            raise Fail(f"control: BOOTX64.EFI verifies against the {other} certificate")
-    print("   boot loader: BOOTX64.EFI verifies against our db certificate, not against another one (nor PK, KEK)", flush=True)
+            raise Fail(f"control: {loader} verifies against the {other} certificate")
+    print(f"   boot loader: {loader} verifies against our db certificate, not against another one (nor PK, KEK)", flush=True)
 
     # the boot key
     gh = f"{work}/gnupg"
@@ -547,7 +595,7 @@ def signed_chain(disk, parts, esp):
         r = sh(["gpg", "--homedir", gh, "--batch", "--status-fd", "1", "--verify", sig, f], check=False)
         return r.returncode == 0 and "GOODSIG" in r.stdout and "VALIDSIG" in r.stdout
 
-    slot = f"{OUT}/build/rootfs-1.img"
+    slot = f"{OUT}/build/rootfs-{tag}.img"
     shutil.rmtree("/tmp/sq3", ignore_errors=True)
     sh(["unsquashfs", "-q", "-n", "-d", "/tmp/sq3", slot, "boot/vmlinuz", "boot/vmlinuz.sig", "boot/initrd.img", "boot/initrd.img.sig"])
     signed = {
@@ -620,7 +668,7 @@ def signed_chain(disk, parts, esp):
           f"one changed byte of the data or of the tree fails", flush=True)
 
     # the firmware variables of the test VMs
-    fd = f"{OUT}/ovmf-vars-urban.fd"
+    fd = f"{OUT}/{fd}"
     blob = open(fd, "rb").read()
     for n in ("PK", "KEK", "db"):
         der = subprocess.run(["openssl", "x509", "-in", f"{sb}/{n}.crt", "-outform", "DER"], check=True, capture_output=True).stdout
@@ -637,7 +685,7 @@ def signed_chain(disk, parts, esp):
         raise Fail(f"{fd} has no SecureBootEnable variable (--secure-boot)")
     if any(str(v.get("data", "")).lower() not in ("01", "1") for v in enable):
         raise Fail(f"{fd}: SecureBootEnable is not 1: {enable}")
-    print("   firmware variables: ovmf-vars-urban.fd holds our PK, KEK and db only, Secure Boot enabled", flush=True)
+    print(f"   firmware variables: {os.path.basename(fd)} holds our PK, KEK and db only, Secure Boot enabled", flush=True)
 
 
 def contents():
@@ -677,9 +725,10 @@ def contents():
     roles_in(slot, listing)
 
 
-def roles_in(slot, listing):
+def roles_in(slot, listing, triplet="x86_64-linux-gnu"):
     """One image for the three roles: the power manager everywhere, the unit's and vision's services, the
-    control centre with its built interface and its data on the data partition, the role's firewall openings."""
+    control centre with its built interface and its data on the data partition, the role's firewall openings.
+    triplet: the system's library folder (the arm64 image's: aarch64-linux-gnu)."""
     need = {
         "the power manager": "opt/urban/backend/urban/node/power.py",
         "the power service, started at every boot": "etc/systemd/system/multi-user.target.wants/urban-power.service",
@@ -700,8 +749,8 @@ def roles_in(slot, listing):
         "cryptsetup (the data partition is LUKS2)": "usr/sbin/cryptsetup",
         "systemd-cryptsetup": "usr/lib/systemd/systemd-cryptsetup",
         "systemd-cryptenroll": "usr/bin/systemd-cryptenroll",
-        "the TPM2 library systemd loads (esys)": "usr/lib/x86_64-linux-gnu/libtss2-esys.so.0",
-        "the TPM2 library systemd loads (device tcti)": "usr/lib/x86_64-linux-gnu/libtss2-tcti-device.so.0",
+        "the TPM2 library systemd loads (esys)": f"usr/lib/{triplet}/libtss2-esys.so.0",
+        "the TPM2 library systemd loads (device tcti)": f"usr/lib/{triplet}/libtss2-tcti-device.so.0",
         "tpm2-tools: tpm2_createprimary (the device key is made in the TPM)": "usr/bin/tpm2_createprimary",
         "tpm2-tools: tpm2_create": "usr/bin/tpm2_create",
         "tpm2-tools: tpm2_load": "usr/bin/tpm2_load",
@@ -3343,7 +3392,7 @@ def sb_guest(vm, what):
 def refused(vm, what, loader):
     """The machine was just (re)started with `loader` as its boot loader: the firmware must refuse it and nothing of the
     system may run. Returns the firmware's own words about it."""
-    tail = observe(vm, vm.boots[-1], SB_WINDOW, DENIED, 90)
+    tail = observe(vm, vm.boots[-1], SB_WINDOW * vm.pace, DENIED, 90)
     up = [l for l in tail if OS_UP.search(l)]
     if up:
         raise Fail(f"{what}: {loader} was run by a machine with Secure Boot on: {up[0]}")
@@ -3633,6 +3682,9 @@ if __name__ == "__main__":
         elif what == "wireguard":  # step 8, G5: the tunnel between the unit and its district (os/tests/vm_wireguard.py)
             import vm_wireguard
             vm_wireguard.wireguard()
+        elif what in ("arm-image", "arm", "arm-update"):  # step 11: the arm64 image (os/tests/vm_arm.py)
+            import vm_arm
+            {"arm-image": vm_arm.image, "arm": vm_arm.unit, "arm-update": vm_arm.update}[what]()
         elif what == "update":
             if sys.argv[2] == "foreign":
                 foreign_bundle()

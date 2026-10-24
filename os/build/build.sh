@@ -2,26 +2,32 @@
 # Builds URBAN OS inside the builder container (os/build/Dockerfile): one image for the junction unit, the
 # district server and the control centre; the role is chosen on the ESP (urban-unit.txt).
 #
-#   build.sh --version 1 [--image] [--break firewall]
+#   build.sh --version 1 [--image] [--break firewall] [--arch arm64]
 #
 # Always makes the signed update bundle out/urban-edge-<version>.raucb; with --image also the disk image
 # out/urban-edge-<version>.img (slot A filled, slot B empty) to write onto the unit's disk.
 # --break firewall makes a deliberately broken system (a firewall that does not load) for the rollback test.
+# --arch arm64 makes the same system for 64-bit ARM boards with UEFI firmware (the light unit, the lighting cabinet):
+# out/urban-edge-arm64-<version>.raucb / .img, the update compatible urban-edge-aarch64, EFI/BOOT/BOOTAA64.EFI. Its
+# system is installed and its GRUB made under emulation (the host's binfmt runs the arm64 programs in the chroot).
+# Without --arch it is the x86 image, as before.
 #
 # /work is the repository, /out is data/os (keys, cache, results). Nothing here needs a loop device:
 # file systems are made from directories and written into the disk image at their offsets.
 set -euo pipefail
 
-VERSION=""; IMAGE=0; BREAK=""
+VERSION=""; IMAGE=0; BREAK=""; ARCH=x86
 while [ $# -gt 0 ]; do
   case "$1" in
     --version) VERSION="$2"; shift 2 ;;
     --image) IMAGE=1; shift ;;
     --break) BREAK="$2"; shift 2 ;;
+    --arch) ARCH="$2"; shift 2 ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
 done
 [ -n "$VERSION" ] || { echo "--version is required" >&2; exit 2; }
+case "$ARCH" in x86|arm64) ;; *) echo "--arch arm64 (or none: x86)" >&2; exit 2 ;; esac
 
 OUT=/out
 COMPATIBLE=urban-edge-x86_64
@@ -40,6 +46,27 @@ EXTRA_PACKAGES="cryptsetup-bin libcryptsetup12 libtss2-esys-3.0.2-0 libtss2-mu0 
 # real mini-PCs: Realtek network chips want their firmware, and the CPU its microcode fixes (Debian's
 # non-free-firmware section, redistributable); Intel network chips need nothing
 ESP_MB=128; SLOT_MB=1536; DATA_MB=2048  # data: keys, kit, cameras and room for one update bundle
+# the watchdog drivers loaded before systemd starts (initramfs): the Intel and AMD boards' and QEMU's i6300esb
+WATCHDOGS="i6300esb iTCO_wdt sp5100_tco"
+TAG=$VERSION  # what the files of this build are called: urban-edge-$TAG.raucb, build/rootfs-$TAG.img, ...
+ARCH_ID=""
+# arm64: the same packages with the arm64 kernel and without the x86 CPUs' microcode; its own update compatible, so that
+# an x86 bundle never lands on an ARM unit nor the reverse; its own file names next to the x86 ones in the volume. The
+# watchdogs: ARM's generic one (sbsa_gwdt, on UEFI boards with the SBSA watchdog) and QEMU's i6300esb (a PCI card, also
+# on the virt machine). ARCH_ID keeps the cached base systems of the two apart.
+if [ "$ARCH" = arm64 ]; then
+  COMPATIBLE=urban-edge-aarch64
+  PACKAGES=${PACKAGES/linux-image-amd64/linux-image-arm64}
+  PACKAGES=${PACKAGES/,intel-microcode,amd64-microcode/}
+  WATCHDOGS="i6300esb sbsa_gwdt"
+  # zstd: the initrd is compressed with it (initramfs-tools' own default; without the program it falls back to gzip). GRUB
+  # reads a gzip, xz or lzop file unpacked when it checks its signature (verify_detached; squash4 brings those
+  # decompressors along), so a gzip initrd would fail its signature, which is made over the file as it is. The x86 initrd
+  # is not affected: it starts with the uncompressed microcode archive, not with a compressor's magic.
+  EXTRA_PACKAGES="$EXTRA_PACKAGES zstd"
+  TAG=arm64-$VERSION
+  ARCH_ID=" arm64"
+fi
 mkdir -p "$OUT/cache/pip" "$OUT/keys" "$OUT/build"
 log() { echo ">> $*"; }
 
@@ -56,12 +83,18 @@ for f in PK KEK db; do
   [ -f "$SB/$f.crt" ] && [ -f "$SB/$f.key" ] || { echo "Secure Boot key $SB/$f is missing" >&2; exit 1; }
 done
 # the UEFI variables for the test VMs: PK, KEK and db are ours alone (no Microsoft or distribution keys), Secure Boot on
-OVMF_VARS=/usr/share/OVMF/OVMF_VARS_4M.fd
-[ -f "$OVMF_VARS" ] || { echo "$OVMF_VARS is missing: $(ls /usr/share/OVMF 2>&1 | tr '\n' ' ')" >&2; exit 1; }
+# (arm64: the same keys in the variable store of the ARM firmware, AAVMF. Debian ships its empty store unformatted (all
+# zeros, formatted by the firmware at its first start), so the formatted one with Microsoft's keys is taken and every key
+# in it deleted first: PK, KEK, db and dbx are then ours alone as well)
+OVMF_VARS=/usr/share/OVMF/OVMF_VARS_4M.fd; FW_VARS=ovmf-vars-urban.fd; FW_CLEAR=()
+if [ "$ARCH" = arm64 ]; then
+  OVMF_VARS=/usr/share/AAVMF/AAVMF_VARS.ms.fd; FW_VARS=aavmf-vars-urban.fd; FW_CLEAR=(-d PK -d KEK -d db -d dbx)
+fi
+[ -f "$OVMF_VARS" ] || { echo "$OVMF_VARS is missing: $(ls "$(dirname "$OVMF_VARS")" 2>&1 | tr '\n' ' ')" >&2; exit 1; }
 OWNER=$(cat "$SB/owner.guid")
-virt-fw-vars --input "$OVMF_VARS" --output "$OUT/ovmf-vars-urban.fd.tmp" \
+virt-fw-vars --input "$OVMF_VARS" --output "$OUT/$FW_VARS.tmp" "${FW_CLEAR[@]}" \
   --set-pk "$OWNER" "$SB/PK.crt" --add-kek "$OWNER" "$SB/KEK.crt" --add-db "$OWNER" "$SB/db.crt" --secure-boot
-mv "$OUT/ovmf-vars-urban.fd.tmp" "$OUT/ovmf-vars-urban.fd"
+mv "$OUT/$FW_VARS.tmp" "$OUT/$FW_VARS"
 # What GRUB loads is signed with the GnuPG boot key (boot_sign). The boot loader and its config are made by
 # boot-loader.sh, which os/unit-image.mjs uses as well to give every unit's image its own GRUB password.
 . /work/os/build/boot-loader.sh
@@ -69,7 +102,7 @@ boot_gpg_init "$OUT/keys"
 
 # ---- base system, cached by its package list; the extras on top, cached again
 COMPONENTS=main,non-free-firmware
-BASE_ID=$(echo "bookworm $COMPONENTS $PACKAGES" | sha256sum | cut -c1-12)
+BASE_ID=$(echo "bookworm $COMPONENTS $PACKAGES$ARCH_ID" | sha256sum | cut -c1-12)
 BASE="$OUT/cache/base-$BASE_ID.tar"
 FULL_ID=$(echo "$BASE_ID $EXTRA_PACKAGES" | sha256sum | cut -c1-12)
 FULL="$OUT/cache/base-$BASE_ID-$FULL_ID.tar"
@@ -82,7 +115,13 @@ if [ -f "$FULL" ]; then
 else
   if [ ! -f "$BASE" ]; then
     log "debootstrap bookworm (first build takes a while)"
-    debootstrap --variant=minbase --components="$COMPONENTS" --include="$PACKAGES" bookworm "$ROOT" http://deb.debian.org/debian
+    if [ "$ARCH" = arm64 ]; then
+      # the packages are unpacked here, then configured by the arm64 system itself (its second stage, emulated)
+      debootstrap --arch=arm64 --foreign --variant=minbase --components="$COMPONENTS" --include="$PACKAGES" bookworm "$ROOT" http://deb.debian.org/debian
+      chroot "$ROOT" /debootstrap/debootstrap --second-stage
+    else
+      debootstrap --variant=minbase --components="$COMPONENTS" --include="$PACKAGES" bookworm "$ROOT" http://deb.debian.org/debian
+    fi
     tar -C "$ROOT" -cf "$BASE.tmp" . && mv "$BASE.tmp" "$BASE"
   else
     log "base system from cache ($BASE_ID)"
@@ -109,6 +148,24 @@ umount_chroot() {
 trap umount_chroot EXIT
 mount_chroot
 rm -f "$ROOT/etc/resolv.conf"; cp /etc/resolv.conf "$ROOT/etc/resolv.conf"  # a link to resolved in the image
+
+# arm64: GRUB's arm64-efi modules for the boot loader (package grub-efi-arm64-bin, which exists for arm64 only). They are
+# not installed into the system (the x86 system carries no GRUB modules either): the package is fetched once by the
+# system's own apt, at the version of its grub-common, and the system's own grub-mkimage makes BOOTAA64.EFI from it
+# (boot-loader.sh), under emulation.
+GRUB_DEB=""
+if [ "$ARCH" = arm64 ]; then
+  GRUB_DEB="$OUT/cache/base-$BASE_ID-$FULL_ID-grub-efi-arm64-bin.deb"
+  if [ ! -f "$GRUB_DEB" ]; then
+    gv=$(chroot "$ROOT" dpkg-query -W -f='${Version}' grub-common)
+    log "grub-efi-arm64-bin $gv (the boot loader's modules)"
+    chroot "$ROOT" $APT update -qq
+    rm -rf "$ROOT/tmp/grub-deb"; mkdir -p "$ROOT/tmp/grub-deb"
+    chroot "$ROOT" sh -c "cd /tmp/grub-deb && $APT download -qq grub-efi-arm64-bin=$gv"
+    mv "$ROOT"/tmp/grub-deb/grub-efi-arm64-bin_*_arm64.deb "$GRUB_DEB.tmp" && mv "$GRUB_DEB.tmp" "$GRUB_DEB"
+    rm -rf "$ROOT/tmp/grub-deb" "$ROOT"/var/lib/apt/lists/*
+  fi
+fi
 
 # ---- the URBAN software: the unit (urban.edge) and its vision (urban.vision), as on a server install
 log "URBAN software"
@@ -149,6 +206,12 @@ compgen -G "$ROOT/lib/modules/*/kernel/drivers/net/wireguard/wireguard.ko*" >/de
   || compgen -G "$ROOT/usr/lib/modules/*/kernel/drivers/net/wireguard/wireguard.ko*" >/dev/null \
   || { echo "the kernel has no WireGuard module (lib/modules/*/kernel/drivers/net/wireguard/wireguard.ko)" >&2; exit 1; }
 cp "$OUT/keys/ca.pem" "$ROOT/etc/rauc/keyring.pem"
+# arm64: the unit's RAUC takes only bundles made for its own architecture
+if [ "$ARCH" = arm64 ]; then
+  sed -i "s/^compatible=urban-edge-x86_64\$/compatible=$COMPATIBLE/" "$ROOT/etc/rauc/system.conf"
+  grep -qx "compatible=$COMPATIBLE" "$ROOT/etc/rauc/system.conf" \
+    || { echo "etc/rauc/system.conf does not say compatible=$COMPATIBLE" >&2; exit 1; }
+fi
 # the recovery escrow key's public half: urban-grow encrypts each unit's recovery key to it with the image's own openssl
 # (RSA-OAEP, SHA-256). Tried here once the way a unit will, and opened again when the private half is on this machine.
 install -D -m 644 "$ESCROW" "$ROOT/usr/share/urban/recovery-escrow.pem"
@@ -188,7 +251,7 @@ chroot "$ROOT" passwd -l root >/dev/null                 # no password logins at
 printf "VERSION=%s\nBUILT=%s\nCOMPATIBLE=%s\n" "$VERSION" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$COMPATIBLE" > "$ROOT/etc/urban-os-release"
 # the root file system, the watchdog drivers (so the timer is armed before systemd starts) and dm-verity (the root slot is
 # opened as a verity device by scripts/local-top/urban-verity)
-for m in squashfs i6300esb iTCO_wdt sp5100_tco dm_mod dm_verity; do echo "$m" >> "$ROOT/etc/initramfs-tools/modules"; done
+for m in squashfs $WATCHDOGS dm_mod dm_verity; do echo "$m" >> "$ROOT/etc/initramfs-tools/modules"; done
 chroot "$ROOT" systemctl enable systemd-networkd systemd-resolved systemd-timesyncd ssh nftables \
   urban-grow.service urban-prepare.service urban-os-check.service urban-health.service urban-power.service >/dev/null 2>&1
 chroot "$ROOT" systemctl mask apt-daily.timer apt-daily-upgrade.timer e2scrub_all.timer >/dev/null 2>&1 || true
@@ -206,6 +269,11 @@ INITRD_FILES=$(chroot "$ROOT" lsinitramfs "/boot/$(basename "$(ls "$ROOT"/boot/i
 for need in 'sbin/veritysetup$' 'scripts/local-top/urban-verity$' 'dm-verity\.ko'; do
   grep -Eq "$need" <<<"$INITRD_FILES" || { echo "the initramfs lacks $need" >&2; exit 1; }
 done
+# ... and must not start as a gzip, xz or lzop file: GRUB would check its signature over the file unpacked (verify_detached
+# with squash4's decompressors loaded) and refuse it (x86: the microcode archive comes first; arm64: zstd, see above)
+case "$(od -An -tx1 -N6 "$ROOT/boot/initrd.img" | tr -d ' \n')" in
+  1f8b*|fd377a585a00|894c5a4f*) echo "the initrd starts as a gzip/xz/lzop file: GRUB could not verify its signature" >&2; exit 1 ;;
+esac
 # GRUB (check_signatures=enforce) loads the kernel and the initrd only with these signatures, which sit next to them in
 # the slot: made last, from the very files that go into the squashfs
 boot_sign "$ROOT/boot/vmlinuz"
@@ -220,7 +288,7 @@ umount_chroot
 trap - EXIT
 
 # ---- slot image: a read-only squashfs; GRUB reads the kernel straight from it
-SLOT="$OUT/build/rootfs-$VERSION.img"
+SLOT="$OUT/build/rootfs-$TAG.img"
 log "rootfs slot image"
 rm -f "$SLOT"
 mksquashfs "$ROOT" "$SLOT" -comp gzip -noappend -quiet -no-progress
@@ -242,13 +310,13 @@ size=$(stat -c %s "$SLOT")
 [ "$size" -lt $((SLOT_MB * 1024 * 1024)) ] || { echo "rootfs with its hash tree ($size bytes) does not fit a ${SLOT_MB} MiB slot" >&2; exit 1; }
 
 # the slot's boot file, signed by the boot key: GRUB sources it (only if the signature holds) and passes the root hash on
-SLOTCFG="$OUT/build/slot-$VERSION.cfg"
+SLOTCFG="$OUT/build/slot-$TAG.cfg"
 printf 'set URBAN_ROOTHASH=%s\nset URBAN_HASHOFFSET=%s\nset URBAN_VERSION=%s\n' "$ROOTHASH" "$padded" "$VERSION" > "$SLOTCFG"
 boot_sign "$SLOTCFG"
 # ... and the sha256 of the kernel and the initrd of this very build (the files that went into the squashfs, "hash  name"
 # lines as GRUB's hashsum --check reads them), signed the same way: GRUB boots them only if they are these, so an older
 # validly signed kernel or initrd put into the slot's partition is refused
-SLOTSUMS="$OUT/build/slot-$VERSION.sha256"
+SLOTSUMS="$OUT/build/slot-$TAG.sha256"
 ( cd "$ROOT" && sha256sum boot/vmlinuz boot/initrd.img ) > "$SLOTSUMS"
 [ "$(grep -c '^[0-9a-f]\{64\}  boot/\(vmlinuz\|initrd\.img\)$' "$SLOTSUMS")" = 2 ] || { echo "the kernel/initrd hash list is wrong: $(cat "$SLOTSUMS")" >&2; exit 1; }
 boot_sign "$SLOTSUMS"
@@ -266,11 +334,11 @@ chmod 644 "$B/slot.cfg" "$B/slot.cfg.sig" "$B/slot.sha256" "$B/slot.sha256.sig"
 # the hook also runs once before anything is written (install-check): it refuses a unit written before step 7
 printf "[update]\ncompatible=%s\nversion=%s\n\n[bundle]\nformat=verity\n\n[hooks]\nfilename=hook.sh\nhooks=install-check\n\n[image.rootfs]\nfilename=rootfs.img\nhooks=post-install\n" \
   "$COMPATIBLE" "$VERSION" > "$B/manifest.raucm"
-rm -f "$OUT/urban-edge-$VERSION.raucb"
-rauc bundle --cert "$OUT/keys/signing.pem" --key "$OUT/keys/signing.key" "$B" "$OUT/urban-edge-$VERSION.raucb" >/dev/null
+rm -f "$OUT/urban-edge-$TAG.raucb"
+rauc bundle --cert "$OUT/keys/signing.pem" --key "$OUT/keys/signing.key" "$B" "$OUT/urban-edge-$TAG.raucb" >/dev/null
 printf "[system]\ncompatible=%s\nbootloader=noop\n[keyring]\npath=%s\ncheck-purpose=codesign\n" \
   "$COMPATIBLE" "$OUT/keys/ca.pem" > /tmp/verify.conf
-rauc --conf /tmp/verify.conf info "$OUT/urban-edge-$VERSION.raucb" >/dev/null  # as the unit will check it
+rauc --conf /tmp/verify.conf info "$OUT/urban-edge-$TAG.raucb" >/dev/null  # as the unit will check it
 
 if [ "$IMAGE" = 1 ]; then
   log "disk image"
@@ -282,8 +350,13 @@ if [ "$IMAGE" = 1 ]; then
   fi
   pw=$(cat "$OUT/keys/grub-password")
   hash=$(grub_password_hash "$pw")
-  # the signed boot loader with the hash in its embedded config, and the signed grub.cfg (boot-loader.sh)
-  boot_loader "$hash" "$E" "$OUT/keys"
+  # the signed boot loader with the hash in its embedded config, and the signed grub.cfg (boot-loader.sh); arm64's is
+  # made by grub-mkimage of the arm64 system just built, with the modules of GRUB_DEB
+  if [ "$ARCH" = arm64 ]; then
+    boot_loader "$hash" "$E" "$OUT/keys" arm64 "$ROOT" "$GRUB_DEB"
+  else
+    boot_loader "$hash" "$E" "$OUT/keys"
+  fi
   cp "$SLOTCFG" "$E/EFI/URBAN/slot-A.cfg"; cp "$SLOTCFG.sig" "$E/EFI/URBAN/slot-A.cfg.sig"  # slot B's pair is written by its first update
   cp "$SLOTSUMS" "$E/EFI/URBAN/slot-A.sha256"; cp "$SLOTSUMS.sig" "$E/EFI/URBAN/slot-A.sha256.sig"
   grub-editenv "$E/EFI/BOOT/grubenv" create
@@ -312,27 +385,27 @@ EOF
   put /tmp/esp.img 0
   put "$SLOT" 1
   put /tmp/data.img 3
-  rm -f "$OUT/urban-edge-$VERSION.img"
-  cp --sparse=always "$DISK" "$OUT/urban-edge-$VERSION.img"
+  rm -f "$OUT/urban-edge-$TAG.img"
+  cp --sparse=always "$DISK" "$OUT/urban-edge-$TAG.img"
   rm -f "$DISK"
-  log "image: $OUT/urban-edge-$VERSION.img"
+  log "image: $OUT/urban-edge-$TAG.img"
 fi
 
-python3 - "$OUT" "$VERSION" "$IMAGE" "$BREAK" <<'PY'
+python3 - "$OUT" "$VERSION" "$IMAGE" "$BREAK" "$TAG" <<'PY'
 import hashlib, json, os, sys
-out, version, image, broken = sys.argv[1], sys.argv[2], sys.argv[3] == "1", sys.argv[4]
+out, version, image, broken, tag = sys.argv[1], sys.argv[2], sys.argv[3] == "1", sys.argv[4], sys.argv[5]
 def sha(p):
     h = hashlib.sha256()
     with open(p, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
-files = {"bundle": f"urban-edge-{version}.raucb", "rootfs": f"build/rootfs-{version}.img"}
+files = {"bundle": f"urban-edge-{tag}.raucb", "rootfs": f"build/rootfs-{tag}.img"}
 if image:
-    files["image"] = f"urban-edge-{version}.img"
+    files["image"] = f"urban-edge-{tag}.img"
 manifest = {"version": version, "broken": broken or None,
             "files": {k: {"path": v, "sha256": sha(os.path.join(out, v)), "bytes": os.path.getsize(os.path.join(out, v))}
                       for k, v in files.items()}}
-json.dump(manifest, open(os.path.join(out, f"manifest-{version}.json"), "w"), indent=1)
+json.dump(manifest, open(os.path.join(out, f"manifest-{tag}.json"), "w"), indent=1)
 print(">> done:", ", ".join(f"{k} {v['bytes'] // (1 << 20)} MiB" for k, v in manifest["files"].items()))
 PY

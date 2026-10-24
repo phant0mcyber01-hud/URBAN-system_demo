@@ -98,6 +98,23 @@ const open9 = changes.find(([id]) => id === "changes9")?.[1] || "";
 if (!/Открыто:[^.]*боевые ключи[^.]*владел/.test(open9) || !/Открыто:[^.]*(железо|QEMU)/.test(open9))
   problems.push("the step-9 changes slide does not say what stays open (production keys are the owner's step, hardware untested)");
 
+// step 11: the team deck shows the arm64 build (same chain, its own bundle tag, the light unit's memory) and what stays
+// open (the TPM on ARM only on hardware, the measured boot build parked); the gaps slide no longer lists the ARM build;
+// the public deck says plainly, in one sentence, that the system now also runs on small, cheap boards
+const ch11 = team.changes11 || "";
+if (!ch11) problems.push("team deck has no step-11 changes slide (changes11)");
+for (const [what, re] of [["step 11", /шаг\s*11/i], ["arm64 / ARM", /arm64|\bARM\b/], ["the same chain (Secure Boot, BOOTAA64.EFI)", /Secure Boot[^.]*BOOTAA64\.EFI/],
+  ["its own bundle tag", /urban-edge-aarch64/], ["the light unit's memory", /169 МБ/]])
+  if (!re.test(ch11)) problems.push(`the step-11 changes slide does not show ${what}`);
+if (!/Открыто:[^.]*TPM[^.]*(желез|плат)/.test(ch11)) problems.push("the step-11 changes slide does not say the TPM on ARM is checked only on hardware");
+if (!/Открыто:[^.]*измеряем\S* загрузк\S* отложен/.test(ch11)) problems.push("the step-11 changes slide does not say the measured boot build is parked");
+const at11 = (team.changes11 !== undefined) && Object.keys(team).indexOf("changes11") === Object.keys(team).indexOf("changes9") + 1;
+if (!at11) problems.push("the step-11 changes slide does not follow changes9 in the team deck's order");
+if (/Сборка под ARM/.test(team.gaps || "")) problems.push("team gaps slide still lists «Сборка под ARM»");
+const boards = Object.values(pub).flatMap((t) => t.split(/[.!?]/))
+  .some((s) => /(маленьк|небольш)/i.test(s) && /(дешёв|недорог)/i.test(s) && /плат/i.test(s) && /теперь/i.test(s));
+if (!boards) problems.push("public deck does not say plainly that the system now also runs on small, cheap boards");
+
 if (problems.length) {
   for (const p of problems) console.log(`FAIL ${p}`);
   process.exit(1);

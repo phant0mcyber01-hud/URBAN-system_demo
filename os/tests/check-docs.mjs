@@ -37,7 +37,10 @@ const word = (t, w) => new RegExp(`(?<![A-Za-z0-9])${w}(?![A-Za-z0-9])`).test(t)
 // step 8 built the tunnel: its bullet says it was checked only in QEMU and what stays open, not that it is missing
 const wgBullet = unverified.split(/\n- /).find((b) => b.includes("WireGuard")) || "";
 const wgLimits = [/только в QEMU/, /настоящ\S* камер/, /VLAN/, /PresharedKey/, /IPv6/].every((rx) => rx.test(wgBullet));
-for (const [what, ok] of [["Secure Boot", unverified.includes("Secure Boot")], ["ARM", word(unverified, "ARM")],
+// step 11 built the arm64 image: ARM stays in the section only for what is open (encryption on an ARM board with a TPM)
+const armOpen = word(unverified, "ARM") && /[Шш]ифрование на ARM-плате с TPM не\s+проверено/.test(unverified);
+for (const [what, ok] of [["Secure Boot", unverified.includes("Secure Boot")],
+  ["ARM (encryption on an ARM board with a TPM not checked)", armOpen],
   ["WireGuard (checked only in QEMU: real camera, VLAN, PresharedKey, IPv6)", wgLimits]])
   if (!ok) fail(`the «Что не проверено» section of docs/edge-os.md does not mention ${what}`);
 if (/Канала WireGuard между перекрёстком и районом нет/.test(text)) fail("docs/edge-os.md still says there is no WireGuard tunnel to the district");
@@ -82,7 +85,9 @@ if (!/WireGuard[^;]*на железе/.test(todo[0]) || !/PresharedKey/.test(tod
   fail("the «Не сделано» paragraph of CONTEXT.md does not say what stays open of the WireGuard tunnel (hardware, PresharedKey, IPv6)");
 if (context.includes("защищённый канал перекрёсток — район (WireGuard, отдельная сеть камер)"))
   fail("CONTEXT.md still lists the WireGuard channel between the junction and the district as not done");
-if (!word(todo[0], "ARM")) fail("the «Не сделано» paragraph of CONTEXT.md does not mention ARM");
+// step 11 built the arm64 image: the paragraph keeps ARM only for what stays open (encryption on an ARM board with a TPM)
+if (!word(todo[0], "ARM") || !/шифрование на ARM-плате с TPM/.test(todo[0]))
+  fail("the «Не сделано» paragraph of CONTEXT.md does not say that encryption on an ARM board with a TPM is not checked");
 if (/обновлени/i.test(todo[0]) && /платформ|центр/i.test(todo[0]) && /не раздаёт|по SSH/i.test(todo[0]))
   fail("the «Не сделано» paragraph of CONTEXT.md still lists updates from the centre as missing");
 for (const must of ["urban-center release", "Обновления из центра"])
@@ -280,5 +285,45 @@ if (!context.includes("(шаг 10)") || !/\| 23 октября \| шаг 10/.tes
 for (const must of ["docs/measured-boot-design.md", "check-tpm-policy.mjs", "PCR 11", "NV_FLOOR",
   "PolicyAuthorize", "стадийн", "ревью"])
   if (!context.includes(must)) fail(`CONTEXT.md does not record ${JSON.stringify(must)} (step 10)`);
+
+// step 11: URBAN OS for 64-bit ARM boards with UEFI (arm64). The guide says how to build and write the image, which boards
+// it is for, how Secure Boot keys get onto such a board, the TPM limit (no TPM in QEMU's virt for Debian's arm64 kernel:
+// plain data, said on the screen), what was checked only in QEMU; ARM is no longer listed as missing
+const arm = sectionOf(text, /^## Сборка под ARM \(шаг 11\).*$/m);
+if (!arm) fail("docs/edge-os.md has no section «Сборка под ARM (шаг 11)»");
+for (const must of ["node os/unit-image.mjs --arch arm64", "arch: 'arm64'", "urban-edge-arm64-", ".img.xz", "BOOTAA64.EFI",
+  "compatible=urban-edge-aarch64", "debootstrap --foreign", "grub-mkimage", "linux-image-arm64", "zstd", "squash4",
+  "verify_detached", "console=ttyAMA0,115200", "aavmf-vars-urban.fd", "arm64-handover-to-kernel-if-sb-enabled",
+  "tpm-tis-device", "CONFIG_TCG_TIS", "CONFIG_TCG_CRB", "tpm_tis_spi", "NOT encrypted - this machine has no TPM",
+  "data=rw,plain", "lockdown", "U-Boot", "EDK2", "PK.cer", ".esl", "data/os/keys/sb/", "check-image.mjs arm64",
+  "check-arm.mjs", "check-arm.mjs update", "169 МБ", "Access Denied", "Rufus", "Get-FileHash", "--devices"])
+  if (!arm.includes(must)) fail(`the «Сборка под ARM (шаг 11)» section of docs/edge-os.md never says ${JSON.stringify(must)}`);
+for (const [what, rx] of [["boards: 64-bit ARM with UEFI firmware", /64-битн\S* ARM[^.]*UEFI/],
+  ["a board without UEFI is not supported", /без UEFI[\s\S]{0,80}не поддерживается/],
+  ["enrolling the keys depends on the board's firmware", /зависит от прошивки платы/],
+  ["no TPM means no encryption, said on the screen", /[Пп]лата без TPM[^.]*обычным разделом данных[^.]*говорит это на экране/],
+  ["encryption on ARM is checked on hardware only", /[Шш]ифрование[^.]*на ARM[^.]*только на плате/],
+  ["the TPM drivers of real boards were read from the kernel config, not tried", /прочитано в конфигурации ядра[^.]*не пробовали/],
+  ["checked only in QEMU, no real board", /[Тт]олько в QEMU[\s\S]{0,40}ни\s+одной настоящей ARM-платы/],
+  ["os/build.mjs has no --arch", /os\/build\.mjs[^.]*--arch[^.]*не знает/]])
+  if (!rx.test(arm)) fail(`the «Сборка под ARM (шаг 11)» section of docs/edge-os.md does not say: ${what}`);
+// the old "no ARM build" lines are gone, everywhere they stood
+for (const [rx, what] of [[/Сборки под ARM нет/, "«Сборки под ARM нет»"], [/\*\*Только x86_64\.\*\*/, "«Только x86_64»"],
+  [/сборка под ARM — отдельный шаг, её пока нет/, "«сборка под ARM — отдельный шаг, её пока нет»"]])
+  if (rx.test(text)) fail(`docs/edge-os.md still lists the ARM build as missing: ${what}`);
+if (/ARM-платы не подойдут/.test(g)) fail("mini-pc.md still says ARM boards will not do (step 11 built the arm64 image)");
+for (const must of ["--arch arm64", "UEFI", "Сборка под ARM (шаг 11)"])
+  if (!g.includes(must)) fail(`mini-pc.md never says ${JSON.stringify(must)} (ARM boards)`);
+// CONTEXT.md: the step-11 section, its history row; «Не сделано» no longer lists the ARM build, keeps measured boot pending
+const ctx11 = sectionOf(context, /^## Сборка под ARM \(шаг 11\).*$/m);
+if (!ctx11 || !/\| 24 октября \| шаг 11/.test(context)) fail("CONTEXT.md does not record step 11 (section and history row)");
+for (const must of ["BOOTAA64.EFI", "urban-edge-aarch64", "tpm-tis-device", "CONFIG_TCG_TIS", "169 МБ", "check-arm.mjs",
+  "отложена", "2026-10-23-measured-boot-build-draft.md", "без UEFI"])
+  if (!ctx11.includes(must)) fail(`the «Сборка под ARM (шаг 11)» section of CONTEXT.md never says ${JSON.stringify(must)}`);
+const todo11 = /\*\*Не сделано[^\n]*(?:\n(?!\n)[^\n]*)*/.exec(context)[0];
+if (/сборка под ARM[;,]/i.test(todo11)) fail("the «Не сделано» paragraph of CONTEXT.md still lists the ARM build as not done");
+if (!/измеряем\S* загрузк[^;]*(отложен|следующ)/.test(todo11))
+  fail("the «Не сделано» paragraph of CONTEXT.md does not keep the measured boot build as pending");
+if (/встройка в URBAN OS — шаг 11/.test(context)) fail("CONTEXT.md still says measured boot is built in step 11 (it is parked)");
 
 console.log("DOCS CHECK PASSED");

@@ -98,22 +98,25 @@ export function inputsDigest() {
 }
 
 // build.sh for one version, unless the same inputs were built already (the stamp lives in the volume, next to
-// the files it vouches for)
-export function build(version, { image = false, broken = "" } = {}) {
+// the files it vouches for). arch "arm64": the image for 64-bit ARM boards, its files named urban-edge-arm64-<version>.*
+// and its own stamp; x86 is the default and its files keep their names.
+export function build(version, { image = false, broken = "", arch = "x86" } = {}) {
   ensureBuilder();
+  if (!["x86", "arm64"].includes(arch)) fail(`no architecture ${arch} (x86 or arm64)`);
   if (!existsSync(join(ROOT, "web", "dist", "index.html"))) fail("web/dist is missing: npm run build in web/ (the control centre's interface goes into the image)");
+  const tag = arch === "x86" ? version : `${arch}-${version}`;
   const digest = inputsDigest() + (image ? "-image" : "") + (broken ? `-${broken}` : "");
-  const want = [`/out/urban-edge-${version}.raucb`, ...(image ? [`/out/urban-edge-${version}.img`] : [])];
-  const fresh = inBuilder(`[ "$(cat /out/stamp-${version} 2>/dev/null)" = "${digest}" ] && ${want.map((f) => `[ -f ${f} ]`).join(" && ")}`,
+  const want = [`/out/urban-edge-${tag}.raucb`, ...(image ? [`/out/urban-edge-${tag}.img`] : [])];
+  const fresh = inBuilder(`[ "$(cat /out/stamp-${tag} 2>/dev/null)" = "${digest}" ] && ${want.map((f) => `[ -f ${f} ]`).join(" && ")}`,
     { capture: true });
   if (fresh.status === 0) {
-    console.log(`>> version ${version}: up to date (${digest})`);
+    console.log(`>> version ${tag}: up to date (${digest})`);
     return;
   }
-  const flags = `--version ${version}${image ? " --image" : ""}${broken ? ` --break ${broken}` : ""}`;
-  console.log(`>> building version ${version} ${flags}`);
-  const r = inBuilder(`bash /work/os/build/build.sh ${flags} && echo -n ${digest} > /out/stamp-${version}`, { privileged: true });
-  if (r.status !== 0) fail(`build of version ${version} failed`);
+  const flags = `--version ${version}${image ? " --image" : ""}${broken ? ` --break ${broken}` : ""}${arch === "x86" ? "" : ` --arch ${arch}`}`;
+  console.log(`>> building version ${tag} ${flags}`);
+  const r = inBuilder(`bash /work/os/build/build.sh ${flags} && echo -n ${digest} > /out/stamp-${tag}`, { privileged: true });
+  if (r.status !== 0) fail(`build of version ${tag} failed`);
 }
 
 // copy a finished image (gzip) and bundle out of the volume, for writing onto a unit's disk

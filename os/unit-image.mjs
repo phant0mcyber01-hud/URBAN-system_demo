@@ -5,7 +5,11 @@
 //   node os/unit-image.mjs --unit edge-J-07 --serial URB-0001 --vision off     (a light unit: no cameras)
 //   node os/unit-image.mjs --unit light-C-01 --serial LGT-0001 --module lighting    (a street-lighting cabinet)
 //   node os/unit-image.mjs --role district,center --unit center --serial SRV-0002 --host urban-center
+//   node os/unit-image.mjs --arch arm64 --unit light-C-01 --serial LGT-0001 --module lighting   (on an arm64 board)
 //
+// --arch arm64 (step 11): a unit on a 64-bit ARM board with UEFI firmware, from the arm64 image (urban-edge-arm64-<version>
+// .img); its boot loader BOOTAA64.EFI is made again by the grub-mkimage of that image's own system, run under emulation,
+// and the file is data/os/release/urban-edge-arm64-<version>-<unit>.img.xz.
 // Takes the built disk image and makes it this machine's own: a random disk GUID and a random GUID for every partition
 // (no two units, and no stick written from the fleet image, share them), its own GRUB maintenance password (its hash in
 // a boot loader built and signed again with the Secure Boot db key and in a grub.cfg signed again with the boot key,
@@ -31,6 +35,11 @@ const host = opt("--host", "");
 const center = opt("--center", "");
 const vision = opt("--vision", "");
 const module_ = opt("--module", "");
+const arch = opt("--arch", "x86");
+if (!["x86", "arm64"].includes(arch)) fail("--arch arm64 (an ARM board); leave it out for an x86 mini-PC");
+if (arch === "arm64" && role !== "unit") fail("--arch arm64 is for a unit (a light unit or a street-lighting cabinet on an ARM board)");
+const tag = arch === "x86" ? version : `${arch}-${version}`;  // the built image's name: urban-edge-<tag>.img
+const efi = arch === "x86" ? "BOOTX64.EFI" : "BOOTAA64.EFI";
 if (module_ && module_ !== "lighting") fail("--module lighting is the only choice (a street-lighting cabinet); leave it out for a junction unit");
 if (module_ && role !== "unit") fail("--module lighting is for a unit (--role unit)");
 const names = { unit: module_ ? /^light-[A-Za-z0-9._-]+$/ : /^edge-[A-Za-z0-9._-]+$/, district: /^district-[A-Za-z0-9._-]+$/,
@@ -62,22 +71,34 @@ if (opt("--key")) {
 }
 if (!/^(ssh-ed25519|ecdsa-sha2-nistp\d+|ssh-rsa) [A-Za-z0-9+/=]+( [^\r\n]*)?$/.test(pub)) fail("that is not one SSH public key");
 
-build(version, { image: true });
+build(version, { image: true, arch });
 
 const release = join(OUT, "release");
 mkdirSync(release, { recursive: true });
-const name = `urban-edge-${version}-${unit}`;
+const name = `urban-edge-${tag}-${unit}`;
 // the installer's text file, as the image ships it but with this unit's lines; CRLF so Notepad shows it right
 const unitTxt = readFileSync(join(ROOT, "os", "build", "urban-unit.txt"), "utf8")
   .replace(/^UNIT=.*$/m, `UNIT=${unit}`).replace(/^SERIAL=.*$/m, `SERIAL=${serial}`)
   .replace(/^ROLE=.*$/m, `ROLE=${role}`).replace(/^HOST=.*$/m, `HOST=${host}`)
   .replace(/^CENTER=.*$/m, `CENTER=${center}`).replace(/^VISION=.*$/m, `VISION=${vision}`).replace(/^MODULE=.*$/m, `MODULE=${module_}`).replace(/\r?\n/g, "\r\n");
+// arm64: the boot loader is made by the grub-mkimage of the image's own arm64 system (its slot, unpacked here, run under
+// emulation), with the arm64-efi modules of the same GRUB version, fetched into the volume's cache by the arm64 build
+const armLoader = `root=/tmp/arm-root; rm -rf "$root"
+unsquashfs -q -n -d "$root" /out/build/rootfs-${tag}.img
+gv=$(chroot "$root" dpkg-query -W -f='\${Version}' grub-common)
+deb=""
+for d in /out/cache/*-grub-efi-arm64-bin.deb; do
+  if [ -f "$d" ] && [ "$(dpkg-deb -f "$d" Version)" = "$gv" ]; then deb=$d; fi
+done
+[ -n "$deb" ] || { echo "no grub-efi-arm64-bin $gv in the build cache: build the arm64 image again" >&2; exit 1; }
+boot_loader "$hash" "$E" /out/keys arm64 "$root" "$deb"
+rm -rf "$root"`;
 const script = `set -euo pipefail
 . /work/os/build/boot-loader.sh
 img=/tmp/${name}.img
 pwfile=/release/${name}.grub-password
 trap 'rm -f "$pwfile.tmp"' EXIT
-cp --sparse=always /out/urban-edge-${version}.img "$img"
+cp --sparse=always /out/urban-edge-${tag}.img "$img"
 # the unit's own disk GUID and partition GUIDs, on the copy (the fleet image stays as it is): random, so that no two
 # units and no stick written from the fleet image carry the same ones. Nothing in the boot knows the fleet's: GRUB reads
 # the slot's GUID from the disk it booted from (grub.cfg, probe --part-uuid) and hands it on (urban.bootpart).
@@ -86,7 +107,7 @@ nparts=$(sfdisk -J "$img" | python3 -c "import json,sys; print(len(json.load(sys
 for n in $(seq 1 "$nparts"); do
   sfdisk --part-uuid "$img" "$n" "$(cat /proc/sys/kernel/random/uuid)" >/dev/null
 done
-python3 - /out/urban-edge-${version}.img "$img" <<'PY'
+python3 - /out/urban-edge-${tag}.img "$img" <<'PY'
 import json, subprocess, sys
 def guids(disk):
     t = json.loads(subprocess.run(["sfdisk", "-J", disk], check=True, capture_output=True, text=True).stdout)["partitiontable"]
@@ -103,8 +124,8 @@ pw=$(head -c 18 /dev/urandom | base64)
 ( umask 077; printf '%s\\n' "$pw" > "$pwfile.tmp" )
 hash=$(grub_password_hash "$pw")
 E=/tmp/esp-unit; rm -rf "$E"
-boot_loader "$hash" "$E" /out/keys
-for f in BOOTX64.EFI grub.cfg grub.cfg.sig; do
+${arch === "x86" ? `boot_loader "$hash" "$E" /out/keys` : armLoader}
+for f in ${efi} grub.cfg grub.cfg.sig; do
   mcopy -o -i "$img@@$esp" "$E/EFI/BOOT/$f" "::/EFI/BOOT/$f"
   rm -f /tmp/readback; mcopy -n -o -i "$img@@$esp" "::/EFI/BOOT/$f" /tmp/readback
   cmp -s "$E/EFI/BOOT/$f" /tmp/readback || { echo "the ESP's EFI/BOOT/$f does not read back" >&2; exit 1; }
