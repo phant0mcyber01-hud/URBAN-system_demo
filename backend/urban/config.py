@@ -50,6 +50,10 @@ MODULES = [m.strip() for m in os.getenv("MODULES", "traffic,lighting").split(","
 # green corridor proposals for emergency units: off by default, the measurement showed no clear benefit
 # from plan selection (docs/corridor.md); on for trials
 GREEN_CORRIDOR = os.getenv("GREEN_CORRIDOR", "off").lower() in ("on", "1", "true", "yes")
+# the pilot machine (ROLE=district,center): the enrolment code of its own district, written by urban-prepare at boot;
+# the centre enrols it by itself (urban/node/pilot.py). No such file on any other machine: nothing happens there.
+OWN_DISTRICT = Path(os.getenv("OWN_DISTRICT", "/run/urban/own-district.code"))
+OWN_DISTRICT_MARKER = STATE / "own-district.json"  # the key the centre enrolled for it: never enrolled a second time
 
 
 def sumo_home() -> Path:

@@ -51,6 +51,12 @@
                                         through the root update helper and the centre restarts into it with the same data,
                                         the unit back by itself; a broken release 3 rolls back by itself; a halted release
                                         is refused (os/tests/vm_center_update.py)
+    python3 vm.py pilot-cameras         step 14: the pilot machine (district,center) with one camera of real video (data/videos)
+                                        through its real vision: its own district enrolled at its own centre with no code
+                                        typed (district-enrolled, once), reporting over the loopback; the queue of an
+                                        approach of a junction routed through it reaches the centre, not before it is routed
+                                        nor after it is routed back (the controls); after a restart the same district, not a
+                                        second one (os/tests/vm_pilot.py)
     python3 vm.py unitimage IMG.xz SUMS KEY UNIT SERIAL OTHER.xz
                                         a unit image as shipped: its own disk and partition GUIDs and GRUB password (against
                                         a second unit's image, OTHER.xz, and the fleet image), boot disk named by its own
@@ -126,7 +132,7 @@ class VM:
                  add_key=True, bus="virtio", nic="virtio-net-pci", role=None, host=None, grow_mb=0, forward=(),
                  listen="127.0.0.1", vnc=None, ssh_port=2222, mem=2048, tpm=True, center=None, vision=None, module=None,
                  secure_boot=True, extra_disk=None, extra_bus="usb", console_input=False, link=None, restrict=False,
-                 rtc=None, data_files=None, arch="x86"):
+                 rtc=None, data_files=None, arch="x86", smp=2, cpu="max"):
         os.makedirs(LOGS, exist_ok=True)
         # x86: a mini-PC (q35, OVMF); arm64: an ARM board (virt, AAVMF), from urban-edge-arm64-<version>.img
         if arch not in ("x86", "arm64"):
@@ -137,6 +143,10 @@ class VM:
         self.forward = forward  # more (host port, guest port) pairs than SSH
         self.listen, self.vnc = listen, vnc  # where those ports listen; VNC display number for the screen, or none
         self.ssh_port, self.mem, self.tpm = ssh_port, mem, tpm
+        self.smp = smp  # virtual CPUs (2 unless a scenario needs more: the pilot's camera vision, vm_pilot.py)
+        # the emulated x86 CPU (no KVM): QEMU's "max", or with features taken off where the emulator gets them wrong
+        # (vm_pilot.py: AVX2 gathers in numpy's kernels crash under emulation, never on a real AVX2 CPU)
+        self.cpu = cpu
         self.swtpm = None
         self.extra_disk, self.extra_bus = extra_disk, extra_bus  # a second disk, attached as it is (a stranger's USB stick)
         self.console_input = console_input  # keys can be typed on the serial console (type_console); otherwise stdin is empty
@@ -276,11 +286,11 @@ class VM:
             qemu, accel = "qemu-system-aarch64", ["-cpu", ARM_CPU]
         else:
             qemu = "qemu-system-x86_64"
-            accel = ["-enable-kvm", "-cpu", "host"] if os.environ.get("URBAN_KVM") == "1" else ["-cpu", "max"]
+            accel = ["-enable-kvm", "-cpu", "host"] if os.environ.get("URBAN_KVM") == "1" else ["-cpu", self.cpu]
         machine, firmware = self._firmware()
         self.boots.append(len(self.lines))
         self.proc = subprocess.Popen(
-            [qemu, *machine, "-m", str(self.mem), "-smp", "2", *accel,
+            [qemu, *machine, "-m", str(self.mem), "-smp", str(self.smp), *accel,
              *(["-rtc", f"base={self.rtc}"] if self.rtc else []),
              *firmware,
              *DISK_BUS[self.bus](self.disk),
@@ -2542,6 +2552,18 @@ def pem_sha256(text):
     return hashlib.sha256(ssl.PEM_cert_to_DER_cert(m.group(0))).hexdigest()
 
 
+def online_devices(ctx, want, what, port=2443, timeout=240):
+    """/api/health once the centre sees `want` devices online. A pilot centre (district,center) counts its own district,
+    district-center, among them since step 14: it enrols it by itself and it reports over the loopback."""
+    end, body = time.time() + timeout, {}
+    while time.time() < end:
+        body = health(ctx, port)
+        if body.get("devices_online") == want:
+            return body
+        time.sleep(5)
+    raise Fail(f"the centre sees {body.get('devices_online')} device(s) online, not {want}: {what}")
+
+
 def centre_devices(centre, ctx, port=2443, timeout=90):
     """'The district shows up in Devices with its address and health', as the interface gets it: signed in to the
     centre's API as admin (the one-time password from the platform's journal), GET /api/devices. Without a
@@ -2611,9 +2633,7 @@ def chain():
         enrol_chain(centre, district, unit)
         wait_online(district, "urban-district@district-1", "district")
         wait_online(unit, "urban-edge@edge-J-01", "edge")
-        body = health(ctx)
-        if body.get("devices_online") != 2:
-            raise Fail(f"the centre sees {body.get('devices_online')} device(s) online, not the district and the unit")
+        body = online_devices(ctx, 3, "the district, the unit and the pilot centre's own district (district-center)")
         # services every machine of the chain must run without a restart (they crash-looped once on /run/urban)
         for vm, what in ((centre, "centre"), (district, "district"), (unit, "unit")):
             power_alive(vm, what)
@@ -3065,9 +3085,7 @@ def ota():
         enrol_chain(centre, district, unit)
         wait_online(district, "urban-district@district-1", "district")
         wait_online(unit, f"urban-edge@{uid}", "edge")
-        body = health(ctx)
-        if body.get("devices_online") != 2:
-            raise Fail(f"the centre sees {body.get('devices_online')} device(s) online, not the district and the unit")
+        body = online_devices(ctx, 3, "the district, the unit and the pilot centre's own district (district-center)")
         # the inbox is each client's own, and the helper waits for requests
         for vm, who in ((district, "district"), (unit, "unit")):
             got = vm.ssh(f"stat -c '%U:%G %a' {INBOX}; systemctl is-active urban-update.path").stdout.split()
@@ -3728,6 +3746,9 @@ if __name__ == "__main__":
         elif what == "center-update":  # step 13, G3: the centre updates itself (os/tests/vm_center_update.py)
             import vm_center_update
             vm_center_update.center_update()
+        elif what == "pilot-cameras":  # step 14, G3: the pilot machine's own cameras reach its centre (os/tests/vm_pilot.py)
+            import vm_pilot
+            vm_pilot.pilot_cameras()
         elif what in ("arm-image", "arm", "arm-update"):  # step 11: the arm64 image (os/tests/vm_arm.py)
             import vm_arm
             {"arm-image": vm_arm.image, "arm": vm_arm.unit, "arm-update": vm_arm.update}[what]()

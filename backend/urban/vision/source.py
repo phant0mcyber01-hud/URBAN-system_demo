@@ -1,5 +1,7 @@
 """Frames from a camera: an RTSP stream from an IP camera in the cabinet's network, or a video file.
 RTSP is always read over TCP, the only way a district reads a junction's camera through the tunnel.
+A video file played as a camera (realtime, `python -m urban.vision run`) starts again from its beginning when it ends,
+as a camera's picture never ends; read for a check (realtime=False) it is played once.
 
 Frames live in memory only, a few per second, and are dropped as soon as the detector is done with
 them. Nothing is recorded. A stream that breaks is reopened with a growing pause; while it is down
@@ -37,7 +39,8 @@ class VideoSource:
         self.error: str | None = None
 
     def frames(self, stop: threading.Event | None = None):
-        """Yields (t, BGR frame). Ends when a file ends; a stream is reopened until `stop` is set."""
+        """Yields (t, BGR frame). A stream is reopened, and a file played as a camera (realtime) started again, until
+        `stop` is set; a file read for a check (realtime=False) ends with its last frame."""
         import cv2
         stop = stop or threading.Event()
         url = expand(self.source)
@@ -74,6 +77,10 @@ class VideoSource:
                 yield (time.time() if self.realtime else video_t), frame
             cap.release()
             if is_file(url):
-                return
+                if not self.realtime or not index:  # a check plays it once; a file without a frame is not a camera
+                    if not index:
+                        self.error = f"no frames in {redact(self.source)}"
+                    return
+                continue  # played as a camera: from the beginning again
             self.error = f"stream {redact(self.source)} broke, reopening"
             stop.wait(pause)

@@ -159,6 +159,36 @@ if (!at13) problems.push("the step-13 changes slide does not follow changes12 in
   if (!centreSame) problems.push("public deck does not say plainly, on a slide, that the control centre updates the same way: returns to the previous version by itself, nothing lost");
   if (!/обновля[^.]*центр управления[^.]*прежн/i.test(pub.new || "")) problems.push("the public «new» slide's note does not say the control centre updates itself the same careful way");
 }
+// step 14: the team deck shows that the pilot machine's district side has an identity of its own (its own key, enrolled
+// at its own centre at first boot as an ordinary district, no code typed, in Devices and the audit), reports over the
+// machine's loopback, and that the centre takes only the queues of junctions routed through it; what the admin still
+// does and what stays open (only QEMU, video from a file); the public deck says plainly, in one visible sentence, that on
+// the pilot one machine both counts the queues from its cameras and runs the control centre
+const ch14 = team.changes14 || "";
+if (!ch14) problems.push("team deck has no step-14 changes slide (changes14)");
+for (const [what, re] of [["step 14", /шаг\s*14/i], ["the command", /urban-center provision list/], ["the pilot", /пилот/i],
+  ["its own key at first boot", /первая загрузка: свой ключ/], ["the district's name", /district-\S+/],
+  ["no code typed", /без кода/], ["enrolled at its own centre by itself", /подключён к своему центру сам/],
+  ["in Devices and the audit", /Устройства[^.]*журнал/], ["over loopback", /127\.0\.0\.1:8443/],
+  ["only the junctions routed through it", /только перекрёстков, проведённых через него/],
+  ["before and after", /Раньше:[^.]*не шли[\s\S]{0,80}Теперь:/]])
+  if (!re.test(ch14)) problems.push(`the step-14 changes slide does not show ${what}`);
+if (!/Открыто:[^.]*QEMU/.test(ch14) || !/Открыто:[^.]*из файла/.test(ch14) || !/Открыто:[^.]*подходы камер задаёт админ/.test(ch14))
+  problems.push("the step-14 changes slide does not say what stays open (only QEMU, video from a file, the admin routes junctions and names the cameras' approaches)");
+if (!/<aside>[^<]{200,}<\/aside>/.test(readFileSync(join(ROOT, "docs/deck/project/slides/changes14.html"), "utf8")))
+  problems.push("the step-14 changes slide has no speaker note");
+const at14 = (team.changes14 !== undefined) && Object.keys(team).indexOf("changes14") === Object.keys(team).indexOf("changes13") + 1;
+if (!at14) problems.push("the step-14 changes slide does not follow changes13 in the team deck's order");
+{
+  const visible = readdirSync(join(ROOT, "docs/deck-public/project/slides")).filter((f) => f.endsWith(".html"))
+    .map((f) => readFileSync(join(ROOT, "docs/deck-public/project/slides", f), "utf8").replace(/<aside>[\s\S]*?<\/aside>/g, " ")
+      .replace(/<[^>]+>/g, " ").replace(/\s+/g, " ")).join(" ");
+  const oneMachine = visible.split(/[.!?]/)
+    .some((s) => /пилот/i.test(s) && /одна машина/i.test(s) && /очеред/i.test(s) && /камер/i.test(s) && /центр\S* управлени/i.test(s));
+  if (!oneMachine) problems.push("public deck does not say plainly, on a slide, that on the pilot one machine both counts the queues from its cameras and runs the control centre");
+  if (!/пилот[^.]*одна машина[\s\S]*доходят до центра сами/i.test(pub.pilot || ""))
+    problems.push("the public «pilot» slide's note does not say the pilot machine's queues now reach the centre by themselves");
+}
 // every footer of the team deck is its place in the order, out of the total
 {
   const ids = Object.keys(team);

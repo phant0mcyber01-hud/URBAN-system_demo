@@ -13,6 +13,9 @@ arrive anyway it is refused and said so in the next report. The two things the c
 offer (edge/update.py) and the peer list of its tunnel to its units (edge/tunnel.py), each checked like a unit checks
 a command; the district downloads the package by itself and hands the peer list to the root helper.
 
+On the pilot machine (district,center) the district side is a district of its own, district-<name>, enrolled at the
+centre on the same machine by itself and reporting to it over the loopback, with --updates off (urban/node/pilot.py).
+
 While the centre is unreachable the reports are kept (the last BUFFER seconds) and sent in order as soon as
 the link is back, each with the time it was made, so the centre's history has no hole for the outage.
 """
@@ -170,9 +173,13 @@ class District:
         if gateway_public is None and root_public is None:
             raise SystemExit(f"neither {root_path} nor {gw_path}: the district would not know the centre's key")
         self.tls_context = ssl.create_default_context(cafile=str(args.ca or pki / "ca.pem"))
+        # UPDATES=off: the pilot's own district (urban/node/pilot.py). Its machine is the centre, whose system is updated
+        # by `urban-center release self-update` alone: no updater, so its reports show no system version, the centre
+        # offers it nothing, and an offer that came anyway would install nothing
+        updates = (args.updates or "on").strip().lower() != "off"
         self.dev = DistrictDevice(self.id, key, root_public, gateway_public, pki / "edge" / f"{self.id}.gateway.json",
                                   probe=Probe(args.temp, None), relay_stats=_relay_reader(Path(args.relay) if args.relay else None),
-                                  updater=make_updater(args.platform, args.server_name, self.tls_context),
+                                  updater=make_updater(args.platform, args.server_name, self.tls_context) if updates else None,
                                   state_path=pki / "edge" / f"{self.id}.seq", tunnel=Tunnel("district", self.id))
         self.sensors = Path(args.sensors) if args.sensors else None
         self.url = f"wss://{args.platform}/device"
@@ -243,6 +250,8 @@ def main():
     ap.add_argument("--sensors", help="JSON file {approach id: metres} rewritten by the district's camera vision")
     ap.add_argument("--relay", help="the relay's stats file (/run/urban/relay.json, written by urban-relay)")
     ap.add_argument("--temp", help="temperature file; default: the board's own thermal zone")
+    ap.add_argument("--updates", default="on", help="on (default; empty is on) | off: the pilot's own district, whose "
+                                                     "system is the centre's (updated by urban-center release self-update)")
     ap.add_argument("--key"), ap.add_argument("--ca"), ap.add_argument("--gateway-pub"), ap.add_argument("--root")
     args = ap.parse_args()
     try:

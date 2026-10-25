@@ -11,6 +11,9 @@
     python -m urban.provision assign edge-J-21 --district district-1   (or --direct)
                                                     route a unit through a district: its next kit points there
     python -m urban.provision kit edge-J-21         the device's kit as JSON (what the UI's "download kit" gives)
+    python -m urban.provision own-kit --code /run/urban/own-district.code
+                                                    the pilot machine (district,center): the kit of its own district,
+                                                    to this centre over the loopback (urban/node/pilot.py)
     python -m urban.provision list                  units, districts, statuses and key fingerprints
     python -m urban.provision rotate-gateway [--root /media/usb/root.key]
                                                     a new gateway key with the next epoch; restart the platform after
@@ -56,6 +59,8 @@ def main():
     assign.add_argument("--direct", action="store_true", help="straight to the centre")
     kit = sub.add_parser("kit", help="print a device's kit as JSON")
     kit.add_argument("device")
+    own = sub.add_parser("own-kit", help="the pilot's own district: its kit, to this centre over the loopback")
+    own.add_argument("--code", default=str(c.OWN_DISTRICT), help="its enrolment code (urban-prepare writes it)")
     sub.add_parser("list", help="show the registry")
     rot = sub.add_parser("rotate-gateway", help="new gateway key, signed by the root key with the next epoch")
     rot.add_argument("--root", help="root.key, if it is kept off the server (it should be)")
@@ -109,6 +114,19 @@ def main():
         junction = next((j for j in junctions if j["id"] == rec.get("junction")), {})
         via = reg.devices.get(rec["district"]) if rec.get("district") else None
         print(json.dumps(make_kit(rec, c.PKI, args.host, c.DEVICE_PORT, junction.get("approaches"), via=via), indent=1))
+        return
+    if args.cmd == "own-kit":
+        import json
+        from pathlib import Path
+
+        from .node import pilot
+        try:
+            code = pilot.read_code(Path(args.code))
+        except (OSError, ValueError) as err:
+            raise SystemExit(f"{args.code}: {err}")
+        if code is None:
+            raise SystemExit(f"no {args.code}: this machine has no district of its own (only ROLE=district,center has)")
+        print(json.dumps(pilot.own_kit(code, c.PKI, args.host, c.DEVICE_PORT), indent=1))
         return
     if args.cmd == "rotate-gateway":
         try:

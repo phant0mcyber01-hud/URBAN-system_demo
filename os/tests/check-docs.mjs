@@ -441,4 +441,67 @@ if (!/самообновление центра \(шаг 13\) проверено
 const next13 = sectionOf(context, /^## Что дальше.*$/m);
 if (/обновление самого центра из центра/.test(next13)) fail("the «Что дальше» list of CONTEXT.md still lists the centre's self-update");
 
+// step 14: the pilot machine's cameras reach the centre. The guide has its own section: what was missing, what the machine
+// does by itself at first boot (its own district name and key, enrolled at its own centre as an ordinary district with no
+// code typed, in Devices and the audit, reports over loopback, the same district after a restart), what the admin still
+// does (routing junctions through it, naming the cameras' approaches), what does not change, the honest limits and what
+// check-pilot-cameras.mjs checks; nothing in the guide says any more that the pilot's cameras give the centre nothing
+const pilot14 = sectionOf(text, /^## Камеры пилотной машины \(шаг 14\).*$/m);
+if (!pilot14) fail("docs/edge-os.md has no section «Камеры пилотной машины (шаг 14)»");
+for (const must of ["ROLE=district,center", "district-center", "urban-district@district-center", "127.0.0.1:8443",
+  "district-enrolled", "urban-center provision assign edge-J-07 --district district-center", "/etc/urban/cameras.json",
+  "`approach`", "«Устройства", "check-pilot-cameras.mjs", "data/videos", "urban-prepare", "/run/urban/own-district.code",
+  "urban-center provision own-kit", "UPDATES=off", "DEVICE_NAME", "own-district.json"])
+  if (!pilot14.includes(must)) fail(`the «Камеры пилотной машины (шаг 14)» section of docs/edge-os.md never says ${JSON.stringify(must)}`);
+for (const [what, rx] of [
+  ["before: the pilot had no district name, key or enrolment", /не было ни имени района, ни ключа, ни кода подключения/],
+  ["its own key, made once, never replaced, not the centre's", /[Кк]люч делается один раз и не\s+заменяется никогда/],
+  ["enrolled at its own centre as an ordinary district, no code typed", /[Цц]ентр при запуске сам подключает этот ключ как обычный район[\s\S]{0,200}[Кк]од никто не вводит/],
+  ["shown in Devices and audited like any district", /в «Устройствах» он виден отдельной строкой, в журнале[\s\S]{0,80}как у любого района/],
+  ["reports over the machine's loopback, the same channel as a separate district", /через петлю самой машины,\s+тем же каналом, что отдельный район/],
+  ["the same district after a restart, never a second", /второго\s+района не появляется/],
+  ["a district the admin revoked or removed stays so", /отозвал или удалил, так и остаётся/],
+  ["the centre takes only the queues of junctions routed through it", /только очереди подходов тех перекрёстков,\s+которые проведены через него/],
+  ["a junction not routed through it is not taken", /не проведённого через этот\s+район, центр не принимает/],
+  ["the admin routes junctions and names the cameras' approaches", /\*\*Что делает администратор\.\*\* Две вещи[\s\S]*Провести перекрёстки через этот район[\s\S]*Назвать подходы камер/],
+  ["a separate district, a unit and a plain centre do not change", /\*\*Что не меняется\.\*\*[\s\S]{0,300}\(`ROLE=center`\) своего района не получают/],
+  ["still no relay on the pilot", /Ретранслятора у пилотной\s+машины по-прежнему нет/],
+  ["checked only in QEMU, on recorded video", /\*\*Проверено только в QEMU\*\*, без KVM, на записанном видео/],
+  ["the check: real video, real vision, the queue in the centre, the same district after a restart, the control",
+    /настоящее видео[\s\S]{0,40}настоящее распознавание[\s\S]{0,400}центр показывает очередь этого подхода[\s\S]{0,200}тот же район, а не второй[\s\S]{0,200}не\s+берёт \(контроль\)/]])
+  if (!rx.test(pilot14)) fail(`the «Камеры пилотной машины (шаг 14)» section of docs/edge-os.md does not say: ${what}`);
+const roles14 = text.split("\n").find((l) => l.startsWith("| `district,center` |")) || "";
+if (!/district-center/.test(roles14)) fail("the roles table of docs/edge-os.md does not say the pilot's district side is a district of its own (district-center)");
+// what stood before step 14 and is no longer true is gone, everywhere it stood
+for (const [rx, what] of [[/Эту машину нельзя подключить как район/, "«Эту машину нельзя подключить как район»"],
+  [/камеры пилотной машины пока ничего не\s+отдают центру/i, "«камеры пилотной машины пока ничего не отдают центру»"],
+  [/\*\*Камеры пилотной машины\*\* \(район и центр на одной\) пока ничего не передают/, "«Камеры пилотной машины … пока ничего не передают центру»"],
+  [/машину нельзя\s+подключить как район/, "«машину нельзя подключить как район»"],
+  [/камеры пилотной машины \(район и центр на одной\) ничего не передают центру/, "«камеры пилотной машины … ничего не передают центру»"]]) {
+  if (rx.test(text)) fail(`docs/edge-os.md still says the pilot's cameras give the centre nothing: ${what}`);
+  if (rx.test(context)) fail(`CONTEXT.md still says the pilot's cameras give the centre nothing: ${what}`);
+  if (rx.test(readme)) fail(`README.md still says the pilot's cameras give the centre nothing: ${what}`);
+}
+if (!text.includes("node os/tests/check-pilot-cameras.mjs")) fail("the «Проверка» list of docs/edge-os.md does not show check-pilot-cameras.mjs");
+if (!/Камеры пилотной машины \(шаг 14\) проверены только в QEMU/.test(unverified))
+  fail("the «Что не проверено» section of docs/edge-os.md does not say the pilot's cameras are checked only in QEMU");
+if (!/district-center/.test(readme) || !readme.includes("Камеры пилотной машины (шаг 14)"))
+  fail("README.md does not mention the pilot machine's own district (district-center, «Камеры пилотной машины (шаг 14)»)");
+// CONTEXT.md: the step-14 section, the state paragraph, its history row; the roles table; «Не сделано» keeps what stays
+// open, «Что дальше» no longer lists the pilot's cameras
+const ctx14 = sectionOf(context, /^## Камеры пилотной машины \(шаг 14\).*$/m);
+if (!ctx14 || !/\| 24 октября \| шаг 14:/.test(context)) fail("CONTEXT.md does not record step 14 (section and history row)");
+for (const must of ["district-center", "urban-district@district-center", "127.0.0.1:8443", "district-enrolled",
+  "Код никто не вводит", "--district district-center", "approach", "check-pilot-cameras.mjs", "test_pilot_district.py",
+  "data/videos", "только в QEMU", "Ничего не меняется", "второй раз"])
+  if (!ctx14.includes(must)) fail(`the «Камеры пилотной машины (шаг 14)» section of CONTEXT.md never says ${JSON.stringify(must)}`);
+if (!/\*\*Шаг 14 — камеры пилотной машины доходят до центра\.\*\*/.test(context)) fail("the state paragraph of CONTEXT.md does not record step 14");
+const ctxRoles14 = context.split("\n").find((l) => l.startsWith("| `district,center` |")) || "";
+if (!/district-center/.test(ctxRoles14)) fail("the roles table of CONTEXT.md does not say the pilot's district side is a district of its own");
+const todo14 = /\*\*Не сделано[^\n]*(?:\n(?!\n)[^\n]*)*/.exec(context)[0];
+if (!/камеры пилотной машины \(шаг 14\) проверены только в QEMU/.test(todo14))
+  fail("the «Не сделано» paragraph of CONTEXT.md does not say the pilot's cameras are checked only in QEMU");
+const next14 = sectionOf(context, /^## Что дальше.*$/m);
+if (/камеры самой пилотной машины/.test(next14)) fail("the «Что дальше» list of CONTEXT.md still lists the pilot machine's cameras");
+
 console.log("DOCS CHECK PASSED");

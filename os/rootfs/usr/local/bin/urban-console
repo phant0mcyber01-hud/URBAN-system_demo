@@ -91,6 +91,10 @@ esac
     case ",$role," in *,center,*)
       printf "  interface     https://%s/   (first admin password: /var/lib/urban/platform/first-admin-password)\n" "${host:-$unit}" ;;
     esac
+    # the pilot's district side: a district of its own, enrolled at this centre by the centre itself (no code typed)
+    if [ "$role" = district,center ]; then
+      printf "  own district  district-%s, key %s%s: its centre enrols it by itself\n" "$unit" "${fingerprint:-making it now...}" "${keyin:+ ($keyin)}"
+    fi
   else
     echo "  name          NOT SET: write UNIT=, SERIAL= and ROLE= into urban-unit.txt"
     echo "                on the URBAN-ESP partition of this disk, then restart"

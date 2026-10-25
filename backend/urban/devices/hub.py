@@ -127,6 +127,10 @@ class DeviceHub:
         self.gateway_cert = gateway_cert
         self.registry, self.key, self.on_report, self.clock, self.wall = registry, gateway_key, on_report, clock, wall
         self.sessions: dict[str, WebSocket] = {}
+        # the pilot machine's own district (urban/node/pilot.py sets it): its system is this centre's own, updated by
+        # `urban-center release self-update` alone, so the version floor does not judge it, no release is offered to
+        # it and it is in no release's wave. Its reports are taken like any district's.
+        self.own: set[str] = set()
         self.seen: dict[str, dict] = {}  # device id -> {"at": wall time, "health": {...}}
         self.connects: dict[str, int] = {}  # device id -> sessions since the platform started
         self._stale: set[str] = set()  # sessions opened on a key or status that has since changed
@@ -232,6 +236,8 @@ class DeviceHub:
             return None
         if rec is not None and kind_of(rec) not in FLOOR_KINDS:
             return None  # an unknown record (rec None) is judged: refusing is the safe side
+        if device in self.own and rec is not None:
+            return None  # the pilot's own district runs the centre's own system (and takes no commands anyway)
         have = self.proven.get(device)
         return None if have is not None and have >= floor else (floor, have)
 
@@ -338,7 +344,7 @@ class DeviceHub:
         """The release this device should be offered now, or None: it must be a unit, a district server or a
         lighting cabinet's unit that reported a system version (an integer) older than the newest release for its own
         compatible that is not withdrawn or halted and whose current wave includes it (ReleaseStore.newest_for)."""
-        if self.releases is None or kind_of(rec) not in ("unit", "district", "lighting"):
+        if self.releases is None or kind_of(rec) not in ("unit", "district", "lighting") or device in self.own:
             return None
         have = self.seen.get(device, {}).get("health", {}).get("os")
         rel = self.releases.newest_for(device, self.compatible(device))
@@ -461,7 +467,7 @@ class DeviceHub:
             return []
         self._sync()
         fleet = [(d, self.compatible(d)) for d, r in self.registry.devices.items()
-                 if r.get("status") == ACTIVE and kind_of(r) in FLOOR_KINDS]
+                 if r.get("status") == ACTIVE and kind_of(r) in FLOOR_KINDS and d not in self.own]
         out = []
         for r in sorted(self.releases.releases(), key=lambda r: (r["version"], compatible_of(r))):
             compatible = compatible_of(r)

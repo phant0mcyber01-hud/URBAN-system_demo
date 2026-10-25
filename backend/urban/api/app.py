@@ -43,6 +43,7 @@ from ..devices.registry import ACTIVE, REVOKED, Registry, device_id, provision
 from ..city.passport import PassportError, Passports, problems
 from ..modules import ModuleError, describe, load_modules, mount_routes, report_router, startup_all, tick_all
 from ..modules.base import Core
+from ..node import pilot
 from ..junctions import APPROVED, DRAFT, _junction, approved, approved_plans, load_all_junctions, load_cameras
 from ..platform import Platform
 from ..release import ReleaseStore
@@ -170,6 +171,10 @@ async def lifespan(_):
              f"{centre_os['self_update']['state']}" if centre_os['self_update'] else ""), flush=True)
     print(f"  OS floor: {f'{floor}: older systems get no commands' if floor else 'none'} "
           f"(python -m urban.release floor)", flush=True)
+    # the pilot machine (district,center): its own district, enrolled here once, by itself, audited like any district
+    own = await pilot.enroll_own(hub, core_audit, c.OWN_DISTRICT, c.DEVICE_NAME, c.DEVICE_PORT, c.OWN_DISTRICT_MARKER)
+    if own:
+        print(f"  Own district: {own}", flush=True)
     if FIELD:
         ready = sum(approved(j) for j in junctions)
         print(f"  City: {meta.get('name') or 'not set up (python -m urban.city create)'}, {len(junctions)} junctions, "

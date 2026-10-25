@@ -42,9 +42,11 @@ class QueuePipeline:
         return {a: q for a, (t, q) in self.latest.items() if now - t <= STALE}
 
     def write(self, path: Path, now: float | None = None):
-        """Atomic rewrite, so the unit never reads a half-written file."""
+        """Atomic rewrite, so the unit never reads a half-written file. Readable by the group (urban): the vision service
+        runs as its own user with UMask=0077, and the unit's or the district's service (user urban) reads the numbers."""
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(json.dumps(self.queues(time.time() if now is None else now)), encoding="utf-8")
+        os.chmod(tmp, 0o640)
         os.replace(tmp, path)
 
 

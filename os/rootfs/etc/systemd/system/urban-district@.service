@@ -1,6 +1,9 @@
 # The district server's own link to the control centre (ROLE=district, also the pilot's district,center):
 # it reports the queues its cameras measure and what its relay is doing, and keeps the reports through an
-# outage. Started by urban-prepare once the district's kit is in place (urban-unit setup).
+# outage. Started by urban-prepare once the district's kit is in place (urban-unit setup). On the pilot (district,center)
+# it is the machine's own district, district-<name>, whose kit urban-prepare puts in place by itself: it reports to the
+# centre over the loopback, with UPDATES=off in its env file (the machine's system is the centre's; urban/node/pilot.py).
+# Without UPDATES (every separate district) the argument is empty, which is on.
 [Unit]
 Description=URBAN district server: its reports to the control centre
 After=network.target urban-prepare.service
@@ -14,7 +17,7 @@ EnvironmentFile=/etc/urban/edge-%i.env
 # the loader (python -I below ignores PYTHON* as well)
 UnsetEnvironment=PYTHONPATH PYTHONHOME LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GCONV_PATH OPENSSL_CONF OPENSSL_MODULES
 ExecStart=/opt/urban/.venv/bin/python -I -m urban.node.district --unit %i --platform ${PLATFORM} --server-name ${SERVER_NAME} \
-    --pki /etc/urban/pki --sensors "${SENSORS}" --relay /run/urban/relay.json --temp "${TEMP_SENSOR}"
+    --pki /etc/urban/pki --sensors "${SENSORS}" --relay /run/urban/relay.json --temp "${TEMP_SENSOR}" --updates "${UPDATES}"
 Restart=always
 RestartSec=2
 # The sandbox: its own key folder, the update inbox, the tunnel inbox and the network, nothing else (as urban-edge@)

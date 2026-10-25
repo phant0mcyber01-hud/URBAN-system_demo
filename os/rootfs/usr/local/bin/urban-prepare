@@ -10,7 +10,9 @@
 #   district  a district's server: its relay carries the junction units' connections to the centre (CENTER=),
 #             it reports the queues of the district's cameras to the centre as a device of its own
 #   center    the control centre: the platform and its interface over HTTPS
-#   district,center   both on one machine (the pilot)
+#   district,center   both on one machine (the pilot); its district side is a district of its own, district-<name>:
+#             its own key, enrolled at the centre on the same machine by the centre itself (no code typed by anyone),
+#             reporting the queues of the machine's cameras to it over the loopback (urban/node/pilot.py)
 # A unit with VISION=off is a light unit: no camera work, ever.
 # A junction unit (not a lighting cabinet) and a district server also get the WireGuard tunnel between them
 # (docs/wireguard-design.md): a key of their own, an inbox for the centre's signed messages, the root helper urban-wg
@@ -191,18 +193,27 @@ case "$TUNNEL" in
   *) rm -f /run/urban/nft/wg.nft ;;
 esac
 
-case "$ROLE" in unit|district)  # a unit and a district have a key of their own and enrol with a code (the pilot's centre has neither)
-  # The device key: made inside the TPM when the machine has one (a folder <unit>.tpm of TPM-wrapped blobs that no
-  # other machine can use), else an Ed25519 file <unit>.key (--tpm auto). Never replaced once there.
-  KEY="$D/etc/pki/edge/$UNIT.key"
-  TPMKEY="$D/etc/pki/edge/$UNIT.tpm"
+# The device key: a unit and a district have a key of their own and enrol with a code; the pilot (district,center) has
+# one for its district side, district-<its name>, which its own centre enrols by itself (a centre alone has none)
+KEYID=""
+OWN=""  # the pilot's own district
+case "$ROLE" in
+  unit|district) KEYID=$UNIT ;;
+  district,center) OWN="district-$UNIT"; KEYID=$OWN ;;
+esac
+rm -f /run/urban/own-district.code  # (tmpfs: written again below, on the pilot only)
+if [ -n "$KEYID" ]; then
+  # Made inside the TPM when the machine has one (a folder <id>.tpm of TPM-wrapped blobs that no other machine can
+  # use), else an Ed25519 file <id>.key (--tpm auto). Never replaced once there.
+  KEY="$D/etc/pki/edge/$KEYID.key"
+  TPMKEY="$D/etc/pki/edge/$KEYID.tpm"
   if [ ! -f "$KEY" ] && [ ! -d "$TPMKEY" ]; then
     # the TPM's device node can appear a moment after the data partition (the driver loads, then udev names it): wait
     # for it where the kernel says there is a TPM, so that the key is not made as a file for lack of a few seconds
     if [ -e /sys/class/tpm/tpm0 ]; then
       for _ in $(seq 1 50); do [ -c /dev/tpmrm0 ] && break; sleep 0.2; done
     fi
-    /opt/urban/.venv/bin/python -I -m urban.edge --keygen --unit "$UNIT" --serial "$SERIAL" --pki "$D/etc/pki" --tpm auto > "$D/etc/enrolment.txt"
+    /opt/urban/.venv/bin/python -I -m urban.edge --keygen --unit "$KEYID" --serial "$SERIAL" --pki "$D/etc/pki" --tpm auto > "$D/etc/enrolment.txt"
   fi
   # the key folder / file belongs to the service's user alone (urban); the blobs and the file are private to it
   if [ -d "$TPMKEY" ]; then
@@ -216,8 +227,14 @@ case "$ROLE" in unit|district)  # a unit and a district have a key of their own 
   if [ -d "$TPMKEY" ]; then keyin=tpm; else keyin=file; fi
   fingerprint=$(sed -n 's/^fingerprint: *\([0-9A-F-]*\).*/\1/p' "$D/etc/enrolment.txt")
   code=$(grep -o 'URBAN1:[^[:space:]]*' "$D/etc/enrolment.txt" || true)
-  echo "URBAN-ENROLMENT unit=$UNIT serial=${SERIAL:--} fingerprint=$fingerprint code=$code key=$keyin" ;;
-esac
+  echo "URBAN-ENROLMENT unit=$KEYID serial=${SERIAL:--} fingerprint=$fingerprint code=$code key=$keyin${OWN:+ (the district side of this machine: its centre enrols it by itself)}"
+  # the pilot: the code (public: its id, serial and public key) for the centre on this machine, which enrols it when it
+  # starts; root's file, readable by the centre's service
+  if [ -n "$OWN" ] && [ -n "$code" ]; then
+    { printf '%s\n' "$code" > /run/urban/own-district.code && chmod 644 /run/urban/own-district.code; } \
+      || echo "URBAN-DISTRICT could not hand the code of $OWN to the centre"
+  fi
+fi
 # The tunnel's pieces on the data partition: the inbox the service puts the centre's signed messages in (the service's
 # own), and root's folder with the tunnel key (made here once, never replaced: X25519 has no place in the TPM, so it
 # is a root-only file, inside LUKS where there is a TPM), the helper's pinned anchor and what it applied. Then the
@@ -242,6 +259,37 @@ if [ -n "$TUNNEL" ]; then
 fi
 /usr/local/bin/urban-console  # the same, on the machine's own screen
 
+# The pilot's own district: its kit, as `urban-unit setup` puts a district's kit in place, made by the centre's own
+# command from the code above (urban-center provision own-kit: the centre's CA and root key, this key's fingerprint, the
+# centre's name on its certificate) and pointed at the centre over the loopback. Run before the centre starts: on the
+# very first boot the command makes the centre's keys and certificate as the centre would (the same provisioning, as
+# its user), so the two never race. At later boots nothing is redone while the kit still matches the centre's CA, root
+# key, name and port.
+own_district_kit() {
+  local env="$D/etc/edge-$OWN.env" pki="$D/platform/pki" name port kit
+  name=$(sed -n 's/^DEVICE_NAME=//p' "$D/etc/platform.env" | tail -n 1); name=${name:-localhost}
+  port=$(sed -n 's/^DEVICE_PORT=//p' "$D/etc/platform.env" | tail -n 1); port=${port:-8443}
+  # (compared as text: the kit writes root.pub with a final newline, the centre's has none)
+  if [ -f "$env" ] && [ -s "$pki/ca.pem" ] && [ "$(cat "$pki/ca.pem")" = "$(cat "$D/etc/pki/ca.pem" 2>/dev/null)" ] \
+      && [ -s "$pki/root.pub" ] && [ "$(cat "$pki/root.pub")" = "$(cat "$D/etc/pki/root.pub" 2>/dev/null)" ] \
+      && grep -qx "SERVER_NAME=$name" "$env" && grep -qx "PLATFORM=127.0.0.1:$port" "$env"; then
+    return 0
+  fi
+  kit=$(mktemp /run/urban/own-kit.XXXXXX)
+  chmod 644 "$kit"  # public (the centre's CA and keys' public halves); the command writes it as the centre's user
+  if ! /usr/local/bin/urban-center provision own-kit --code /run/urban/own-district.code > "$kit"; then
+    rm -f "$kit"; echo "URBAN-DISTRICT the kit of $OWN could not be made"; return 1
+  fi
+  if ! /opt/urban/.venv/bin/python -I -m urban.edge --setup "$kit" --unit "$OWN" --pki /etc/urban/pki --env "$env" > /dev/null; then
+    rm -f "$kit"; echo "URBAN-DISTRICT the kit of $OWN could not be put in place"; return 1
+  fi
+  rm -f "$kit"
+  chown -R urban:urban "$D/etc/pki"
+  grep -q '^UPDATES=' "$env" || printf '%s\n' "# this machine's system is the centre's: updated by urban-center release self-update, never by an offer" \
+    "UPDATES=off" >> "$env"
+  echo "URBAN-DISTRICT kit of $OWN in place: to the centre over the loopback 127.0.0.1:$port (certificate of $name)"
+}
+
 # The role's services. They cannot be "enabled" (that writes into the read-only /etc), so they are started
 # from here; --no-block: they wait for the network on their own.
 case ",$ROLE," in *,center,*)
@@ -260,6 +308,7 @@ case ",$ROLE," in *,center,*)
     } > "$D/etc/platform.env"
     chmod 640 "$D/etc/platform.env"; chgrp urban "$D/etc/platform.env"
   fi
+  if [ -n "$OWN" ] && [ -f /run/urban/own-district.code ]; then own_district_kit || OWN=""; else OWN=""; fi
   systemctl start --no-block urban-platform.service
   echo "URBAN-SERVICE starting the control centre (https://${HOST:-$UNIT}/)" ;;
 esac
@@ -272,9 +321,12 @@ case ",$ROLE," in *,district,*)
   elif [ "$ROLE" = district ]; then
     echo "URBAN-RELAY not started: no CENTER= in urban-unit.txt"
   fi
-  if [ -f "$D/etc/edge-$UNIT.env" ]; then  # its own link to the centre, once the district's kit is in place
+  if [ "$ROLE" = district ] && [ -f "$D/etc/edge-$UNIT.env" ]; then  # its own link to the centre, once its kit is in place
     systemctl start --no-block "urban-district@$UNIT.service"
     echo "URBAN-DISTRICT starting urban-district@$UNIT"
+  elif [ -n "$OWN" ] && [ -f "$D/etc/edge-$OWN.env" ]; then  # the pilot's own district, to the centre on this machine
+    systemctl start --no-block "urban-district@$OWN.service"
+    echo "URBAN-DISTRICT starting urban-district@$OWN (this machine's own district, to its centre over the loopback)"
   fi ;;
 esac
 if [ "$ROLE" = unit ] && [ "$MODULE" = lighting ]; then
