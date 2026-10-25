@@ -29,6 +29,7 @@ they have no /run/urban/own-district.code.
 """
 import datetime
 import json
+import os
 from pathlib import Path
 
 from ..devices import crypto
@@ -113,6 +114,9 @@ async def enroll_own(hub, audit, code_path: Path, name: str, port: int, marker: 
         what = f"{device} (key {fp}) enrolled at {rec['address']}"
     else:  # enrolled with this key before (by hand, or before the marker was written)
         what = f"{device} (key {fp}), already enrolled {rec.get('enrolled', '-')}"
-    Path(marker).write_text(json.dumps({"device": device, "fingerprint": fp,
-                                        "at": datetime.datetime.now().isoformat(timespec="seconds")}), encoding="utf-8")
+    # whole or not at all: a marker cut short would be no marker, and a district the admin removed enrolled again
+    tmp = Path(marker).with_name(Path(marker).name + ".tmp")
+    tmp.write_text(json.dumps({"device": device, "fingerprint": fp,
+                               "at": datetime.datetime.now().isoformat(timespec="seconds")}), encoding="utf-8")
+    os.replace(tmp, marker)
     return what

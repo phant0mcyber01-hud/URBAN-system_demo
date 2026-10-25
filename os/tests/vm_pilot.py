@@ -248,7 +248,25 @@ def pilot_cameras():
         log = centre.ssh("journalctl -u urban-platform -b --no-pager -o cat", check=False).stdout
         said = re.findall(r"Own district: .*", log)
         t2 = vm_now(centre)
-        rows = wait_queue(api, t2, f"no {APPROACH} queue at the centre after the restart")
+        try:
+            rows = wait_queue(api, t2, f"no {APPROACH} queue at the centre after the restart")
+        except vm.Fail as err:  # say where the numbers stopped: the camera, the queue file, the district, the centre
+            def say(cmd):
+                return centre.ssh(cmd, check=False).stdout.strip()[-1500:]
+            queue_file = say("ls -l /run/urban/q; cat /run/urban/q/queues.json")
+            vision = say("journalctl -b -u urban-vision@center --no-pager -o cat | tail -n 15")
+            district = say(f"journalctl -b -u urban-district@{OWN} --no-pager -o cat | tail -n 15")
+            platform = say("journalctl -b -u urban-platform --no-pager -o cat | grep -i -E 'district|queue|J-01' | tail -n 15")
+            threads = say("p=$(systemctl show -p MainPID --value urban-vision@center); ps -o pid,etime,time,stat -p $p; "
+                          "for t in /proc/$p/task/*; do echo \"$(cat $t/comm) $(cat $t/wchan) $(cut -d' ' -f3 $t/stat)\"; "
+                          "done; date; uptime")
+            centre.ssh("systemctl restart urban-vision@center", check=False)
+            time.sleep(90)  # a restarted vision: does it measure now (a boot-time start problem) or not (vision itself)?
+            restarted = say("cat /run/urban/q/queues.json /run/urban/q/vision.json")
+            raise vm.Fail(f"{err}\n--- queue file: {queue_file}\n--- vision: {vision}\n--- district: {district}"
+                          f"\n--- platform: {platform}\n--- vision's threads: {threads}"
+                          f"\n--- 90 s after restarting vision: {restarted}"
+                          f"\n--- clock: vm {vm_now(centre)}, t2 {t2}, history {queues_at_centre(api, 'J-01', 0)[-3:]}")
         print(f"OK after a restart: the same key {fp}, the kit not redone, one district ({OWN}), district-enrolled still "
               f"once, the registry file unchanged, online again; the centre: {said[-1] if said else '-'}; {APPROACH} "
               f"arrives again ({rows[0]['metres']} m)", flush=True)

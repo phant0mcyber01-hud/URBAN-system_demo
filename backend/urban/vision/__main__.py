@@ -77,33 +77,36 @@ def run(args):
     throttle, stats = Throttle(), Stats(out.parent / "vision.json")
     print(f"vision: {len(ready)} camera(s), {threads} thread(s): "
           + ", ".join(f"{c['camera']}->{c['approach']} ({redact(c['source'])})" for c in ready), flush=True)
-    written, errors, rate = 0.0, {}, plan.fps
+    # the rhythm (frames per camera, the queue file once a second) runs on the monotonic clock: a step of the wall clock
+    # (NTP correcting it, an RTC hours off) must not stop the analysis or the queue file for hours. The samples keep
+    # their wall time: the centre dates its history by it.
+    written, errors, rate = float("-inf"), {}, plan.fps
     try:
         while True:
             busy = False
             for feed in feeds:
-                if not throttle.due(feed.cam["camera"], time.time(), rate):
+                if not throttle.due(feed.cam["camera"], time.monotonic(), rate):
                     continue
                 got = feed.take()
                 if got is None:
                     continue
-                throttle.mark(feed.cam["camera"], time.time())
+                throttle.mark(feed.cam["camera"], time.monotonic())
                 busy = True
                 t, frame = got
                 started = time.perf_counter()
                 boxes = detector.detect(frame)
                 stats.add((time.perf_counter() - started) * 1000)
                 pipeline.feed(feed.cam["approach"], t, [b[:4] for b in boxes])
-            now = time.time()
-            if now - written >= 1.0:
+            now, tick = time.time(), time.monotonic()
+            if tick - written >= 1.0:
                 pipeline.write(out, now)
-                written = now
+                written = tick
                 plan.refresh()
                 if plan.fps != rate:
                     print(f"vision: power plan {rate} -> {plan.fps} frames/s per camera"
                           + (" (paused)" if plan.fps == 0 else ""), flush=True)
                     rate = plan.fps
-                stats.write(len(feeds), rate, now)
+                stats.write(len(feeds), rate, tick)
                 for feed in feeds:  # say it once when a camera breaks or comes back
                     if errors.get(feed.cam["camera"]) != feed.source.error:
                         errors[feed.cam["camera"]] = feed.source.error

@@ -132,7 +132,7 @@ def test_add_reads_the_compatible_from_the_signed_package_and_refuses_one_that_i
             release.main(["--dir", str(folder), "add", str(package(tmp_path, "x.raucb")), "--version", "3"])
         assert str(stop.value).startswith(f"refused: the bundle is for {foreign!r}, not for a system URBAN builds")
     assert [(r["version"], r["compatible"]) for r in ReleaseStore(folder).releases()] == [(2, ARM)]
-    assert sorted(p.name for p in folder.iterdir()) == ["releases.json", "urban-aarch64-2.raucb"]  # nothing copied
+    assert sorted(p.name for p in folder.iterdir() if p.name != release.LOCK) == ["releases.json", "urban-aarch64-2.raucb"]  # nothing copied
     with pytest.raises(ReleaseError, match="not for a system URBAN builds"):  # the store refuses it too
         ReleaseStore(folder).add(package(tmp_path, "y.raucb"), 4, compatible="urban-edge-riscv64")
 
@@ -415,6 +415,16 @@ def test_a_new_system_that_came_up_and_then_fell_back_is_a_rollback_too(rig, sto
                                            "reason": "rolled back: installed 3, runs 2"}
 
 
+def test_a_rollback_on_a_device_outside_the_wave_does_not_halt_the_release(rig, store, pki, tmp_path):
+    """Only a device of the release's wave counts, for a rollback as for a failure: one that got the release outside
+    the rollout (put on by hand with urban-unit update) and fell back halts nothing."""
+    store.add(package(tmp_path, "x3"), 3, ["edge-J-01"])
+    run = {"os": 2, "compatible": X86}
+    serve(rig, pki, "edge-J-02", run, {**run, "update": {"state": "installed", "version": 3, "reason": ""}})
+    serve(rig, pki, "edge-J-02", run)  # back on 2
+    assert store.get(3)["halted"] is None and rig.events("rollout-halted") == []
+
+
 def test_a_device_that_reconnects_while_installing_or_runs_the_release_is_not_a_rollback(rig, store, pki, tmp_path):
     store.add(package(tmp_path, "x3"), 3)
     run = {"os": 2, "compatible": X86}
@@ -487,3 +497,30 @@ def test_devices_shows_the_releases_and_their_rollout(rig, store, tmp_path):
     assert arm["halted"]["device"] == "edge-J-02" and arm["halted"]["reason"] == "refused by the device: hash"
     assert x86["halted"] == arm["halted"]  # one version number, one halt
     assert x86["in_wave"] == ["district-1", "edge-J-01", "edge-J-03"] and x86["running"] == ["edge-J-01"]
+
+
+def test_a_halt_written_while_the_admin_promotes_is_not_lost(tmp_path):
+    """The platform halts a release while the command line is promoting it: two processes change releases.json at
+    once. Each change is read, made and written under the store's lock, so neither overwrites the other: the release
+    ends promoted AND halted, never promoted and offered again."""
+    import threading
+    import time
+    from urban.release import ReleaseStore
+    folder = tmp_path / "releases"
+    ReleaseStore(folder).add(package(tmp_path, "u.raucb"), 3, devices=["edge-J-01"])
+    admin, platform = ReleaseStore(folder), ReleaseStore(folder)
+    write, in_write = admin._write, threading.Event()
+
+    def slow_write(items):  # the admin's write lags behind its read: the platform's halt lands in between
+        in_write.set()
+        time.sleep(0.5)
+        write(items)
+    admin._write = slow_write
+    promoting = threading.Thread(target=lambda: admin.promote(3))
+    promoting.start()
+    in_write.wait(5)
+    platform.halt(3, "edge-J-01", "urban-edge-x86_64", "rolled back: installed 3, runs 2")
+    promoting.join(5)
+    rel = ReleaseStore(folder).get(3)
+    assert rel["devices"] is None and rel["wave"] is None  # promoted to every device
+    assert rel["halted"] and rel["halted"]["device"] == "edge-J-01"  # and still halted

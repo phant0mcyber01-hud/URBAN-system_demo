@@ -387,3 +387,39 @@ def test_the_code_file_is_the_enrolment_code_keygen_prints(machine):
     code = pilot.read_code(machine.code)
     assert code == parse_code(machine.code.read_text()) and code["device"] == OWN and code["serial"] == "PILOT-1"
     assert pilot.read_code(machine.code.with_name("missing")) is None
+
+
+def test_a_step_of_the_wall_clock_does_not_hold_a_camera_file_back(tmp_path, monkeypatch):
+    """The wall clock steps 12 hours back while a file plays as a camera (NTP correcting a clock that ran ahead; in
+    QEMU the machine's clock after a restart): the frames keep coming at the file's pace, they are not held back for
+    12 hours. Seen in the pilot check after a restart: vision measured nothing."""
+    import threading
+    import time as real_time
+    import types
+
+    import cv2
+    import numpy as np
+
+    from urban.vision import source
+    video = tmp_path / "short.avi"
+    out = cv2.VideoWriter(str(video), cv2.VideoWriter_fourcc(*"MJPG"), 20, (64, 48))
+    for i in range(4):
+        out.write(np.full((48, 64, 3), 40 * i, dtype=np.uint8))
+    out.release()
+    shift = {"by": 0.0}
+    monkeypatch.setattr(source, "time", types.SimpleNamespace(time=lambda: real_time.time() - shift["by"],
+                                                              monotonic=real_time.monotonic, sleep=real_time.sleep))
+    stop, got = threading.Event(), []
+
+    def play():
+        for _ in source.VideoSource(str(video), fps=20, realtime=True).frames(stop):
+            got.append(1)
+            if len(got) == 2:
+                shift["by"] = 12 * 3600.0  # the wall clock steps back 12 hours
+            if len(got) == 12:
+                stop.set()
+    reader = threading.Thread(target=play, daemon=True)
+    reader.start()
+    reader.join(10)
+    stop.set()
+    assert len(got) == 12, f"only {len(got)} frames within 10 s after the wall clock stepped back"

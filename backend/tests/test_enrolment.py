@@ -238,6 +238,27 @@ def test_a_kit_cannot_put_extra_lines_into_the_env_file(tmp_path, field_pki):
     assert json.loads((env.parent / "edge-J-01.junction.json").read_text())["name"] == "MainADAPTER=ntcip & Side"
 
 
+def test_a_kit_whose_certificate_is_not_a_certificate_is_refused_and_kit_files_are_replaced_whole(tmp_path, field_pki):
+    """Root puts the pilot's district kit in place at boot (urban-prepare): its CA must be a real certificate, not text
+    after a certificate's first line, and every kit file is a new file moved over the name (a link planted at the name
+    is replaced, not written through)."""
+    kit, unit_pki = kit_for(field_pki, tmp_path / "bad")
+    kit["ca_pem"] = "-----BEGIN CERTIFICATE-----\nnot a certificate||touch /tmp/x\n-----END CERTIFICATE-----\n"
+    env = tmp_path / "bad" / "unit" / "edge.env"
+    with pytest.raises(ValueError, match="not a certificate"):
+        install_kit(kit, "edge-J-01", unit_pki / "edge" / "edge-J-01.key", unit_pki, env)
+    assert not env.exists() and not (unit_pki / "ca.pem").exists()
+    kit, unit_pki = kit_for(field_pki, tmp_path / "ok")
+    env = tmp_path / "ok" / "unit" / "edge.env"
+    unit_pki.mkdir(parents=True, exist_ok=True)
+    (unit_pki / "ca.pem").write_text("an old file")
+    before = (unit_pki / "ca.pem").stat().st_ino
+    install_kit(kit, "edge-J-01", unit_pki / "edge" / "edge-J-01.key", unit_pki, env)
+    assert (unit_pki / "ca.pem").read_text() == kit["ca_pem"]
+    assert (unit_pki / "ca.pem").stat().st_ino != before  # a new file moved over the name, not written into the old one
+    assert not [p for p in unit_pki.iterdir() if p.name.startswith(".ca.pem.")]  # no temporary file left behind
+
+
 def test_the_registry_never_overwrites_what_another_process_wrote(field_pki):
     mine = Registry(field_pki / "devices.json")      # the running platform
     cli = Registry(field_pki / "devices.json")       # python -m urban.provision enroll ...

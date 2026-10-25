@@ -36,6 +36,7 @@ the default: nothing changes until an admin sets one, here or in the interface (
 audited as `os-floor-set` with who made it; a change made here is audited by the platform the next time it looks.
 """
 import argparse
+import contextlib
 import datetime
 import getpass
 import hashlib
@@ -53,6 +54,7 @@ from . import config as c
 KEYRING = Path("/etc/rauc/keyring.pem")
 DEVICE_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")
 FLOOR, FLOOR_AUDITED = "floor.json", "floor.audited"  # the version floor; the id of the floor record last audited
+LOCK = ".releases.lock"  # held while releases.json is read, changed and written (ReleaseStore._changing)
 COMPATIBLES = ("urban-edge-x86_64", "urban-edge-aarch64")  # the systems URBAN builds, as RAUC names them
 DEFAULT_COMPATIBLE = COMPATIBLES[0]  # a release entry or a device that names none (before step 12) is x86
 REASON_MAX = 160  # the longest reason a halt keeps
@@ -249,6 +251,31 @@ class ReleaseStore:
         self._write_json(self.dir / FLOOR_AUDITED, None, text=ident)
 
     # ---- writing
+    @contextlib.contextmanager
+    def _changing(self):
+        """Read, change and write releases.json as one step against every other writer: the command line (release add,
+        promote, resume, withdraw) and the platform (a halt) run in different processes, and without the lock a halt
+        written between another writer's read and its write would be lost (a halted release offered again). Yields the
+        releases read afresh inside the lock, as copies to change and hand to _write."""
+        self.dir.mkdir(parents=True, exist_ok=True)
+        with open(self.dir / LOCK, "a+b") as lock:
+            if os.name == "nt":  # the tests on Windows; URBAN OS is Linux
+                import msvcrt
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                self._seen = None  # read the file itself, not what this process saw before
+                yield [dict(r) for r in self.releases()]
+            finally:
+                if os.name == "nt":
+                    lock.seek(0)
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
     def _write_json(self, path: Path, data, text: str | None = None):
         """Whole or not at all: another process may read the file at any moment."""
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -292,33 +319,34 @@ class ReleaseStore:
                 raise ReleaseError("--devices: a comma-separated list of device ids, for example edge-J-21,district-1")
         if wave is not None and (isinstance(wave, bool) or not isinstance(wave, int) or not 1 <= wave <= 100):
             raise ReleaseError("--wave: a share of the fleet in percent, 1 to 100")
-        items = list(self.releases())
-        live = max((r["version"] for r in items if not r.get("withdrawn") and compatible_of(r) == compatible), default=0)
-        if version <= live:
-            raise ReleaseError(f"version {version} is not newer than release {live} for {compatible}, which is still offered")
-        halted = next((r["halted"] for r in items if r["version"] == version and not r.get("withdrawn") and r.get("halted")),
-                      None)
         digest, size = sha256_of(source)
         # x86 keeps the file name it had before there were two systems
         name = (f"urban-{version}.raucb" if compatible == DEFAULT_COMPATIBLE
                 else f"urban-{compatible.removeprefix('urban-edge-')}-{version}.raucb")
-        self.dir.mkdir(parents=True, exist_ok=True)
-        tmp = self.dir / (name + ".tmp")
-        shutil.copyfile(source, tmp)
-        os.replace(tmp, self.dir / name)
-        rel = {"version": version, "compatible": compatible, "file": name, "sha256": digest, "size": size,
-               "devices": devices, "wave": wave, "added": self._now(now), "withdrawn": False, "halted": halted}
-        # a withdrawn release of that number and compatible is replaced
-        self._write([r for r in items if (r["version"], compatible_of(r)) != (version, compatible)] + [rel])
+        with self._changing() as items:
+            live = max((r["version"] for r in items if not r.get("withdrawn") and compatible_of(r) == compatible),
+                       default=0)
+            if version <= live:
+                raise ReleaseError(f"version {version} is not newer than release {live} for {compatible}, which is "
+                                   f"still offered")
+            halted = next((r["halted"] for r in items
+                           if r["version"] == version and not r.get("withdrawn") and r.get("halted")), None)
+            tmp = self.dir / (name + ".tmp")
+            shutil.copyfile(source, tmp)
+            os.replace(tmp, self.dir / name)
+            rel = {"version": version, "compatible": compatible, "file": name, "sha256": digest, "size": size,
+                   "devices": devices, "wave": wave, "added": self._now(now), "withdrawn": False, "halted": halted}
+            # a withdrawn release of that number and compatible is replaced
+            self._write([r for r in items if (r["version"], compatible_of(r)) != (version, compatible)] + [rel])
         return rel
 
     def withdraw(self, version: int, compatible: str | None = None) -> list[dict]:
         """Withdraw the packages of this version (of one compatible, or every one still offered). Returns them."""
-        items = [dict(r) for r in self.releases()]  # copies: the cache changes only when the file does
-        live = self._live(items, version, compatible)
-        for rel in live:
-            rel["withdrawn"] = True
-        self._write(items)
+        with self._changing() as items:
+            live = self._live(items, version, compatible)
+            for rel in live:
+                rel["withdrawn"] = True
+            self._write(items)
         return live
 
     def promote(self, version: int, wave: int | None = None, compatible: str | None = None) -> list[dict]:
@@ -326,20 +354,21 @@ class ReleaseStore:
         device (wave None). The listed devices of a first wave stay in it. Returns the packages."""
         if wave is not None and (isinstance(wave, bool) or not isinstance(wave, int) or not 1 <= wave <= 100):
             raise ReleaseError("--wave: a share of the fleet in percent, 1 to 100")
-        items = [dict(r) for r in self.releases()]
-        live = self._live(items, version, compatible)
-        for rel in live:
-            if rel.get("devices") is None and rel.get("wave") is None:
-                raise ReleaseError(f"release {version} for {compatible_of(rel)} already goes to every unit and district")
-            if wave is not None and wave <= (rel.get("wave") or 0):
-                raise ReleaseError(f"release {version} for {compatible_of(rel)} already goes to {rel['wave']}% of the "
-                                   f"fleet: a wider wave is more than that")
-        for rel in live:
-            if wave is None:
-                rel["devices"], rel["wave"] = None, None
-            else:
-                rel["wave"] = wave
-        self._write(items)
+        with self._changing() as items:
+            live = self._live(items, version, compatible)
+            for rel in live:
+                if rel.get("devices") is None and rel.get("wave") is None:
+                    raise ReleaseError(f"release {version} for {compatible_of(rel)} already goes to every unit and "
+                                       f"district")
+                if wave is not None and wave <= (rel.get("wave") or 0):
+                    raise ReleaseError(f"release {version} for {compatible_of(rel)} already goes to {rel['wave']}% of "
+                                       f"the fleet: a wider wave is more than that")
+            for rel in live:
+                if wave is None:
+                    rel["devices"], rel["wave"] = None, None
+                else:
+                    rel["wave"] = wave
+            self._write(items)
         return live
 
     def halt(self, version: int, device: str, compatible: str, reason: str,
@@ -347,27 +376,27 @@ class ReleaseStore:
         """Halt every package of this version still offered, after a failure or a rollback that `device` (running
         `compatible`) reported. Returns the halt record, or None when there is nothing to halt (it is halted already,
         or withdrawn)."""
-        items = [dict(r) for r in self.releases()]
-        live = [r for r in items if r["version"] == version and not r.get("withdrawn")]
-        if not live or any(r.get("halted") for r in live):
-            return None
-        record = {"device": str(device)[:64], "compatible": str(compatible)[:64], "reason": str(reason)[:REASON_MAX],
-                  "at": self._now(now)}
-        for rel in live:
-            rel["halted"] = record
-        self._write(items)
+        with self._changing() as items:
+            live = [r for r in items if r["version"] == version and not r.get("withdrawn")]
+            if not live or any(r.get("halted") for r in live):
+                return None
+            record = {"device": str(device)[:64], "compatible": str(compatible)[:64],
+                      "reason": str(reason)[:REASON_MAX], "at": self._now(now)}
+            for rel in live:
+                rel["halted"] = record
+            self._write(items)
         return record
 
     def resume(self, version: int) -> dict:
         """The admin's decision: a halted version is offered again (to its wave). Returns the halt that ended."""
-        items = [dict(r) for r in self.releases()]
-        live = self._live(items, version, None)
-        halted = next((r["halted"] for r in live if r.get("halted")), None)
-        if halted is None:
-            raise ReleaseError(f"release {version} is not halted")
-        for rel in live:
-            rel["halted"] = None
-        self._write(items)
+        with self._changing() as items:
+            live = self._live(items, version, None)
+            halted = next((r["halted"] for r in live if r.get("halted")), None)
+            if halted is None:
+                raise ReleaseError(f"release {version} is not halted")
+            for rel in live:
+                rel["halted"] = None
+            self._write(items)
         return halted
 
 

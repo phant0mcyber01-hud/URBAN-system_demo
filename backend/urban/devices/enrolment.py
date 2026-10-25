@@ -15,7 +15,9 @@ On the unit:
 import hashlib
 import ipaddress
 import json
+import os
 import re
+import tempfile
 from pathlib import Path
 
 from . import crypto
@@ -173,11 +175,28 @@ def _lighting_env(kit: dict, unit: str, env_path: Path) -> None:
         out += [f"{k}={v}" for k, v in values.items()]
         if not any(line.split("=", 1)[0].strip() == "ADAPTER" for line in out):
             out.append("ADAPTER=emulated")
-        env_path.write_text("\n".join(out) + "\n", encoding="utf-8")
+        _put(env_path, "\n".join(out) + "\n", 0o600)
         return
     place = "".join(f"{k}={values[k]}\n" for k in ("LON", "LAT") if k in values)
-    env_path.write_text(LIGHTING_ENV_TEMPLATE.format(unit=unit, cabinet=kit["cabinet"], platform=kit["platform"],
-                                                     server_name=kit["server_name"], place=place), encoding="utf-8")
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    _put(env_path, LIGHTING_ENV_TEMPLATE.format(unit=unit, cabinet=kit["cabinet"], platform=kit["platform"],
+                                                server_name=kit["server_name"], place=place), 0o600)
+
+
+def _put(path: Path, text: str, mode: int = 0o644):
+    """Write a kit file whole, never through a link: a new file in the same folder (created exclusively, so a name
+    planted there is not followed either) moved over the name. The kit is put in place by root at boot on the pilot
+    (urban-prepare), into folders the device's service may write: a symlink planted at a kit file's name is replaced,
+    not written through."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def install_kit(kit: dict, unit: str, key_path: Path, pki: Path, env_path: Path) -> list[str]:
@@ -198,6 +217,11 @@ def install_kit(kit: dict, unit: str, key_path: Path, pki: Path, env_path: Path)
                          "enrol this unit's code again and download a new kit")
     if not str(kit.get("ca_pem", "")).startswith("-----BEGIN CERTIFICATE-----"):
         raise ValueError("the kit has no platform certificate")
+    from cryptography import x509
+    try:
+        x509.load_pem_x509_certificate(kit["ca_pem"].encode("ascii"))  # a certificate, not anything after its first line
+    except (ValueError, UnicodeEncodeError):
+        raise ValueError("the kit's platform certificate is not a certificate")
     lighting = kit.get("kind") == "lighting"
     if lighting:
         if not isinstance(kit.get("cabinet"), str) or not CABINET.fullmatch(kit["cabinet"]) or not LIGHT_DEVICE.fullmatch(unit):
@@ -213,12 +237,12 @@ def install_kit(kit: dict, unit: str, key_path: Path, pki: Path, env_path: Path)
     title = "".join(ch for ch in str(kit.get("name") or "") if ch.isprintable())  # free text: cleaned, not refused
     pki.mkdir(parents=True, exist_ok=True)
     written = []
-    (pki / "ca.pem").write_text(kit["ca_pem"])
+    _put(pki / "ca.pem", kit["ca_pem"])
     written.append(str(pki / "ca.pem"))
     for name, field in (("root.pub", "root_pub"), ("gateway.pub", "gateway_pub")):
         if kit.get(field):
             crypto.load_public(kit[field])  # a key, not anything else
-            (pki / name).write_text(kit[field] + "\n")
+            _put(pki / name, kit[field] + "\n")
             written.append(str(pki / name))
     if lighting:
         _lighting_env(kit, unit, env_path)
@@ -227,13 +251,12 @@ def install_kit(kit: dict, unit: str, key_path: Path, pki: Path, env_path: Path)
         values = {"PLATFORM": kit["platform"], "SERVER_NAME": kit["server_name"]}
         out = [f"{k}={values.pop(k)}" if (k := line.split("=", 1)[0].strip()) in values else line for line in lines]
         out += [f"{k}={v}" for k, v in values.items()]
-        env_path.write_text("\n".join(out) + "\n", encoding="utf-8")
+        _put(env_path, "\n".join(out) + "\n", 0o600)
     else:
         env_path.parent.mkdir(parents=True, exist_ok=True)
         template = DISTRICT_ENV_TEMPLATE if kit.get("kind") == "district" else ENV_TEMPLATE
-        env_path.write_text(template.format(**{**{k: kit.get(k) or "" for k in
-                                                  ("unit", "junction", "platform", "server_name")}, "name": title}),
-                            encoding="utf-8")
+        _put(env_path, template.format(**{**{k: kit.get(k) or "" for k in
+                                             ("unit", "junction", "platform", "server_name")}, "name": title}), 0o600)
     try:
         env_path.chmod(0o600)
     except OSError:

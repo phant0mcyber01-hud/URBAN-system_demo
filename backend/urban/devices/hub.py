@@ -414,7 +414,7 @@ class DeviceHub:
           package that is not the one offered (PACKAGE_FAULTS), for a release of its compatible that is still offered and
           whose wave includes it. The same failure repeated in later reports is judged once;
         - a rollback: it reported the release `installing` or `installed`, or ran it (os at or above it), and a later
-          session reports an older system and no installation of it under way (the restart into the new slot failed
+          session reports an older system and no installation of it under way, the device again one of the release's wave (the restart into the new slot failed
           its self-check and the machine went back, or the new system came up and fell back afterwards).
         Either halts every package of that version still offered (ReleaseStore.halt), audited once as rollout-halted
         with the device and the reason; then nothing of it is offered or served until the admin resumes it. What the
@@ -447,7 +447,7 @@ class DeviceHub:
         elif session > reached[2]:
             del self._reached[device]
             rel = self.releases.get(reached[1], compatible)
-            if rel is not None and not rel.get("withdrawn"):
+            if rel is not None and not rel.get("withdrawn") and in_wave(rel, device):
                 self._halt(reached[1], device, compatible, f"rolled back: installed {reached[1]}, runs {have}")
 
     def _halt(self, version: int, device: str, compatible: str, reason: str):

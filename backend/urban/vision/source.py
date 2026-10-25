@@ -61,7 +61,9 @@ class VideoSource:
             self.error, pause = None, 1.0
             native = cap.get(cv2.CAP_PROP_FPS) or 25.0
             step = max(1, round(native / self.fps))
-            started, index = time.time(), 0
+            # paced by the monotonic clock: a step of the wall clock (NTP correcting it, an RTC hours off) must not
+            # hold the next frame back for hours or rush through the file
+            started, index = time.monotonic(), 0
             while not stop.is_set():
                 ok, frame = cap.read()
                 if not ok:
@@ -71,7 +73,7 @@ class VideoSource:
                     continue
                 video_t = (index - 1) / native
                 if self.realtime and is_file(url):
-                    ahead = started + video_t - time.time()
+                    ahead = started + video_t - time.monotonic()
                     if ahead > 0:
                         stop.wait(ahead)
                 yield (time.time() if self.realtime else video_t), frame

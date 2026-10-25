@@ -215,12 +215,13 @@ if [ -n "$KEYID" ]; then
     fi
     /opt/urban/.venv/bin/python -I -m urban.edge --keygen --unit "$KEYID" --serial "$SERIAL" --pki "$D/etc/pki" --tpm auto > "$D/etc/enrolment.txt"
   fi
-  # the key folder / file belongs to the service's user alone (urban); the blobs and the file are private to it
-  if [ -d "$TPMKEY" ]; then
+  # the key folder / file belongs to the service's user alone (urban); the blobs and the file are private to it. Never
+  # through a link: the service may write that folder, and root must not change the owner of whatever a link names
+  if [ -d "$TPMKEY" ] && [ ! -L "$TPMKEY" ]; then
     chown -R urban:urban "$TPMKEY"
     chmod 700 "$TPMKEY"
     find "$TPMKEY" -type f -exec chmod 600 {} +
-  elif [ -f "$KEY" ]; then
+  elif [ -f "$KEY" ] && [ ! -L "$KEY" ]; then
     chown urban:urban "$KEY"
     chmod 600 "$KEY"
   fi

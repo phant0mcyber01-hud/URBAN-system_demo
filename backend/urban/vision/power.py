@@ -62,13 +62,14 @@ class Stats:
     """How long the detector takes per frame, for the power manager."""
 
     def __init__(self, path: Path | None):
-        self.path, self.ms, self.written = path, deque(maxlen=50), 0.0
+        self.path, self.ms, self.written = path, deque(maxlen=50), float("-inf")
 
     def add(self, ms: float):
         self.ms.append(ms)
 
     def write(self, cameras: int, fps: float, now: float | None = None):
-        now = time.time() if now is None else now
+        """At most every 5 s; `now` is a monotonic time (a step of the wall clock must not stop it for hours)."""
+        now = time.monotonic() if now is None else now
         if self.path is None or now - self.written < 5.0:
             return
         self.written = now
