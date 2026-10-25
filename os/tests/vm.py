@@ -47,6 +47,10 @@
                                         unit offered and installing only its own; then a broken release 3 in a first wave
                                         of the x86 unit: it rolls back, the rollout halts by itself, the arm64 unit is not
                                         offered its release 3 while halted (os/tests/vm_rollout.py)
+    python3 vm.py center-update         step 13: a centre with one unit: `urban-center release self-update 2` installs release 2
+                                        through the root update helper and the centre restarts into it with the same data,
+                                        the unit back by itself; a broken release 3 rolls back by itself; a halted release
+                                        is refused (os/tests/vm_center_update.py)
     python3 vm.py unitimage IMG.xz SUMS KEY UNIT SERIAL OTHER.xz
                                         a unit image as shipped: its own disk and partition GUIDs and GRUB password (against
                                         a second unit's image, OTHER.xz, and the fleet image), boot disk named by its own
@@ -3721,6 +3725,9 @@ if __name__ == "__main__":
         elif what == "rollout":  # step 12, G4: releases by architecture and the rollout that halts (os/tests/vm_rollout.py)
             import vm_rollout
             vm_rollout.rollout()
+        elif what == "center-update":  # step 13, G3: the centre updates itself (os/tests/vm_center_update.py)
+            import vm_center_update
+            vm_center_update.center_update()
         elif what in ("arm-image", "arm", "arm-update"):  # step 11: the arm64 image (os/tests/vm_arm.py)
             import vm_arm
             {"arm-image": vm_arm.image, "arm": vm_arm.unit, "arm-update": vm_arm.update}[what]()

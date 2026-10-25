@@ -7,8 +7,10 @@
 #   urban-center release add FILE --version N [--devices a,b | --wave P]   keep a signed update package for the devices
 #   urban-center release list | promote N --wave P|--all | resume N | withdraw N
 #                            (FILE may sit in /var/lib/urban/update, root's: it is staged for urban)
+#   urban-center release self-update N      this centre installs release N of its own system: the package goes to the
+#                            root update helper (urban-unit apply-update), which checks it and restarts into it
 set -eu
-[ $# -ge 1 ] || { sed -n '2,9p' "$0"; exit 2; }
+[ $# -ge 1 ] || { sed -n '2,11p' "$0"; exit 2; }
 case "$1" in provision|users|city|release) ;; *) echo "urban-center: provision, users, city or release" >&2; exit 2 ;; esac
 cd /opt/urban
 set -a; . /var/lib/urban/etc/platform.env; set +a

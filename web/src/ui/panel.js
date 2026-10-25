@@ -180,6 +180,21 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab, before
           администратором: <code>urban-center release resume ${esc(r.version)}</code> или <code>withdraw ${esc(r.version)}</code>.</small>` : ''}
       </div>`).join('')}`;
   };
+  // the centre's own system and its last self-update (urban-center release self-update N on the centre): started,
+  // on the new version, back on the old one by itself (the self-check failed), or refused by the root update helper
+  const SELF_RU = { started: (u) => `идёт: выпуск ${u.to} (был ${u.from}), центр перезапустится`,
+    updated: (u) => `обновлён с ${u.from} до ${u.to}`,
+    'rolled-back': (u) => `выпуск ${u.to} не прошёл самопроверку — центр сам вернулся на ${u.running ?? u.from}`,
+    refused: (u) => `выпуск ${u.to} отклонён помощником обновлений${u.reason ? `: ${u.reason}` : ''}` };
+  const centreBox = () => {
+    const c = S.osCentre;
+    if (!c || c.os == null) return '';
+    const u = c.self_update;
+    const last = u && SELF_RU[u.state] ? `${SELF_RU[u.state](u)} (${u.ended ?? u.at ?? ''})` : 'не было';
+    return `<div class="item"><b>Центр управления</b> — ОС ${esc(c.os)}${c.compatible ? ` ${esc(ARCH_RU[c.compatible] ?? c.compatible)}` : ''}
+      · последнее самообновление: ${esc(last)}${u?.state === 'rolled-back' ? ` ${chip('bad', 'откат')}` : u?.state === 'updated' ? ` ${chip('ok', 'норма')}` : ''}
+      <small>Обновляет администратор на центре: <code>urban-center release self-update N</code>.</small></div>`;
+  };
   const deviceSummary = () => {
     const all = Object.values(S.dev);
     if (!all.length) return empty('ожидание устройств');
@@ -205,7 +220,7 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab, before
           <div class="item"><b>3.</b> Скачать комплект и поставить его на блок:
             <code>python -m urban.edge --setup urban-edge-J-07.json --unit edge-J-07</code>, затем запустить службу блока.</div>
           ${enrolButton() || '<p class="muted">Подключать блоки может администратор.</p>'}
-          ${floorBox()}`
+          ${floorBox()}${centreBox()}`
         : empty('ожидание устройств');
     }
     const { units, districts } = split(all.map(([, d]) => d));
@@ -244,7 +259,7 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab, before
         соединения своих блоков в центр, не читая их, и отчитывается очередями своих камер.
         ${pendingUnits ? `Ждут первого подключения: ${pendingUnits}.` : ''}</p>
       ${floorBox()}
-      ${releasesBox()}
+      ${centreBox()}${releasesBox()}
       ${enrolButton()}
       ${recent.length ? `<h4>Последние события</h4>${recent.map((a) => `<div class="item"><time>${clock(a.t)}</time>
         ${chip(a.level === 'alert' ? 'bad' : 'warn', KIND_RU[a.kind] ?? esc(a.kind))} ${esc(a.device)}: ${esc(a.text)}</div>`).join('')}` : ''}

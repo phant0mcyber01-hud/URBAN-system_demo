@@ -130,6 +130,35 @@ if (!/Открыто:[^.]*QEMU/.test(ch12) || !/Открыто:[^.]*(верит|
   problems.push("the step-12 changes slide does not say what stays open (only QEMU, the centre trusts device reports, its own update manual)");
 const at12 = (team.changes12 !== undefined) && Object.keys(team).indexOf("changes12") === Object.keys(team).indexOf("changes11") + 1;
 if (!at12) problems.push("the step-12 changes slide does not follow changes11 in the team deck's order");
+// step 13: the team deck shows the centre's self-update (the one command the admin runs with the version, the refusals,
+// the same root helper and its checks, the rollback by itself with centre-rolled-back, the data kept) and what stays open
+// (only QEMU, minutes without an interface, a version that breaks after its self-check is not rolled back); the public
+// deck says plainly, in one visible sentence, that the control centre updates the same way: on a failure it returns to the
+// previous version by itself and loses nothing
+const ch13 = team.changes13 || "";
+if (!ch13) problems.push("team deck has no step-13 changes slide (changes13)");
+for (const [what, re] of [["step 13", /шаг\s*13/i], ["the command", /urban-center release self-update 2/], ["the admin names the version", /номер называет админ/],
+  ["the refusals", /refused:[^.]*halted[^.]*снят[^.]*не новее/], ["the same root helper", /помощник root/], ["its checks", /подпись URBAN[^.]*только новее[^.]*compatible/],
+  ["the rollback by itself", /самопроверка не прошла[^.]*centre-rolled-back/], ["the data kept", /база, подключения, ключи, журнал/],
+  ["the devices come back by themselves", /блоки вернутся сами/], ["before and after", /Раньше:[^.]*вручную[\s\S]{0,80}Теперь:/]])
+  if (!re.test(ch13)) problems.push(`the step-13 changes slide does not show ${what}`);
+if (!/Открыто:[^.]*QEMU/.test(ch13) || !/Открыто:[^.]*без интерфейса/.test(ch13) || !/Открыто:[^.]*после самопроверки[^.]*не откатится/.test(ch13))
+  problems.push("the step-13 changes slide does not say what stays open (only QEMU, minutes without an interface, a later break not rolled back)");
+if (!/<aside>[^<]{200,}<\/aside>/.test(readFileSync(join(ROOT, "docs/deck/project/slides/changes13.html"), "utf8")))
+  problems.push("the step-13 changes slide has no speaker note");
+const at13 = (team.changes13 !== undefined) && Object.keys(team).indexOf("changes13") === Object.keys(team).indexOf("changes12") + 1;
+if (!at13) problems.push("the step-13 changes slide does not follow changes12 in the team deck's order");
+{
+  // the visible text of the public deck (speaker notes left out): one sentence says the centre returns to the previous
+  // version by itself on a failure and loses nothing, next to the sentence on the junctions' careful updates
+  const visible = readdirSync(join(ROOT, "docs/deck-public/project/slides")).filter((f) => f.endsWith(".html"))
+    .map((f) => readFileSync(join(ROOT, "docs/deck-public/project/slides", f), "utf8").replace(/<aside>[\s\S]*?<\/aside>/g, " ")
+      .replace(/<[^>]+>/g, " ").replace(/\s+/g, " ")).join(" ");
+  const centreSame = visible.split(/[.!?]/)
+    .some((s) => /центр/i.test(s) && /так же/i.test(s) && /сам\S*\s+вернёт прежн/i.test(s) && /ничего не потеря/i.test(s));
+  if (!centreSame) problems.push("public deck does not say plainly, on a slide, that the control centre updates the same way: returns to the previous version by itself, nothing lost");
+  if (!/обновля[^.]*центр управления[^.]*прежн/i.test(pub.new || "")) problems.push("the public «new» slide's note does not say the control centre updates itself the same careful way");
+}
 // every footer of the team deck is its place in the order, out of the total
 {
   const ids = Object.keys(team);

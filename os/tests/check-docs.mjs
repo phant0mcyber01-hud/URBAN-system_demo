@@ -350,7 +350,7 @@ for (const [what, rx] of [
   ["resume and withdraw are the admin's", /Решение за администратором[\s\S]{0,200}release resume N[\s\S]{0,400}release withdraw N/],
   ["the centre trusts what the devices report", /[Цц]ентр верит тому, что сообщают устройства/],
   ["checked only in QEMU", /Проверено только в QEMU/],
-  ["the centre's own self-update stays manual", /[Сс]ам центр обновляется по-прежнему вручную/]])
+  ["the rollout does not update the centre itself", /[Рр]аздача центр не обновляет/]])
   if (!rx.test(ota)) fail(`the «Обновления из центра» section of docs/edge-os.md does not say: ${what} (step 12)`);
 // what stood before step 12 and is no longer true is gone
 for (const [rx, what] of [[/Политики поэтапной раздачи, кроме/, "«Политики поэтапной раздачи, кроме --devices … нет»"],
@@ -360,8 +360,8 @@ for (const [rx, what] of [[/Политики поэтапной раздачи, 
   [/команда прямо\s+пишет, что эту сверку не делала/, "release add without rauc (it refuses now: the compatible must be read)"]])
   if (rx.test(text)) fail(`docs/edge-os.md still says what step 12 changed: ${what}`);
 if (!text.includes("node os/tests/check-rollout.mjs")) fail("the «Проверка» list of docs/edge-os.md does not show check-rollout.mjs");
-// CONTEXT.md: the step-12 section and its history row; «Не сделано» no longer lists staged rollout, keeps the centre's
-// self-update; «Что дальше» no longer says step 12 has no code
+// CONTEXT.md: the step-12 section and its history row; «Не сделано» no longer lists staged rollout; «Что дальше» no
+// longer says step 12 has no code (the centre's self-update, open in step 12, is step 13's, below)
 const ctx12 = sectionOf(context, /^## Выпуски по платформам и волны \(шаг 12\).*$/m);
 if (!ctx12 || !/\| 24 октября \| шаг 12:/.test(context)) fail("CONTEXT.md does not record step 12 (section and history row)");
 for (const must of ["urban-edge-x86_64", "urban-edge-aarch64", "RAUC_MF_COMPATIBLE", "/etc/rauc/system.conf", "--wave",
@@ -370,8 +370,75 @@ for (const must of ["urban-edge-x86_64", "urban-edge-aarch64", "RAUC_MF_COMPATIB
   if (!ctx12.includes(must)) fail(`the «Выпуски по платформам и волны (шаг 12)» section of CONTEXT.md never says ${JSON.stringify(must)}`);
 const todo12 = /\*\*Не сделано[^\n]*(?:\n(?!\n)[^\n]*)*/.exec(context)[0];
 if (/поэтапн\S* раздач/.test(todo12)) fail("the «Не сделано» paragraph of CONTEXT.md still lists staged rollout as not done");
-if (!/обновление самого центра/.test(todo12)) fail("the «Не сделано» paragraph of CONTEXT.md does not keep the centre's own self-update");
 if (/шаг 12 \(начат, кода нет\)|кода шага 12 в репозитории нет/.test(context)) fail("CONTEXT.md still says step 12 has no code");
 if (!/волнами/.test(readme) || !readme.includes("release resume")) fail("README.md does not mention the waves and resuming a halted rollout");
+
+// step 13: the centre updates itself. The «Обновления из центра» section has its own subsection: the command, what it
+// refuses, what happens (the platform hands the package to the same root helper, the reboot, the audit), a bad version,
+// the data kept, what the operators see while the centre reboots, the honest limits, and what check-center-update.mjs
+// checks; nothing in the guide says any more that the centre is updated by hand only
+const self13 = (() => {
+  const h = /^### Самообновление центра \(шаг 13\).*$/m.exec(ota);
+  if (!h) return "";
+  const rest = ota.slice(h.index + h[0].length);
+  const next = /^###? /m.exec(rest);
+  return next ? rest.slice(0, next.index) : rest;
+})();
+if (!self13) fail("the «Обновления из центра» section of docs/edge-os.md has no subsection «Самообновление центра (шаг 13)»");
+for (const must of ["urban-center release self-update", "refused:", "urban-unit apply-update", "centre-update-started",
+  "centre-updated", "centre-rolled-back", "`centre`", "release N for <compatible>, from M", "now N", "started N, back on M",
+  "/etc/rauc/system.conf", "RAUC_MF_VERSION", "release resume N", "check-center-update.mjs", "ROLE=district,center",
+  "docs/software.md"])
+  if (!self13.includes(must)) fail(`the «Самообновление центра (шаг 13)» subsection of docs/edge-os.md never says ${JSON.stringify(must)}`);
+for (const [what, rx] of [
+  ["no automatic self-update: the admin names the version", /[Аа]втоматического самообновления нет/],
+  ["refused: a halted release", /\*\*остановлен\*\*/],
+  ["refused: a withdrawn release", /\*\*снят\*\*/],
+  ["refused: not newer than the running version", /\*\*не новее\*\* работающей/],
+  ["refused: no release N for this machine's platform", /выпуска N для платформы этой машины нет/],
+  ["the platform does not install the system itself", /платформа работает без привилегий и систему не ставит/],
+  ["the outcome is written once, after the next boot", /\*\*один раз\*\* пишет итог/],
+  ["a bad version: the boot loader brings the old slot back by itself", /[Пп]лохая версия[\s\S]{0,200}загрузчик сам возвращает прежний слот/],
+  ["the data partition is the same: database, enrolments, keys, audit", /[Рр]аздел данных обновление не трогает: база[^.]*подключения[^.]*ключи[^.]*журнал/],
+  ["the devices come back by themselves", /подключаются заново сами/],
+  ["while the centre reboots the operators have no interface", /[Пп]ока центр перезагружается[^.]*интерфейса нет/],
+  ["the units keep running on their own (lease, base plan)", /[Бб]локи в это время работают сами[^.]*базовый план/],
+  ["commands time out by design", /закрываются по сроку[\s—-]*так задумано/],
+  ["Devices shows the centre's own system and its last self-update", /«Устройства»[^.]*систем\S* самого центра[^.]*последнее\s+самообновление/],
+  ["a version that breaks after the self-check is not rolled back", /самопроверку прошла, а сломалась позже[\s\S]{0,120}сама не откатывается/],
+  ["the pilot machine updates both roles at once", /обновляет обе роли сразу/],
+  ["checked only in QEMU, without KVM", /[Пп]роверено только в QEMU\*\*, без KVM/],
+  ["the check: release 2, data the same, the unit back online, centre-updated", /выпуск 2[\s\S]{0,300}те же, что до обновления, блок сам снова на связи/],
+  ["the check: a broken 3 rolls back to 2 by itself", /сломанный выпуск 3[\s\S]{0,200}сам возвращается на версию 2/],
+  ["the check: a halted release is refused", /[Оо]становленный выпуск команда отвергает/]])
+  if (!rx.test(self13)) fail(`the «Самообновление центра (шаг 13)» subsection of docs/edge-os.md does not say: ${what}`);
+// what stood before step 13 and is no longer true is gone, everywhere it stood
+for (const [rx, what] of [[/[Сс]ам центр обновляется по-прежнему вручную/, "«Сам центр обновляется по-прежнему вручную»"],
+  [/[Сс]ам центр\s+обновляется по-прежнему вручную/, "«Сам центр обновляется по-прежнему вручную» (wrapped)"],
+  [/центр пока\s+обновляется вручную/, "«центр пока обновляется вручную»"]]) {
+  if (rx.test(text)) fail(`docs/edge-os.md still says the centre is updated by hand: ${what}`);
+  if (rx.test(context)) fail(`CONTEXT.md still says the centre is updated by hand: ${what}`);
+  if (rx.test(readme)) fail(`README.md still says the centre is updated by hand: ${what}`);
+}
+if (!text.includes("node os/tests/check-center-update.mjs")) fail("the «Проверка» list of docs/edge-os.md does not show check-center-update.mjs");
+if (!/Самообновление\s+центра \(шаг 13\) проверено только в QEMU/.test(unverified))
+  fail("the «Что не проверено» section of docs/edge-os.md does not say the centre's self-update is checked only in QEMU");
+if (!/release self-update N/.test(readme)) fail("README.md does not mention the centre's self-update (release self-update N)");
+// CONTEXT.md: the step-13 section, the state paragraph, its history row; «Не сделано» and «Что дальше» no longer list
+// the centre's self-update as missing, «Не сделано» keeps what stays open of it
+const ctx13 = sectionOf(context, /^## Самообновление центра \(шаг 13\).*$/m);
+if (!ctx13 || !/\| 24 октября \| шаг 13:/.test(context)) fail("CONTEXT.md does not record step 13 (section and history row)");
+for (const must of ["urban-center release self-update N", "refused:", "urban-unit apply-update", "centre-update-started",
+  "centre-updated", "centre-rolled-back", "check-center-update.mjs", "test_self_update.py", "/etc/rauc/system.conf",
+  "Автоматического", "только в QEMU", "обновляет обе роли сразу", "сама не откатывается", "нет интерфейса"])
+  if (!ctx13.includes(must)) fail(`the «Самообновление центра (шаг 13)» section of CONTEXT.md never says ${JSON.stringify(must)}`);
+if (!/\*\*Шаг 13 — центр обновляет себя сам\.\*\*/.test(context)) fail("the state paragraph of CONTEXT.md does not record step 13");
+const todo13 = /\*\*Не сделано[^\n]*(?:\n(?!\n)[^\n]*)*/.exec(context)[0];
+if (/обновление самого центра|самообновление центра по-прежнему ручное/.test(todo13))
+  fail("the «Не сделано» paragraph of CONTEXT.md still lists the centre's self-update as not done");
+if (!/самообновление центра \(шаг 13\) проверено только в QEMU/.test(todo13))
+  fail("the «Не сделано» paragraph of CONTEXT.md does not say the centre's self-update is checked only in QEMU");
+const next13 = sectionOf(context, /^## Что дальше.*$/m);
+if (/обновление самого центра из центра/.test(next13)) fail("the «Что дальше» list of CONTEXT.md still lists the centre's self-update");
 
 console.log("DOCS CHECK PASSED");

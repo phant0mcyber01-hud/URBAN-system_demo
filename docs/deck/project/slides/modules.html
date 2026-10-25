@@ -11,6 +11,6 @@
 <p style="font-size:32px;line-height:1.4">Ядро: Core.send (подпись, номер, срок), роли и аудит, блок → район → центр, обновления из центра.</p>
 <p style="font-size:32px;font-weight:600;color:#ff2e63">lighting написан только на ядре: traffic не тронут.</p>
 <p style="position:absolute;left:128px;bottom:64px;width:1300px;font-size:24px;color:#7f9a8b">Шаг 4: ядро City OS и второй модуль</p>
-<p style="position:absolute;right:128px;bottom:64px;width:300px;text-align:right;font-size:24px;color:#7f9a8b">19 / 22</p>
+<p style="position:absolute;right:128px;bottom:64px;width:300px;text-align:right;font-size:24px;color:#7f9a8b">20 / 23</p>
 <aside>Шаг 4. У City OS появилось ядро с интерфейсом модуля: backend/urban/modules/base.py. Светофоры стали первым модулем, traffic, без переписывания. Второй модуль, lighting, — уличное освещение — написан только на ядре: шкафы освещения подключаются по коду, как блоки, получают команды через Core.send — подписанные, с номером и сроком — и сами возвращаются к астрономическому расписанию, когда срок вышел или пропала связь. Роли, второй фактор и журнал аудита — общие. Модули включаются настройкой MODULES, список отдаёт /api/modules. Набор для разработчика начат: интерфейс и руководство docs/city-os-modules.md. Вода, тепло и экстренные службы — следующие модули.</aside>
 </section>

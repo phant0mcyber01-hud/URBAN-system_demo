@@ -46,6 +46,7 @@ from ..modules.base import Core
 from ..junctions import APPROVED, DRAFT, _junction, approved, approved_plans, load_all_junctions, load_cameras
 from ..platform import Platform
 from ..release import ReleaseStore
+from .. import self_update
 from ..sources import clock
 from ..sources.field import FieldEmulator
 from ..export import Exporter, sinks_from_env
@@ -91,6 +92,8 @@ hub = DeviceHub(Registry(c.PKI / "devices.json"), crypto.load_private((c.PKI / "
                 on_report=lambda rec, report: route_report(rec, report), clock=lambda: platform.t,
                 plans=approved_plans(junctions), gateway_cert=GATEWAY_CERT, releases=ReleaseStore(c.RELEASES),
                 audit=core_audit)
+# the centre's own self-update (urban-center release self-update N): audited when it starts and when it ended
+centre_update = self_update.Watch(hub.releases, core_audit)
 store = Store(c.DB, mode=c.SOURCE, retention_days=c.HISTORY_DAYS)
 # reachable: connected and not below the centre's version floor; a unit below it gets no lease and no approval
 platform = Platform(meta["center"], meta["radius"], junctions, send=hub.send, reachable=hub.reachable, store=store,
@@ -161,6 +164,10 @@ async def lifespan(_):
         marker.write_text(str(GATEWAY_CERT["epoch"]))
     print(f"  Gateway key: epoch {GATEWAY_CERT['epoch']}, {crypto.fingerprint(GATEWAY_CERT['gateway'])}", flush=True)
     floor = hub.floor()  # on the event loop: a floor set with the CLI while the platform was down is audited now
+    centre_os = self_update.view(hub.releases)
+    print(f"  Centre OS: {centre_os['os'] or 'not URBAN OS'}" + (f" ({centre_os['compatible']})" if centre_os['compatible'] else "")
+          + (f", last self-update {centre_os['self_update']['from']} -> {centre_os['self_update']['to']}: "
+             f"{centre_os['self_update']['state']}" if centre_os['self_update'] else ""), flush=True)
     print(f"  OS floor: {f'{floor}: older systems get no commands' if floor else 'none'} "
           f"(python -m urban.release floor)", flush=True)
     if FIELD:
@@ -174,6 +181,7 @@ async def lifespan(_):
     threading.Thread(target=source_thread, args=(field.loop, stop), daemon=True).start()
     watchdog = asyncio.create_task(edge_watchdog(stop)) if SPAWN_EDGE else None
     checker = asyncio.create_task(chain_checker())
+    watcher = asyncio.create_task(centre_update_watch())
     await startup_all(modules)
     ticker = asyncio.create_task(module_ticker())
     shipper = asyncio.create_task(exporter.loop()) if exporter.sinks else None
@@ -182,6 +190,7 @@ async def lifespan(_):
     yield
     stop.set()
     checker.cancel()
+    watcher.cancel()
     ticker.cancel()
     if shipper is not None:
         shipper.cancel()
@@ -201,6 +210,20 @@ async def chain_checker():
             print(f"AUDIT CHAIN BROKEN at record #{result['broken_at']}: the history file was changed outside the platform",
                   flush=True)
         await asyncio.sleep(CHAIN_CHECK)
+
+
+CENTRE_UPDATE_LOOK = 5  # seconds between looks at the centre's own self-update record
+
+
+async def centre_update_watch():
+    """At start and every few seconds: the centre's self-update audited once when it starts (centre-update-started) and
+    once when it ended, in the boot after the restart (centre-updated or centre-rolled-back; self_update.Watch)."""
+    while True:
+        try:
+            centre_update.step()
+        except Exception:  # a record that cannot be read or written now: the next look tries again
+            traceback.print_exc()
+        await asyncio.sleep(CENTRE_UPDATE_LOOK)
 
 
 async def module_ticker():
@@ -544,6 +567,13 @@ def devices(who: str = Depends(viewer)):
     unit or district server (DeviceHub._wg_row), null for a lighting cabinet."""
     from ..devices.health import assess
     return [{**row, "alerts": assess(row)} for row in hub.status()]
+
+
+@app.get("/api/centre-os")
+def centre_os(who: str = Depends(viewer)):
+    """The centre's own system for Devices: {"os", "compatible", "self_update": its last self-update (state started,
+    updated, rolled-back or refused; from, to, when, by whom) or null}."""
+    return self_update.view(hub.releases)
 
 
 # the version floor: GET /api/os-floor (anyone signed in), POST /api/os-floor {"floor": N | null} (admin, audited)

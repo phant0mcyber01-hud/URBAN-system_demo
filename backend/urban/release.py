@@ -8,6 +8,7 @@
     python -m urban.release floor 5          the minimum system version the centre commands
     python -m urban.release floor            show it
     python -m urban.release floor --clear    no minimum: every system version is commanded again
+    python -m urban.release self-update 3    this control centre installs release 3 of its own system (self_update.py)
 
 A release is a RAUC bundle (urban-edge-<N>.raucb) signed with URBAN's build key. `add` asks RAUC on this machine about
 it (its signature against the build keyring, its version, and the system it is for: its compatible, urban-edge-x86_64
@@ -413,6 +414,11 @@ def main(argv: list[str] | None = None):
     fl = sub.add_parser("floor", help="the minimum system version the centre commands: show it, set it, or --clear it")
     fl.add_argument("version", type=int, nargs="?", help="devices that do not report this version or newer get no commands")
     fl.add_argument("--clear", action="store_true", help="no minimum: devices of every system version get commands again")
+    su = sub.add_parser("self-update", help="this control centre installs release N of its own system through the "
+                                            "root update helper and restarts into it (named by the admin, never automatic)")
+    su.add_argument("version", type=int)
+    su.add_argument("--wait", type=int, default=900, help="seconds to wait for the root update helper's first answer "
+                                                          "(default 900; 0: do not wait)")
     args = ap.parse_args(argv)
 
     store = ReleaseStore(Path(args.dir) if args.dir else None)
@@ -460,6 +466,27 @@ def main(argv: list[str] | None = None):
                           f"devices below the floor cannot be updated from the centre")
             else:
                 print(floor_text(store.floor_record()))
+        elif args.cmd == "self-update":
+            from . import self_update
+            rec, before = self_update.start(store, args.version, by=_cli_actor())
+            print(f"self-update to release {rec['to']} for {rec['compatible']} (from {rec['from']}) handed to the root "
+                  f"update helper: it checks URBAN's signature and that {rec['to']} is newer, installs it into the other "
+                  f"slot and restarts the centre; the platform audits centre-update-started, and after the restart "
+                  f"centre-updated or centre-rolled-back", flush=True)
+            answer = self_update.wait_answer(rec["to"], before, args.wait) if args.wait > 0 else None
+            if answer is not None:  # what the helper said goes into the record: the platform may not have seen it
+                if answer["state"] == "refused":
+                    self_update.note(store, rec, refused=answer["reason"] or "-")
+                else:
+                    self_update.note(store, rec, reached=True)
+            if answer is not None and answer["state"] == "refused":
+                raise ReleaseError(f"the root update helper refused release {rec['to']}: {answer['reason'] or '-'}")
+            if answer is not None:
+                print(f"the root update helper is installing release {rec['to']} into the other slot; the centre "
+                      f"restarts when it is done")
+            elif args.wait > 0:
+                print(f"the root update helper has not answered within {args.wait} s; it may still be checking the "
+                      f"package (urban-unit status, Devices in the interface)")
         else:
             rows = store.releases()
             for r in sorted(rows, key=lambda r: (r["version"], compatible_of(r))):
@@ -477,4 +504,7 @@ def main(argv: list[str] | None = None):
 
 
 if __name__ == "__main__":
-    main()
+    # run urban.release's own main, not this __main__ copy's: self_update raises urban.release.ReleaseError, which
+    # __main__'s `except ReleaseError` (a different class of the same name) would let through as a traceback
+    from urban.release import main as _main
+    _main()

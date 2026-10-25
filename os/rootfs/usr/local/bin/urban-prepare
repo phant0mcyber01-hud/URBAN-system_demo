@@ -21,6 +21,9 @@ install -d -m 755 "$D" "$D/etc" "$D/rauc"
 install -d -m 750 -o urban -g urban "$D/etc/pki" "$D/etc/pki/edge"
 install -d -m 700 "$D/ssh"
 install -d -m 755 -o root -g root /run/urban  # root's live state (tmpfiles.d/urban.conf says the same)
+# this boot's id where the platform can read it (its sandbox hides /proc/sys): the centre's self-update tells the boot
+# that handed a release over from the boots after it (backend/urban/self_update.py)
+cat /proc/sys/kernel/random/boot_id > /run/urban/boot-id; chmod 644 /run/urban/boot-id
 install -d -m 755 -o urban-vision -g urban /run/urban/q  # the only place vision writes: its queue lengths
 install -d -m 700 "$D/update"  # update bundles are staged here: the root is read-only, /tmp is small
 [ -f "$D/ssh/ssh_host_ed25519_key" ] || ssh-keygen -q -t ed25519 -N '' -f "$D/ssh/ssh_host_ed25519_key" -C urban-edge
@@ -131,7 +134,7 @@ if [ "$MODULE" = lighting ]; then install -d -m 755 -o urban -g urban /run/urban
 # downloads the package here and writes request.json; urban-update.service (root) takes the package out of it and
 # never looks at it before. Nothing else of urban's reaches it. A package staged by an install that never finished
 # is removed.
-case ",$ROLE," in *,unit,*|*,district,*)
+case ",$ROLE," in *,unit,*|*,district,*|*,center,*)  # the centre too: its own self-update (urban-center release self-update)
   install -d -m 700 -o urban -g urban "$D/update-inbox"
   rm -f "$D"/update/ota-*.raucb ;;
 esac
@@ -288,7 +291,7 @@ elif [ "$ROLE" = unit ] && [ -f "$D/etc/edge-$UNIT.env" ]; then
   echo "URBAN-UNIT starting urban-edge@$UNIT${VISION:+ (light: no vision)}"
 fi
 # the root helper for those updates waits for the client's request (a path unit: it cannot be "enabled" either)
-case ",$ROLE," in *,unit,*|*,district,*) systemctl start --no-block urban-update.path ;; esac
+case ",$ROLE," in *,unit,*|*,district,*|*,center,*) systemctl start --no-block urban-update.path ;; esac
 # the tunnel's root helper: at once when the service has put a message in the inbox, and every 30 s (the clock, the
 # handshake, a firewall reload, a silent peer)
 if [ -n "$TUNNEL" ]; then

@@ -299,11 +299,13 @@ async function loadHistory() {
 }
 
 // the centre's minimum OS version (the version floor), shown in the Devices tab; the admin sets and clears it there;
-// and the OS releases with their rollout (a halted one with the device and the reason), added on the centre's CLI
+// and the OS releases with their rollout (a halted one with the device and the reason), added on the centre's CLI;
+// and the centre's own system with its last self-update (urban-center release self-update N)
 async function loadFloor() {
   if (!S.user) return;
   try {
-    [S.osFloor, S.osReleases] = await Promise.all([api.get('/api/os-floor'), api.get('/api/releases')]);
+    [S.osFloor, S.osReleases, S.osCentre] = await Promise.all([api.get('/api/os-floor'), api.get('/api/releases'),
+      api.get('/api/centre-os')]);
     panel.render();
   } catch (e) { if (e.message === 'нужно войти заново') signedOut(); }
 }
