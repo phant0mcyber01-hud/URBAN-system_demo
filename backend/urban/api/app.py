@@ -548,6 +548,8 @@ def devices(who: str = Depends(viewer)):
 
 # the version floor: GET /api/os-floor (anyone signed in), POST /api/os-floor {"floor": N | null} (admin, audited)
 app.include_router(hub.floor_routes(viewer, admin))
+# the OS releases by system and their rollout (wave, a halt with the device and the reason): GET /api/releases
+app.include_router(hub.release_routes(viewer))
 # the tunnel between a unit and its district (admin, audited): POST /api/devices/{id}/wg-accept confirms a changed
 # tunnel key, POST /api/devices/{id}/wg-mode {"mode": "allow" | "only"} opens or closes a district's relay port
 app.include_router(hub.wg_routes(viewer, admin))

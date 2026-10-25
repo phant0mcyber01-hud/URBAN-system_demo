@@ -11,6 +11,12 @@ The rule is DeviceHub.floor_verdict. It is a mitigation for a unit put back on a
 release by someone with its disk in hand; it relies on what the device reports, so it does not stop a device that
 lies about its version (that needs measured boot, a later step).
 
+OS updates (urban/release.py): a device is offered only releases for the system it reports in its health (`compatible`,
+urban-edge-x86_64 or urban-edge-aarch64; none reported: x86), and only while it is in the release's current wave. A
+failure or a rollback that a device of the wave reports halts the release by itself (DeviceHub._watch_rollout): nothing
+of it is offered or served any more, the halt is audited as rollout-halted with the device and the reason, and
+GET /api/releases shows it, until the admin resumes or withdraws it on the command line.
+
 The hub also runs the centre's end of the WireGuard tunnel between each junction unit and its district server
 (urban/net/wireguard.py, docs/wireguard-design.md). A unit or district reports its tunnel public key in its health;
 the first one is accepted by itself, a changed one waits for an admin (POST /api/devices/{id}/wg-accept). The hub
@@ -34,7 +40,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, StrictInt
 
 from ..net import wireguard
-from ..release import ReleaseError
+from ..release import DEFAULT_COMPATIBLE, ReleaseError, compatible_of, in_wave
 from . import crypto
 from .enrolment import has_port
 from .health import clean
@@ -47,6 +53,11 @@ FLOOR_KINDS = ("unit", "district", "lighting")  # the devices that run URBAN OS:
 WG_KINDS = (UNIT, DISTRICT)  # the records with a tunnel; a lighting cabinet and the centre have none
 WG_PLAN = wireguard.Plan.of()  # 10.77.0.0/16: the district is 10.77.<number>.1, its units .2 to .254
 WG_RESEND, WG_RESEND_MAX = 30, 960  # seconds: a tunnel message not applied goes again, the pause doubling up to 960
+# what halts a rollout (DeviceHub._watch_rollout): a refusal by the device's update helper (any but "restart pending":
+# that one is the helper waiting for the restart into the release it installed), and a download whose package is not
+# the one the signed offer describes. A download cut off or a centre out of reach is retried with the next offer.
+HELPER_WAITING = "restart pending"
+PACKAGE_FAULTS = ("the package's hash differs", "the package is larger than offered", "the package's length differs")
 
 
 def wg_endpoint(address) -> str | None:
@@ -103,8 +114,15 @@ class DeviceHub:
         self._refused: set[str] = set()   # devices whose refusal below the floor is already audited this session
         self._floor_audited: str | None = None  # id of the floor record last audited (also kept in the releases folder)
         self._floor_marker_read = False
-        self.links: dict[str, dict] = {}  # download token -> {"device", "version", "until"}
-        self._offered: dict[str, tuple[int, float]] = {}  # device id -> (release version, wall time of the offer)
+        self.links: dict[str, dict] = {}  # download token -> {"device", "version", "compatible", "until"}
+        # device id -> (compatible, release version, wall time of the offer); (device, compatible, version) offers audited
+        self._offered: dict[str, tuple[str, int, float]] = {}
+        self._offers_audited: set[tuple[str, str, int]] = set()
+        # the rollout watch (_watch_rollout), in memory: device -> (compatible, version, session) of the release it last
+        # reported installing, installed or running, and the session that said so; device -> the failure (compatible,
+        # version, state, reason) its reports showed last, judged once however often it is repeated
+        self._reached: dict[str, tuple[str, int, int]] = {}
+        self._failure_seen: dict[str, tuple] = {}
         self.plans = plans or {}
         self.gateway_cert = gateway_cert
         self.registry, self.key, self.on_report, self.clock, self.wall = registry, gateway_key, on_report, clock, wall
@@ -311,13 +329,19 @@ class DeviceHub:
         return router
 
     # ---- over-the-air updates: the offer goes down the signed channel, the package comes over the same listener
+    def compatible(self, device: str) -> str:
+        """The system a device runs, as its current (or last) report says (RAUC's compatible): only releases for it
+        are offered to it. A device that reports none (a system before step 12) runs x86."""
+        return self.seen.get(device, {}).get("health", {}).get("compatible") or DEFAULT_COMPATIBLE
+
     def pending_release(self, device: str, rec: dict) -> dict | None:
         """The release this device should be offered now, or None: it must be a unit, a district server or a
-        lighting cabinet's unit that reported a system version (an integer) older than the newest release that is not withdrawn and targets it."""
+        lighting cabinet's unit that reported a system version (an integer) older than the newest release for its own
+        compatible that is not withdrawn or halted and whose current wave includes it (ReleaseStore.newest_for)."""
         if self.releases is None or kind_of(rec) not in ("unit", "district", "lighting"):
             return None
         have = self.seen.get(device, {}).get("health", {}).get("os")
-        rel = self.releases.newest_for(device)
+        rel = self.releases.newest_for(device, self.compatible(device))
         if rel is None or not isinstance(have, int) or isinstance(have, bool) or have >= rel["version"]:
             return None
         if not self.releases.path(rel).is_file():
@@ -325,23 +349,32 @@ class DeviceHub:
         return rel
 
     def offer_update(self, device: str, rel: dict) -> dict | None:
-        """Mint a download link bound to this device and release and build the signed offer for it."""
-        now = self.wall()
+        """Mint a download link bound to this device and release and build the signed offer for it. The first offer
+        of a release to a device in this process is audited (update-offered: which package went to which device)."""
+        now, compatible = self.wall(), compatible_of(rel)
         self.links = {t: v for t, v in self.links.items() if v["until"] > now and v["device"] != device}
         token = secrets.token_hex(32)
-        self.links[token] = {"device": device, "version": rel["version"], "until": now + LINK_TTL}
-        self._offered[device] = (rel["version"], now)
+        self.links[token] = {"device": device, "version": rel["version"], "compatible": compatible, "until": now + LINK_TTL}
+        self._offered[device] = (compatible, rel["version"], now)
+        if (device, compatible, rel["version"]) not in self._offers_audited:
+            self._offers_audited.add((device, compatible, rel["version"]))
+            self.audit("update-offered", device, f"release {rel['version']} for {compatible}", actor="platform")
         return {"update": {"version": rel["version"], "sha256": rel["sha256"], "size": rel["size"],
                            "path": f"/update/{token}"}}
 
     async def _offer(self, device: str, rec: dict):
-        """Offer the device the release it is due, unless the same one went out less than REOFFER ago."""
+        """Offer the device the release it is due, unless the same one went out less than REOFFER ago, or the device
+        installed that release before this session and has not reported in this session yet (its first report says
+        whether it runs it or rolled back: _watch_rollout)."""
         try:
             rel = self.pending_release(device, rec)
             if rel is None:
                 return
-            last = self._offered.get(device)
-            if last is not None and last[0] == rel["version"] and 0 <= self.wall() - last[1] < REOFFER:
+            last, key = self._offered.get(device), (compatible_of(rel), rel["version"])
+            if last is not None and last[:2] == key and 0 <= self.wall() - last[2] < REOFFER:
+                return
+            reached = self._reached.get(device)
+            if reached is not None and reached[:2] == key and reached[2] < self.connects.get(device, 0):
                 return
             body = self.offer_update(device, rel)
             text = json.dumps({"type": "cmd", **self.envelope(device, body)}, ensure_ascii=False)
@@ -352,7 +385,8 @@ class DeviceHub:
 
     def update_file(self, token: str) -> tuple[Path, str] | None:
         """The package a download link stands for: valid for one device and one release for LINK_TTL, and only
-        while that release is still offered to that device. (path, file name), or None."""
+        while that release is still offered to that device (not withdrawn, not halted, the device in its wave).
+        (path, file name), or None."""
         link = self.links.get(token)
         if link is None or self.releases is None:
             return None
@@ -360,12 +394,93 @@ class DeviceHub:
             self.links.pop(token, None)
             return None
         rec = self.registry.devices.get(link["device"])
-        rel = self.releases.get(link["version"])
-        if (rec is None or rec["status"] != ACTIVE or rel is None or rel.get("withdrawn")
-                or (rel.get("devices") is not None and link["device"] not in rel["devices"])):
+        rel = self.releases.get(link["version"], link["compatible"])
+        if (rec is None or rec["status"] != ACTIVE or rel is None or rel.get("withdrawn") or rel.get("halted")
+                or not in_wave(rel, link["device"])):
             return None
         path = self.releases.path(rel)
         return (path, path.name) if path.is_file() else None
+
+    # ---- the rollout: a release that fails or rolls back on a device of its wave halts by itself
+    def _watch_rollout(self, device: str):
+        """After every report of a device (heard() first): does it say that a release failed or rolled back on it?
+        - a failure: its update state is `refused` by the helper (any reason but HELPER_WAITING) or `failed` with a
+          package that is not the one offered (PACKAGE_FAULTS), for a release of its compatible that is still offered and
+          whose wave includes it. The same failure repeated in later reports is judged once;
+        - a rollback: it reported the release `installing` or `installed`, or ran it (os at or above it), and a later
+          session reports an older system and no installation of it under way (the restart into the new slot failed
+          its self-check and the machine went back, or the new system came up and fell back afterwards).
+        Either halts every package of that version still offered (ReleaseStore.halt), audited once as rollout-halted
+        with the device and the reason; then nothing of it is offered or served until the admin resumes it. What the
+        hub remembers for this lives in memory: after a restart of the platform a rollback is caught on the next try."""
+        if self.releases is None:
+            return
+        health = self.seen.get(device, {}).get("health", {})
+        compatible, session = self.compatible(device), self.connects.get(device, 0)
+        have, update = health.get("os"), health.get("update")
+        state = update["state"] if update else None
+        failure = (compatible, update["version"], state, update["reason"]) if state in ("refused", "failed") else None
+        if failure != self._failure_seen.get(device):
+            if failure is None:
+                self._failure_seen.pop(device, None)
+            else:
+                self._failure_seen[device] = failure
+                halting = (update["reason"] != HELPER_WAITING if state == "refused"
+                           else update["reason"].startswith(PACKAGE_FAULTS))
+                rel = self.releases.get(update["version"], compatible)
+                if halting and rel is not None and not rel.get("withdrawn") and in_wave(rel, device):
+                    what = "refused by the device" if state == "refused" else "download failed"
+                    self._halt(rel["version"], device, compatible, f"{what}: {update['reason'] or '-'}")
+        reached = self._reached.get(device)
+        if state in ("installing", "installed"):
+            self._reached[device] = (compatible, update["version"], session)
+        elif have is None or reached is None or reached[0] != compatible:
+            return
+        elif have >= reached[1]:
+            self._reached[device] = (compatible, reached[1], session)  # it runs it: a later relapse is a rollback too
+        elif session > reached[2]:
+            del self._reached[device]
+            rel = self.releases.get(reached[1], compatible)
+            if rel is not None and not rel.get("withdrawn"):
+                self._halt(reached[1], device, compatible, f"rolled back: installed {reached[1]}, runs {have}")
+
+    def _halt(self, version: int, device: str, compatible: str, reason: str):
+        try:
+            record = self.releases.halt(version, device, compatible, reason)
+        except OSError:  # the releases folder could not be written: say so, the next report tries again
+            print(f"hub: could not halt release {version} after {device}: {reason}", flush=True)
+            traceback.print_exc()
+            return
+        if record is not None:
+            self.audit("rollout-halted", f"release-{version}", f"{device} ({compatible}): {reason}", actor="platform")
+
+    def releases_view(self) -> list[dict]:
+        """The releases for the interface (GET /api/releases): each package with its system, its wave, whether it is
+        halted (by which device, why, when), the active devices of its system in its wave now and those that run it."""
+        if self.releases is None:
+            return []
+        self._sync()
+        fleet = [(d, self.compatible(d)) for d, r in self.registry.devices.items()
+                 if r.get("status") == ACTIVE and kind_of(r) in FLOOR_KINDS]
+        out = []
+        for r in sorted(self.releases.releases(), key=lambda r: (r["version"], compatible_of(r))):
+            compatible = compatible_of(r)
+            wave = sorted(d for d, cp in fleet if cp == compatible and in_wave(r, d))
+            out.append({"version": r["version"], "compatible": compatible, "size": r.get("size"),
+                        "sha256": r.get("sha256"), "added": r.get("added"), "withdrawn": bool(r.get("withdrawn")),
+                        "devices": r.get("devices"), "wave": r.get("wave"), "halted": r.get("halted"),
+                        "in_wave": wave, "running": [d for d in wave if (self.proven.get(d) or 0) >= r["version"]]})
+        return out
+
+    def release_routes(self, viewer) -> APIRouter:
+        """GET /api/releases for everyone signed in: the releases and their rollout (releases_view). Releases are added,
+        promoted, resumed and withdrawn on the centre's command line (urban-center release)."""
+        router = APIRouter()
+
+        @router.get("/api/releases")
+        async def get_releases(who: str = Depends(viewer)):
+            return self.releases_view()
+        return router
 
     def update_routes(self) -> APIRouter:
         """GET /update/{token} for the device listener: the package a download link stands for. Whatever is wrong
@@ -668,6 +783,7 @@ class DeviceHub:
                 report = json.loads(await ws.receive_text())
                 if isinstance(report, dict) and report.get("type") == "report":
                     self.heard(device, report.get("health"))
+                    self._watch_rollout(device)
                     self._wg_report(device, ws)
                     if isinstance(report.get("epoch"), int) and not isinstance(report["epoch"], bool):
                         self.epochs[device] = report["epoch"]  # the gateway key epoch the unit obeys now
@@ -751,6 +867,8 @@ class DeviceHub:
         self.seen.pop(device, None)
         self.proven.pop(device, None)
         self._refused.discard(device)
+        self._reached.pop(device, None)
+        self._failure_seen.pop(device, None)
         self._wg_session(device)
         self._wg_built.pop(device, None)
         return rec
@@ -765,8 +883,8 @@ class DeviceHub:
 
     def status(self) -> list[dict]:
         """One row per device; below_floor: it gets no commands now (floor_verdict), floor: the minimum or None,
-        os_proven: the system version it reported in its current (or last) session; wg: its tunnel (_wg_row), None
-        for a lighting cabinet."""
+        os_proven: the system version it reported in its current (or last) session; compatible: the system it runs
+        (what it reported, x86 if it never did: compatible()); wg: its tunnel (_wg_row), None for a lighting cabinet."""
         self._sync()
         now = time.time()
         floor = self.floor()
@@ -784,7 +902,8 @@ class DeviceHub:
                         "age": round(now - seen["at"]) if "at" in seen else None,
                         "health": seen.get("health", {}),
                         "floor": floor, "below_floor": self._verdict(rec["id"], rec, floor) is not None,
-                        "os_proven": self.proven.get(rec["id"]), "wg": self._wg_row(rec)})
+                        "os_proven": self.proven.get(rec["id"]), "compatible": self.compatible(rec["id"]),
+                        "wg": self._wg_row(rec)})
         return out
 
 

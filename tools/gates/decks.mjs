@@ -115,6 +115,34 @@ const boards = Object.values(pub).flatMap((t) => t.split(/[.!?]/))
   .some((s) => /(маленьк|небольш)/i.test(s) && /(дешёв|недорог)/i.test(s) && /плат/i.test(s) && /теперь/i.test(s));
 if (!boards) problems.push("public deck does not say plainly that the system now also runs on small, cheap boards");
 
+// step 12: the team deck shows releases by platform and the waves (the compatible from the signed package, --devices /
+// --wave, promote, the halt that stops a rollout by itself, resume / withdraw) and what stays open (only QEMU, the centre
+// trusts what devices report, its own update is manual); the public deck says plainly, in one sentence, that a bad update
+// stops itself before it reaches the whole city
+const ch12 = team.changes12 || "";
+if (!ch12) problems.push("team deck has no step-12 changes slide (changes12)");
+for (const [what, re] of [["step 12", /шаг\s*12/i], ["releases by platform", /платформ/i], ["the compatible from the signed package", /compatible[^.]*пакет/],
+  ["both platforms", /x86_64[^.]*aarch64/], ["the waves", /волн/i], ["--devices / --wave", /--devices[^.]*--wave/], ["promote", /promote/],
+  ["the halt (rollout-halted)", /rollout-halted/], ["it stops by itself on a failure or a rollback", /(отказ|неудач)[^.]*откат[^.]*останов|сам\S* стоп/i],
+  ["resume / withdraw", /resume[^.]*withdraw/]])
+  if (!re.test(ch12)) problems.push(`the step-12 changes slide does not show ${what}`);
+if (!/Открыто:[^.]*QEMU/.test(ch12) || !/Открыто:[^.]*(верит|отчёт)/.test(ch12) || !/Открыто:[^.]*вручную/.test(ch12))
+  problems.push("the step-12 changes slide does not say what stays open (only QEMU, the centre trusts device reports, its own update manual)");
+const at12 = (team.changes12 !== undefined) && Object.keys(team).indexOf("changes12") === Object.keys(team).indexOf("changes11") + 1;
+if (!at12) problems.push("the step-12 changes slide does not follow changes11 in the team deck's order");
+// every footer of the team deck is its place in the order, out of the total
+{
+  const ids = Object.keys(team);
+  for (const [i, id] of ids.entries()) {
+    const html = readFileSync(join(ROOT, "docs/deck/project/slides", `${id}.html`), "utf8");
+    const want = `${String(i + 1).padStart(2, "0")} / ${ids.length}`;
+    if (!html.includes(`>${want}</p>`)) problems.push(`team deck: ${id} does not carry the footer ${want}`);
+  }
+}
+const badStops = Object.values(pub).flatMap((t) => t.split(/[.!?]/))
+  .some((s) => /(обновлени|верси)/i.test(s) && /останов\S*\s+сам/i.test(s) && /(весь|всего|всём|весь) город/i.test(s));
+if (!badStops) problems.push("public deck does not say plainly that a bad update stops itself before it reaches the whole city");
+
 if (problems.length) {
   for (const p of problems) console.log(`FAIL ${p}`);
   process.exit(1);

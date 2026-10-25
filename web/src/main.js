@@ -298,11 +298,12 @@ async function loadHistory() {
   } catch (e) { if (e.message === 'нужно войти заново') signedOut(); }
 }
 
-// the centre's minimum OS version (the version floor), shown in the Devices tab; the admin sets and clears it there
+// the centre's minimum OS version (the version floor), shown in the Devices tab; the admin sets and clears it there;
+// and the OS releases with their rollout (a halted one with the device and the reason), added on the centre's CLI
 async function loadFloor() {
   if (!S.user) return;
   try {
-    S.osFloor = await api.get('/api/os-floor');
+    [S.osFloor, S.osReleases] = await Promise.all([api.get('/api/os-floor'), api.get('/api/releases')]);
     panel.render();
   } catch (e) { if (e.message === 'нужно войти заново') signedOut(); }
 }

@@ -6,6 +6,7 @@ something to plan around, `alert` means the unit cannot be trusted with commands
 """
 import ipaddress
 import math
+import re
 
 from ..net import wireguard
 
@@ -19,6 +20,7 @@ BLOCKING = {"door", "controller"}    # alerts that stop commands at that junctio
 
 UPDATE_STATES = {"downloading", "ready", "failed", "installing", "refused", "installed"}
 REASON_MAX = 120                     # longest reason an update state may carry
+COMPATIBLE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")  # the system a device runs, as its RAUC names it
 
 # the tunnel to the district, as the root helper on the device last wrote it (/run/urban/wg.json, docs/wireguard-design.md)
 WG_STATES = {"none", "clock", "up", "down"}
@@ -55,6 +57,9 @@ def clean(health) -> dict:
     os_version = health.get("os")  # the OS release the device runs (integer, /etc/urban-os-release)
     if isinstance(os_version, int) and not isinstance(os_version, bool) and 0 <= os_version < 10 ** 9:
         out["os"] = os_version
+    compatible = health.get("compatible")  # the system it runs (/etc/rauc/system.conf): which releases fit it
+    if isinstance(compatible, str) and COMPATIBLE.fullmatch(compatible):
+        out["compatible"] = compatible
     update = health.get("update")  # where its over-the-air update stands
     if isinstance(update, dict) and update.get("state") in UPDATE_STATES:
         v, reason = update.get("version"), update.get("reason")

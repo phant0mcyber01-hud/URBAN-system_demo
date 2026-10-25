@@ -10,6 +10,7 @@ It writes its own state to a status file, which is reported next to ours.
 
 Paths (environment overrides are for tests):
     /etc/urban-os-release          URBAN_OS_RELEASE   VERSION=<n> of the running system
+    /etc/rauc/system.conf          URBAN_RAUC_CONF    compatible=<the system>: which releases fit this device
     /var/lib/urban/update-inbox    URBAN_UPDATE_INBOX urban-<n>.raucb[.part] and request.json
     /run/urban/update.json         URBAN_UPDATE_STATUS state of the root helper
 """
@@ -32,6 +33,7 @@ HELPER_STATES = ("installing", "installed", "refused")
 _READ = object()        # Updater(version=...): read the running version from the OS release file
 _PATH = re.compile(r"/update/[0-9a-f]{16,128}")
 _HEX = re.compile(r"[0-9a-f]{64}")
+_COMPATIBLE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 
 
 def os_version(path: Path | str | None = None) -> int | None:
@@ -43,6 +45,26 @@ def os_version(path: Path | str | None = None) -> int | None:
             if eq and key == "VERSION":
                 text = value.strip().strip("'\"")
                 return int(text) if text.isascii() and text.isdigit() else None
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def os_compatible(path: Path | str | None = None) -> str | None:
+    """The system this device runs as its RAUC names it (urban-edge-x86_64, urban-edge-aarch64): compatible= in the
+    [system] section of /etc/rauc/system.conf. The centre offers it only releases made for that; None if unknown."""
+    path = Path(path or os.getenv("URBAN_RAUC_CONF", "/etc/rauc/system.conf"))
+    section = None
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("[") and line.endswith("]"):
+                section = line[1:-1].strip()
+            elif section == "system":
+                key, eq, value = line.partition("=")
+                if eq and key.strip() == "compatible":
+                    value = value.strip()
+                    return value if _COMPATIBLE.fullmatch(value) else None
     except (OSError, ValueError):
         pass
     return None
@@ -114,13 +136,16 @@ def _reason(text: str) -> str:
 
 
 class Updater:
-    def __init__(self, connect, version=_READ, inbox: Path | None = None, status: Path | None = None):
+    def __init__(self, connect, version=_READ, inbox: Path | None = None, status: Path | None = None,
+                 compatible=_READ):
         """connect(): a fresh http.client connection to the centre's device listener, or None while there is no path
         to it (that download fails and the offer is taken again later);
         version: the running system's version (default: read from the OS release file; None: unknown, so
-        every offer is ignored); inbox, status: where the package goes and where the root helper reports."""
+        every offer is ignored); inbox, status: where the package goes and where the root helper reports;
+        compatible: the system it runs (default: read from RAUC's system.conf; None: not reported)."""
         self.connect = connect
         self.version = os_version() if version is _READ else version
+        self.compatible = os_compatible() if compatible is _READ else compatible
         self.inbox = inbox
         self.status = status
         self.state: dict | None = None  # our own: {"state", "version", "reason"}
@@ -252,10 +277,12 @@ class Updater:
         return self.state
 
     def health(self) -> dict:
-        """The fields a unit or district puts into its health report: os and update."""
+        """The fields a unit or district puts into its health report: os, compatible and update."""
         out = {}
         if self.version is not None:
             out["os"] = self.version
+        if self.compatible is not None:
+            out["compatible"] = self.compatible
         state = self.update_state()
         if state is not None:
             out["update"] = state

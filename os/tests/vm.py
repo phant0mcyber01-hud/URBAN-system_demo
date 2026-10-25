@@ -43,6 +43,10 @@
                                         loader refused; the x86 bundle refused by its RAUC
     python3 vm.py arm-update            step 11: on that unit a signed arm64 update into the other slot, then a broken one
                                         that rolls back by itself
+    python3 vm.py rollout               step 12: a centre, an x86 unit and an arm64 unit: release 2 for each platform, each
+                                        unit offered and installing only its own; then a broken release 3 in a first wave
+                                        of the x86 unit: it rolls back, the rollout halts by itself, the arm64 unit is not
+                                        offered its release 3 while halted (os/tests/vm_rollout.py)
     python3 vm.py unitimage IMG.xz SUMS KEY UNIT SERIAL OTHER.xz
                                         a unit image as shipped: its own disk and partition GUIDs and GRUB password (against
                                         a second unit's image, OTHER.xz, and the fleet image), boot disk named by its own
@@ -487,7 +491,39 @@ def image():
     signed_chain(disk, parts, esp)
     import vm_pcr7  # step 7: the recovery escrow's public key in the image, its private key nowhere (os/tests/vm_pcr7.py)
     vm_pcr7.escrow_in_image(disk, parts, esp)
+    compatible_reported(f"{OUT}/build/rootfs-1.img", "urban-edge-x86_64")
+    # the arm64 image, when it was built from the same inputs (check-image.mjs arm64 and check-rollout.mjs build it): its
+    # own report; otherwise its system is the one of an earlier build and is not judged here
+    stamps = [sh(f"cat {OUT}/{name}", check=False).stdout.strip() for name in ("stamp-1", "stamp-arm64-1")]
+    if stamps[1] and stamps[1] == stamps[0]:
+        compatible_reported(f"{OUT}/build/rootfs-arm64-1.img", "urban-edge-aarch64")
+    else:
+        print("   compatible: the arm64 image is not built from these inputs here; its report is checked where it is "
+              "built (check-rollout.mjs: the arm64 unit's health at the centre)", flush=True)
     print("IMAGE LAYOUT VERIFIED", flush=True)
+
+
+def compatible_reported(slot, want):
+    """Step 12: a unit or district reports the system it runs in its health, so that the centre offers it only releases
+    for that system. The image's own update client (urban/edge/update.py in the slot) reads `want` from the image's own
+    etc/rauc/system.conf and puts it into the health it reports, next to the version."""
+    d = "/tmp/sq-compatible"
+    shutil.rmtree(d, ignore_errors=True)
+    sh(["unsquashfs", "-q", "-n", "-d", d, slot, "etc/rauc/system.conf", "etc/urban-os-release",
+        "opt/urban/backend/urban/edge/update.py"])
+    code = ("import importlib.util, json, sys\n"
+            "spec = importlib.util.spec_from_file_location('update', sys.argv[1])\n"
+            "m = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(m)\n"
+            "print(json.dumps(m.Updater(lambda: None, status=m.Path('/nonexistent')).health()))\n")
+    r = sh(["python3", "-I", "-c", code, f"{d}/opt/urban/backend/urban/edge/update.py"],
+           env={**os.environ, "URBAN_RAUC_CONF": f"{d}/etc/rauc/system.conf", "URBAN_OS_RELEASE": f"{d}/etc/urban-os-release"})
+    said = json.loads(r.stdout.strip().splitlines()[-1])
+    if said.get("compatible") != want or said.get("os") != 1:
+        raise Fail(f"the image's update client reports {said} in its health, not os 1 and compatible {want}")
+    shutil.rmtree(d, ignore_errors=True)
+    print(f"   compatible: {slot.rsplit('/', 1)[-1]} reports {json.dumps(said, sort_keys=True)} in its health "
+          f"(read by its own update client from its etc/rauc/system.conf)", flush=True)
 
 
 def disk_layout(disk, loader):
@@ -3682,6 +3718,9 @@ if __name__ == "__main__":
         elif what == "wireguard":  # step 8, G5: the tunnel between the unit and its district (os/tests/vm_wireguard.py)
             import vm_wireguard
             vm_wireguard.wireguard()
+        elif what == "rollout":  # step 12, G4: releases by architecture and the rollout that halts (os/tests/vm_rollout.py)
+            import vm_rollout
+            vm_rollout.rollout()
         elif what in ("arm-image", "arm", "arm-update"):  # step 11: the arm64 image (os/tests/vm_arm.py)
             import vm_arm
             {"arm-image": vm_arm.image, "arm": vm_arm.unit, "arm-update": vm_arm.update}[what]()

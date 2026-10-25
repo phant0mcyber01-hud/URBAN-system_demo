@@ -4,10 +4,11 @@
 #   urban-center provision list | enroll-district ... | enroll ... | assign ... | kit <device>
 #   urban-center users password admin        a new password for an account
 #   urban-center city create                 load the city map (stop the service first: systemctl stop urban-platform)
-#   urban-center release add FILE --version N [--devices a,b]   keep a signed update package for the devices
-#   urban-center release list | withdraw N   (FILE may sit in /var/lib/urban/update, root's: it is staged for urban)
+#   urban-center release add FILE --version N [--devices a,b | --wave P]   keep a signed update package for the devices
+#   urban-center release list | promote N --wave P|--all | resume N | withdraw N
+#                            (FILE may sit in /var/lib/urban/update, root's: it is staged for urban)
 set -eu
-[ $# -ge 1 ] || { sed -n '2,8p' "$0"; exit 2; }
+[ $# -ge 1 ] || { sed -n '2,9p' "$0"; exit 2; }
 case "$1" in provision|users|city|release) ;; *) echo "urban-center: provision, users, city or release" >&2; exit 2 ;; esac
 cd /opt/urban
 set -a; . /var/lib/urban/etc/platform.env; set +a
@@ -27,12 +28,12 @@ file=""; idx=-1; skip=0
 for i in "${!args[@]}"; do
   if [ "$skip" = 1 ]; then skip=0; continue; fi
   case "${args[$i]}" in
-    --version|--devices) skip=1 ;;  # their values are not the file
+    --version|--devices|--wave) skip=1 ;;  # their values are not the file
     -*) ;;
     *) if [ -z "$file" ]; then file=${args[$i]}; idx=$i; fi ;;
   esac
 done
-[ -n "$file" ] || { echo "urban-center: release add FILE --version N [--devices a,b]" >&2; exit 2; }
+[ -n "$file" ] || { echo "urban-center: release add FILE --version N [--devices a,b | --wave P]" >&2; exit 2; }
 [ -f "$file" ] || { echo "urban-center: no such file: $file" >&2; exit 1; }
 staging=/var/lib/urban/platform/release-staging
 install -d -m 750 -o urban -g urban /var/lib/urban/platform "$staging"

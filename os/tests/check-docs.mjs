@@ -326,4 +326,52 @@ if (!/измеряем\S* загрузк[^;]*(отложен|следующ)/.te
   fail("the «Не сделано» paragraph of CONTEXT.md does not keep the measured boot build as pending");
 if (/встройка в URBAN OS — шаг 11/.test(context)) fail("CONTEXT.md still says measured boot is built in step 11 (it is parked)");
 
+// step 12: releases by architecture and staged rollout. The «Обновления из центра» section gives the commands, the rules
+// (the compatible read from the signed package, numbering per platform, no reported compatible = x86, waves by a stable
+// rank), what halts a rollout and what a halt does, how to resume or withdraw, and the honest limits
+const ota = sectionOf(text, /^## Обновления из центра.*$/m);
+if (!ota) fail("docs/edge-os.md has no section «Обновления из центра»");
+for (const must of ["--devices", "--wave", "release promote", "--all", "release resume", "release withdraw", "--arch",
+  "urban-edge-x86_64", "urban-edge-aarch64", "RAUC_MF_COMPATIBLE", "/etc/rauc/system.conf", "rollout-halted",
+  "update-offered", "GET /api/releases", "Выпуски ОС", "раздача остановлена", "restart pending", "check-rollout.mjs",
+  "### Выпуски по платформам (шаг 12)", "### Волны и сама остановка раздачи (шаг 12)", "### Пределы выпусков и волн"])
+  if (!ota.includes(must)) fail(`the «Обновления из центра» section of docs/edge-os.md never says ${JSON.stringify(must)} (step 12)`);
+for (const [what, rx] of [
+  ["the compatible is read from the signed package, any other system refused", /[Пп]латформа пакета читается из самого подписанного пакета[\s\S]{0,300}другой системы центр\s+не\s+принимает/],
+  ["each platform has its own numbering", /[Уу] каждой платформы свои номера/],
+  ["a device that reports no compatible is treated as x86", /платформу не сообщает\*\*[\s\S]{0,120}считается x86/],
+  ["the wave rank is stable: the same devices go first", /первыми всегда идут одни\s+и те же устройства/],
+  ["what halts: a failure or a rollback of a device of the wave", /Что останавливает раздачу[\s\S]{0,300}из его волны[\s\S]*\*\*Неудачу\.\*\*[\s\S]*\*\*Откат\.\*\*/],
+  ["what does not halt (retried with the next offer)", /\*\*Не останавливают\*\*/],
+  ["a halted release is offered to no device", /больше \*\*ни одному\*\* устройству он не предлагается/],
+  ["devices already on it are left as they are", /остаются как есть/],
+  ["a halt stops every package of that version number (x86 and arm64)", /номер выпуска целиком[\s\S]{0,200}x86 и arm64/],
+  ["a package of a halted number added later starts halted", /добавленный\s+позже, сразу остановлен/],
+  ["resume and withdraw are the admin's", /Решение за администратором[\s\S]{0,200}release resume N[\s\S]{0,400}release withdraw N/],
+  ["the centre trusts what the devices report", /[Цц]ентр верит тому, что сообщают устройства/],
+  ["checked only in QEMU", /Проверено только в QEMU/],
+  ["the centre's own self-update stays manual", /[Сс]ам центр обновляется по-прежнему вручную/]])
+  if (!rx.test(ota)) fail(`the «Обновления из центра» section of docs/edge-os.md does not say: ${what} (step 12)`);
+// what stood before step 12 and is no longer true is gone
+for (const [rx, what] of [[/Политики поэтапной раздачи, кроме/, "«Политики поэтапной раздачи, кроме --devices … нет»"],
+  [/снимают и выпускают заново под тем же номером/, "re-adding a release to widen it (promote does that now)"],
+  [/Раздача пакета arm64 из центра не\s+проверялась/, "«Раздача пакета arm64 из центра не проверялась»"],
+  [/центр не различает архитектуру блока/, "«центр не различает архитектуру блока»"],
+  [/команда прямо\s+пишет, что эту сверку не делала/, "release add without rauc (it refuses now: the compatible must be read)"]])
+  if (rx.test(text)) fail(`docs/edge-os.md still says what step 12 changed: ${what}`);
+if (!text.includes("node os/tests/check-rollout.mjs")) fail("the «Проверка» list of docs/edge-os.md does not show check-rollout.mjs");
+// CONTEXT.md: the step-12 section and its history row; «Не сделано» no longer lists staged rollout, keeps the centre's
+// self-update; «Что дальше» no longer says step 12 has no code
+const ctx12 = sectionOf(context, /^## Выпуски по платформам и волны \(шаг 12\).*$/m);
+if (!ctx12 || !/\| 24 октября \| шаг 12:/.test(context)) fail("CONTEXT.md does not record step 12 (section and history row)");
+for (const must of ["urban-edge-x86_64", "urban-edge-aarch64", "RAUC_MF_COMPATIBLE", "/etc/rauc/system.conf", "--wave",
+  "release promote", "release resume", "release withdraw", "rollout-halted", "check-rollout.mjs", "test_rollout.py",
+  "x86 и arm64", "верит тому, что сообщают устройства", "только в QEMU", "вручную"])
+  if (!ctx12.includes(must)) fail(`the «Выпуски по платформам и волны (шаг 12)» section of CONTEXT.md never says ${JSON.stringify(must)}`);
+const todo12 = /\*\*Не сделано[^\n]*(?:\n(?!\n)[^\n]*)*/.exec(context)[0];
+if (/поэтапн\S* раздач/.test(todo12)) fail("the «Не сделано» paragraph of CONTEXT.md still lists staged rollout as not done");
+if (!/обновление самого центра/.test(todo12)) fail("the «Не сделано» paragraph of CONTEXT.md does not keep the centre's own self-update");
+if (/шаг 12 \(начат, кода нет\)|кода шага 12 в репозитории нет/.test(context)) fail("CONTEXT.md still says step 12 has no code");
+if (!/волнами/.test(readme) || !readme.includes("release resume")) fail("README.md does not mention the waves and resuming a halted rollout");
+
 console.log("DOCS CHECK PASSED");

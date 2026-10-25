@@ -145,7 +145,8 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab, before
     installing: (u) => `обновляется до ${u.version}`, installed: (u) => `обновлено до ${u.version}`,
     failed: (u) => `обновление не загружено${u.reason ? `: ${u.reason}` : ''}`,
     refused: (u) => `обновление отклонено${u.reason ? `: ${u.reason}` : ''}` };
-  const osSpan = (d) => `<span title="версия системы и состояние обновления по воздуху">ОС ${esc(d.os ?? '—')}${d.up && UPDATE_RU[d.up.state]
+  const ARCH_RU = { 'urban-edge-x86_64': 'x86', 'urban-edge-aarch64': 'ARM' };  // the system a device runs (its compatible)
+  const osSpan = (d) => `<span title="версия системы и состояние обновления по воздуху">ОС ${esc(d.os ?? '—')}${d.cp ? ` ${esc(ARCH_RU[d.cp] ?? d.cp)}` : ''}${d.up && UPDATE_RU[d.up.state]
     ? ` · ${esc(UPDATE_RU[d.up.state](d.up))}` : ''}</span>`;
   // the centre's version floor: a device that has not shown at least that system version in its current session
   // (po: the version it showed, fl: the floor) gets no commands, only update offers, until it does
@@ -164,6 +165,20 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab, before
       ? `<div class="btns"><button data-act="floor-set">${f.floor == null ? 'Задать минимум' : 'Изменить'}</button>
          ${f.floor != null ? '<button data-act="floor-clear">Снять минимум</button>' : ''}</div>` : '';
     return `<div class="item"><b>Минимальная версия ОС</b> — ${value}${buttons}</div>`;
+  };
+  // the OS releases by system and their rollout: the current wave, and a halt (a device of the wave reported a failure
+  // or a rollback) with the device and the reason; the admin resumes or withdraws it on the centre (urban-center release)
+  const waveText = (r) => (r.devices == null && r.wave == null ? 'всем устройствам'
+    : [r.devices?.length ? r.devices.join(', ') : '', r.wave != null ? `${r.wave}% парка` : ''].filter(Boolean).join(' и '));
+  const releasesBox = () => {
+    const live = (S.osReleases ?? []).filter((r) => !r.withdrawn);
+    if (!live.length) return '';
+    return `<h4>Выпуски ОС</h4>${live.map((r) => `<div class="item">
+        <div class="row"><span><b>Выпуск ${esc(r.version)}</b> <small>${esc(ARCH_RU[r.compatible] ?? r.compatible)} · волна: ${esc(waveText(r))}
+          · обновлено ${esc(r.running.length)} из ${esc(r.in_wave.length)}</small></span>${r.halted ? chip('bad', 'раздача остановлена') : chip('ok', 'раздаётся')}</div>
+        ${r.halted ? `<small>Остановлена сама: ${esc(r.halted.device)} — ${esc(r.halted.reason)} (${esc(r.halted.at)}). Решение за
+          администратором: <code>urban-center release resume ${esc(r.version)}</code> или <code>withdraw ${esc(r.version)}</code>.</small>` : ''}
+      </div>`).join('')}`;
   };
   const deviceSummary = () => {
     const all = Object.values(S.dev);
@@ -229,6 +244,7 @@ export function createPanel(scene, S, { onCamera, onAction, onFly, onTab, before
         соединения своих блоков в центр, не читая их, и отчитывается очередями своих камер.
         ${pendingUnits ? `Ждут первого подключения: ${pendingUnits}.` : ''}</p>
       ${floorBox()}
+      ${releasesBox()}
       ${enrolButton()}
       ${recent.length ? `<h4>Последние события</h4>${recent.map((a) => `<div class="item"><time>${clock(a.t)}</time>
         ${chip(a.level === 'alert' ? 'bad' : 'warn', KIND_RU[a.kind] ?? esc(a.kind))} ${esc(a.device)}: ${esc(a.text)}</div>`).join('')}` : ''}

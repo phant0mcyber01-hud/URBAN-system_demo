@@ -193,7 +193,9 @@ def test_a_floor_file_that_is_not_a_record_we_write_is_ignored(store):
         assert ReleaseStore(store.dir).floor() is None  # a fresh reader has no good record
 
 
-def test_the_cli_sets_shows_and_clears_the_floor_and_refuses_with_a_clear_line(tmp_path, capsys):
+def test_the_cli_sets_shows_and_clears_the_floor_and_refuses_with_a_clear_line(tmp_path, capsys, monkeypatch):
+    # `add` asks RAUC about the package (test_rollout.py has the stand-in RAUC): here RAUC is taken to accept it as x86
+    monkeypatch.setattr(release, "check_bundle", lambda path, version: ("urban-edge-x86_64", "rauc verified it"))
     folder = str(tmp_path / "r")
     release.main(["--dir", folder, "floor"])
     assert capsys.readouterr().out.startswith("no floor")

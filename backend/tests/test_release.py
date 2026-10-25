@@ -64,6 +64,18 @@ def offer(hub, device):
     asyncio.run(hub._offer(device, hub.registry.devices[device]))
 
 
+def stand_in_rauc(monkeypatch, compatible="urban-edge-x86_64"):
+    """`add` asks RAUC about the package (release.check_bundle): here a RAUC that finds every package signed, of the
+    version asked for, made for `compatible`."""
+    real = release.check_bundle
+
+    def check(path, version):
+        said = f"RAUC_MF_COMPATIBLE='{compatible}'\nRAUC_MF_VERSION='{version}'\n"
+        return real(path, version, which=lambda name: "/usr/bin/rauc",
+                    run=lambda cmd, **kw: types.SimpleNamespace(returncode=0, stdout=said, stderr=""))
+    monkeypatch.setattr(release, "check_bundle", check)
+
+
 # ---------------------------------------------------------------- the store and the CLI
 
 def test_the_store_keeps_a_release_with_its_size_and_hash_and_lists_and_withdraws_it(store, tmp_path):
@@ -71,6 +83,7 @@ def test_the_store_keeps_a_release_with_its_size_and_hash_and_lists_and_withdraw
     src = package(tmp_path)
     rel = store.add(src, 2)
     assert rel["version"] == 2 and rel["file"] == "urban-2.raucb" and rel["devices"] is None and rel["withdrawn"] is False
+    assert rel["compatible"] == "urban-edge-x86_64" and rel["wave"] is None and rel["halted"] is None  # x86 by default
     assert rel["size"] == src.stat().st_size and rel["sha256"] == hashlib.sha256(src.read_bytes()).hexdigest()
     assert (store.dir / "urban-2.raucb").read_bytes() == src.read_bytes()
     assert not list(store.dir.glob("*.tmp"))  # written whole or not at all
@@ -117,31 +130,33 @@ def test_a_release_for_listed_devices_is_for_those_devices_only(store, tmp_path)
     assert store.newest_for("edge-CAM-02") is None
 
 
-def test_the_cli_adds_lists_withdraws_and_refuses_with_a_clear_line(tmp_path, capsys):
+def test_the_cli_adds_lists_withdraws_and_refuses_with_a_clear_line(tmp_path, capsys, monkeypatch):
+    stand_in_rauc(monkeypatch)
     folder = str(tmp_path / "r")
     src = package(tmp_path)
     release.main(["--dir", folder, "add", str(src), "--version", "2", "--devices", "edge-J-01,district-1"])
     out = capsys.readouterr().out
-    assert out.count("\n") == 1 and "added release 2" in out and "edge-J-01, district-1" in out
+    assert out.count("\n") == 1 and "added release 2 for urban-edge-x86_64" in out and "edge-J-01, district-1" in out
     release.main(["--dir", folder, "list"])
-    assert "offered" in capsys.readouterr().out
+    assert re.search(r"^\s*2 offered\s+urban-edge-x86_64 ", capsys.readouterr().out, re.M)
     with pytest.raises(SystemExit) as stop:
         release.main(["--dir", folder, "add", str(src), "--version", "2"])
-    assert str(stop.value).startswith("refused: version 2 is not newer")
+    assert str(stop.value).startswith("refused: version 2 is not newer than release 2 for urban-edge-x86_64")
     with pytest.raises(SystemExit) as stop:
         release.main(["--dir", folder, "add", str(src), "--version", "5", "--devices", ","])
     assert "--devices" in str(stop.value)
     release.main(["--dir", folder, "withdraw", "2"])
-    assert "withdrawn release 2" in capsys.readouterr().out
+    assert "withdrawn release 2 for urban-edge-x86_64" in capsys.readouterr().out
     release.main(["--dir", folder, "list"])
     assert "WITHDRAWN" in capsys.readouterr().out
     with pytest.raises(SystemExit):
         release.main(["--dir", folder, "withdraw", "7"])
 
 
-def test_rauc_is_asked_about_the_bundle_when_it_is_there(tmp_path):
+def test_rauc_is_asked_about_the_bundle_and_without_rauc_nothing_is_added(tmp_path):
     src = package(tmp_path)
-    assert "not cross-checked" in release.check_bundle(src, 2, which=lambda name: None)
+    with pytest.raises(ReleaseError, match="rauc is not installed here"):  # the compatible can only come from RAUC
+        release.check_bundle(src, 2, which=lambda name: None)
     keyring = tmp_path / "keyring.pem"
     keyring.write_text("x")
     calls = []
@@ -149,12 +164,14 @@ def test_rauc_is_asked_about_the_bundle_when_it_is_there(tmp_path):
     def rauc(version, code=0):
         def run(cmd, **kw):
             calls.append(cmd)
-            return types.SimpleNamespace(returncode=code, stdout=f"RAUC_MF_COMPATIBLE='urban'\nRAUC_MF_VERSION='{version}'\n",
+            return types.SimpleNamespace(returncode=code, stdout=f"RAUC_MF_COMPATIBLE='urban-edge-x86_64'\n"
+                                                                 f"RAUC_MF_VERSION='{version}'\n",
                                          stderr="signature check failed" if code else "")
         return run
 
-    ok = release.check_bundle(src, 2, keyring, which=lambda name: "/usr/bin/rauc", run=rauc(2))
-    assert "verified" in ok and calls[0][:3] == ["/usr/bin/rauc", "info", "--output-format=shell"]
+    compatible, ok = release.check_bundle(src, 2, keyring, which=lambda name: "/usr/bin/rauc", run=rauc(2))
+    assert compatible == "urban-edge-x86_64" and "verified" in ok
+    assert calls[0][:3] == ["/usr/bin/rauc", "info", "--output-format=shell"]
     assert f"--keyring={keyring}" in calls[0] and calls[0][-1] == str(src)
     with pytest.raises(ReleaseError, match="version"):
         release.check_bundle(src, 2, keyring, which=lambda name: "/usr/bin/rauc", run=rauc(3))

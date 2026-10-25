@@ -1,16 +1,32 @@
 """Released OS update packages: what the control centre keeps and offers to its devices.
 
-    python -m urban.release add urban-edge-3.raucb --version 3 [--devices edge-J-21,district-1]
+    python -m urban.release add urban-edge-3.raucb --version 3 [--devices edge-J-21,district-1 | --wave 10]
     python -m urban.release list
-    python -m urban.release withdraw 3
+    python -m urban.release promote 3 --wave 50 | --all [--arch x86_64|aarch64]
+    python -m urban.release resume 3     a halted rollout goes on (the admin's decision)
+    python -m urban.release withdraw 3 [--arch x86_64|aarch64]
     python -m urban.release floor 5          the minimum system version the centre commands
     python -m urban.release floor            show it
     python -m urban.release floor --clear    no minimum: every system version is commanded again
 
-A release is a RAUC bundle (urban-edge-<N>.raucb) signed with URBAN's build key. `add` copies it into the
-releases folder next to releases.json; the device hub then offers it, in a signed message, to every unit and
-district server (all of them, or only the listed ones) whose reported system version is older. A withdrawn
-release is never offered or served again. The platform may be running meanwhile: it notices the change itself.
+A release is a RAUC bundle (urban-edge-<N>.raucb) signed with URBAN's build key. `add` asks RAUC on this machine about
+it (its signature against the build keyring, its version, and the system it is for: its compatible, urban-edge-x86_64
+or urban-edge-aarch64; anything else is refused) and copies it into the releases folder next to releases.json. Each
+compatible has its own numbering: an x86 release 2 and an arm64 release 2 live side by side. The device hub offers a
+unit or district server only releases of the compatible it reports in its health (one that reports none, a system
+before step 12, is x86), in a signed message, when its reported system version is older.
+
+A release goes out in waves. Its first wave is every unit and district (the default), the listed devices (--devices),
+or a share of the fleet (--wave P: a device is in it when the rank of its id, 0-99 from a hash of the id, is below P;
+stable for a device and the same for every release, so the same devices go first each time); `promote` widens it to a
+larger share or to everyone (--all). If a device of the wave reports that the release failed (its update helper
+refused the package, or the package it downloaded is not the one offered) or that it rolled back (it reported the
+release installing, installed or running, and a later session runs an older system), the hub halts the release: no
+device is offered it any more, it is audited as `rollout-halted` with the device and the reason, and Devices shows
+it; the devices that already run it are left as they are. A halt stops every package of that version number (x86 and
+arm64 are built from the same source): a package of a halted number added later starts halted. `resume` lets it go
+on, `withdraw` ends it. A withdrawn release is never offered or served again. The platform may be running meanwhile:
+it notices the change itself.
 
 The floor (floor.json next to releases.json) is the oldest system the centre still commands: a unit, district server
 or lighting cabinet that does not report at least that version in its current session gets no commands, only update
@@ -36,6 +52,47 @@ from . import config as c
 KEYRING = Path("/etc/rauc/keyring.pem")
 DEVICE_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")
 FLOOR, FLOOR_AUDITED = "floor.json", "floor.audited"  # the version floor; the id of the floor record last audited
+COMPATIBLES = ("urban-edge-x86_64", "urban-edge-aarch64")  # the systems URBAN builds, as RAUC names them
+DEFAULT_COMPATIBLE = COMPATIBLES[0]  # a release entry or a device that names none (before step 12) is x86
+REASON_MAX = 160  # the longest reason a halt keeps
+
+
+def compatible_of(release: dict) -> str:
+    """The system a release entry is for (an entry written before step 12 names none: x86)."""
+    return release.get("compatible") or DEFAULT_COMPATIBLE
+
+
+def compatible_arg(text: str | None) -> str | None:
+    """--arch x86_64 | aarch64 (or the whole compatible) as the compatible; None stays None."""
+    if text is None:
+        return None
+    for compatible in COMPATIBLES:
+        if text in (compatible, compatible.removeprefix("urban-edge-")):
+            return compatible
+    raise ReleaseError(f"--arch is x86_64 or aarch64, not {text!r}")
+
+
+def wave_rank(device: str) -> int:
+    """Where a device stands in every wave: 0-99 from a hash of its id (stable, and the same for every release)."""
+    return int.from_bytes(hashlib.sha256(str(device).encode()).digest()[:4], "big") * 100 >> 32
+
+
+def in_wave(release: dict, device: str) -> bool:
+    """Whether a release's current wave includes this device: every device when it names neither devices nor a share;
+    else the listed devices and those whose rank is below the share."""
+    devices, share = release.get("devices"), release.get("wave")
+    if devices is None and share is None:
+        return True
+    return (devices is not None and device in devices) or (share is not None and wave_rank(device) < share)
+
+
+def wave_text(release: dict) -> str:
+    """The current wave in words, for the command line."""
+    devices, share = release.get("devices"), release.get("wave")
+    if devices is None and share is None:
+        return "every unit and district"
+    parts = ([", ".join(devices)] if devices else []) + ([f"{share}% of the fleet by device id"] if share is not None else [])
+    return " and ".join(parts)
 
 
 def _version(v) -> bool:
@@ -56,12 +113,15 @@ def sha256_of(path: Path) -> tuple[str, int]:
     return h.hexdigest(), size
 
 
-def check_bundle(path: Path, version: int, keyring: Path = KEYRING, which=shutil.which, run=subprocess.run) -> str:
-    """Ask RAUC what it thinks of the bundle: its signature against the build keyring, and its own version.
-    Returns what was checked (or that rauc is not here); raises ReleaseError when RAUC disagrees."""
+def check_bundle(path: Path, version: int, keyring: Path = KEYRING, which=shutil.which,
+                 run=subprocess.run) -> tuple[str, str]:
+    """Ask RAUC what it thinks of the bundle: its signature against the build keyring, its own version and the system
+    it is for. Returns (its compatible, what was checked); raises ReleaseError when RAUC disagrees, when the bundle is
+    for a system URBAN does not build, or when there is no RAUC here to read the compatible from the package."""
     rauc = which("rauc")
     if rauc is None:
-        return "rauc is not installed here: the bundle's signature and version were not cross-checked"
+        raise ReleaseError("rauc is not installed here: the package's signature and the system it is for cannot be "
+                           "read (add releases on the centre's URBAN OS)")
     cmd = [rauc, "info", "--output-format=shell"] + ([f"--keyring={keyring}"] if keyring.exists() else []) + [str(path)]
     try:
         done = run(cmd, capture_output=True, text=True, timeout=300)
@@ -79,7 +139,11 @@ def check_bundle(path: Path, version: int, keyring: Path = KEYRING, which=shutil
                 pass
     if info.get("RAUC_MF_VERSION") != str(version):
         raise ReleaseError(f"the bundle says it is version {info.get('RAUC_MF_VERSION')!r}, not {version}")
-    return "rauc verified the bundle's signature" + ("" if keyring.exists() else f" (no {keyring}: against rauc's default keyring)")
+    compatible = info.get("RAUC_MF_COMPATIBLE")
+    if compatible not in COMPATIBLES:
+        raise ReleaseError(f"the bundle is for {compatible!r}, not for a system URBAN builds ({', '.join(COMPATIBLES)})")
+    return compatible, ("rauc verified the bundle's signature"
+                        + ("" if keyring.exists() else f" (no {keyring}: against rauc's default keyring)"))
 
 
 class ReleaseStore:
@@ -108,24 +172,30 @@ class ReleaseStore:
             self._seen = seen
         return self._items
 
-    def get(self, version: int) -> dict | None:
-        return next((r for r in self.releases() if r["version"] == version), None)
+    def get(self, version: int, compatible: str = DEFAULT_COMPATIBLE) -> dict | None:
+        return next((r for r in self.releases() if r["version"] == version and compatible_of(r) == compatible), None)
+
+    def of_version(self, version: int) -> list[dict]:
+        """Every package of this version number, whatever system it is for (withdrawn ones too)."""
+        return [r for r in self.releases() if r["version"] == version]
 
     def path(self, release: dict) -> Path:
         return self.dir / Path(str(release["file"])).name  # a file name, never a path
 
-    def newest_for(self, device: str) -> dict | None:
-        """The highest version that is not withdrawn and targets this device (devices null: every device)."""
+    def newest_for(self, device: str, compatible: str = DEFAULT_COMPATIBLE) -> dict | None:
+        """The highest version for this compatible that is neither withdrawn nor halted and whose current wave includes
+        this device."""
         best = None
         for r in self.releases():
-            if r.get("withdrawn") or (r.get("devices") is not None and device not in r["devices"]):
+            if (compatible_of(r) != compatible or r.get("withdrawn") or r.get("halted")
+                    or not in_wave(r, device)):
                 continue
             if best is None or r["version"] > best["version"]:
                 best = r
         return best
 
     def newest(self) -> int | None:
-        """The highest release still offered (to any device), or None."""
+        """The highest release still offered (to any device, of any compatible), or None."""
         return max((r["version"] for r in self.releases() if not r.get("withdrawn")), default=None)
 
     # ---- the version floor
@@ -188,43 +258,116 @@ class ReleaseStore:
     def _write(self, items: list[dict]):
         self._write_json(self.index, items)
 
+    def _now(self, now: datetime.datetime | None) -> str:
+        return (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _live(self, items: list[dict], version: int, compatible: str | None) -> list[dict]:
+        """The packages of this version (of one compatible, or of every one) still offered; ReleaseError if none."""
+        found = [r for r in items if r["version"] == version and compatible in (None, compatible_of(r))]
+        what = f"release {version}" + (f" for {compatible}" if compatible else "")
+        if not found:
+            raise ReleaseError(f"no {what}")
+        live = [r for r in found if not r.get("withdrawn")]
+        if not live:
+            raise ReleaseError(f"{what} is already withdrawn")
+        return live
+
     def add(self, source: Path, version: int, devices: list[str] | None = None,
-            now: datetime.datetime | None = None) -> dict:
+            now: datetime.datetime | None = None, compatible: str = DEFAULT_COMPATIBLE, wave: int | None = None) -> dict:
+        """Keep a package for one compatible. Its first wave: every device (devices and wave None), the listed devices,
+        or a share of the fleet (wave: a percentage, 1-100). A package of a version number that is halted starts halted."""
         if isinstance(version, bool) or not isinstance(version, int) or version < 1:
             raise ReleaseError("the version is a positive whole number")
+        if compatible not in COMPATIBLES:
+            raise ReleaseError(f"the package is for {compatible!r}, not for a system URBAN builds ({', '.join(COMPATIBLES)})")
         source = Path(source)
         if not source.is_file() or source.stat().st_size == 0:
             raise ReleaseError(f"{source} is not a package file")
+        if devices is not None and wave is not None:
+            raise ReleaseError("the first wave is --devices or --wave, not both")
         if devices is not None:
             devices = sorted(set(devices))
             if not devices or not all(DEVICE_ID.fullmatch(d) for d in devices):
                 raise ReleaseError("--devices: a comma-separated list of device ids, for example edge-J-21,district-1")
+        if wave is not None and (isinstance(wave, bool) or not isinstance(wave, int) or not 1 <= wave <= 100):
+            raise ReleaseError("--wave: a share of the fleet in percent, 1 to 100")
         items = list(self.releases())
-        live = max((r["version"] for r in items if not r.get("withdrawn")), default=0)
+        live = max((r["version"] for r in items if not r.get("withdrawn") and compatible_of(r) == compatible), default=0)
         if version <= live:
-            raise ReleaseError(f"version {version} is not newer than release {live}, which is still offered")
+            raise ReleaseError(f"version {version} is not newer than release {live} for {compatible}, which is still offered")
+        halted = next((r["halted"] for r in items if r["version"] == version and not r.get("withdrawn") and r.get("halted")),
+                      None)
         digest, size = sha256_of(source)
-        name = f"urban-{version}.raucb"
+        # x86 keeps the file name it had before there were two systems
+        name = (f"urban-{version}.raucb" if compatible == DEFAULT_COMPATIBLE
+                else f"urban-{compatible.removeprefix('urban-edge-')}-{version}.raucb")
         self.dir.mkdir(parents=True, exist_ok=True)
         tmp = self.dir / (name + ".tmp")
         shutil.copyfile(source, tmp)
         os.replace(tmp, self.dir / name)
-        rel = {"version": version, "file": name, "sha256": digest, "size": size, "devices": devices,
-               "added": (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-               "withdrawn": False}
-        self._write([r for r in items if r["version"] != version] + [rel])  # a withdrawn release of that number is replaced
+        rel = {"version": version, "compatible": compatible, "file": name, "sha256": digest, "size": size,
+               "devices": devices, "wave": wave, "added": self._now(now), "withdrawn": False, "halted": halted}
+        # a withdrawn release of that number and compatible is replaced
+        self._write([r for r in items if (r["version"], compatible_of(r)) != (version, compatible)] + [rel])
         return rel
 
-    def withdraw(self, version: int) -> dict:
-        items = [dict(r) for r in self.releases()]  # a copy: the cache changes only when the file does
-        rel = next((r for r in items if r["version"] == version), None)
-        if rel is None:
-            raise ReleaseError(f"no release {version}")
-        if rel.get("withdrawn"):
-            raise ReleaseError(f"release {version} is already withdrawn")
-        rel["withdrawn"] = True
+    def withdraw(self, version: int, compatible: str | None = None) -> list[dict]:
+        """Withdraw the packages of this version (of one compatible, or every one still offered). Returns them."""
+        items = [dict(r) for r in self.releases()]  # copies: the cache changes only when the file does
+        live = self._live(items, version, compatible)
+        for rel in live:
+            rel["withdrawn"] = True
         self._write(items)
-        return rel
+        return live
+
+    def promote(self, version: int, wave: int | None = None, compatible: str | None = None) -> list[dict]:
+        """Widen the wave of this version's packages: to a larger share of the fleet (wave, a percentage), or to every
+        device (wave None). The listed devices of a first wave stay in it. Returns the packages."""
+        if wave is not None and (isinstance(wave, bool) or not isinstance(wave, int) or not 1 <= wave <= 100):
+            raise ReleaseError("--wave: a share of the fleet in percent, 1 to 100")
+        items = [dict(r) for r in self.releases()]
+        live = self._live(items, version, compatible)
+        for rel in live:
+            if rel.get("devices") is None and rel.get("wave") is None:
+                raise ReleaseError(f"release {version} for {compatible_of(rel)} already goes to every unit and district")
+            if wave is not None and wave <= (rel.get("wave") or 0):
+                raise ReleaseError(f"release {version} for {compatible_of(rel)} already goes to {rel['wave']}% of the "
+                                   f"fleet: a wider wave is more than that")
+        for rel in live:
+            if wave is None:
+                rel["devices"], rel["wave"] = None, None
+            else:
+                rel["wave"] = wave
+        self._write(items)
+        return live
+
+    def halt(self, version: int, device: str, compatible: str, reason: str,
+             now: datetime.datetime | None = None) -> dict | None:
+        """Halt every package of this version still offered, after a failure or a rollback that `device` (running
+        `compatible`) reported. Returns the halt record, or None when there is nothing to halt (it is halted already,
+        or withdrawn)."""
+        items = [dict(r) for r in self.releases()]
+        live = [r for r in items if r["version"] == version and not r.get("withdrawn")]
+        if not live or any(r.get("halted") for r in live):
+            return None
+        record = {"device": str(device)[:64], "compatible": str(compatible)[:64], "reason": str(reason)[:REASON_MAX],
+                  "at": self._now(now)}
+        for rel in live:
+            rel["halted"] = record
+        self._write(items)
+        return record
+
+    def resume(self, version: int) -> dict:
+        """The admin's decision: a halted version is offered again (to its wave). Returns the halt that ended."""
+        items = [dict(r) for r in self.releases()]
+        live = self._live(items, version, None)
+        halted = next((r["halted"] for r in live if r.get("halted")), None)
+        if halted is None:
+            raise ReleaseError(f"release {version} is not halted")
+        for rel in live:
+            rel["halted"] = None
+        self._write(items)
+        return halted
 
 
 def _cli_actor() -> str:
@@ -241,16 +384,32 @@ def floor_text(rec: dict | None) -> str:
     return f"floor: {rec['floor']}, set by {rec.get('by', '-')} at {rec.get('at', '-')}"
 
 
+def halt_text(halted: dict) -> str:
+    return f"{halted.get('device', '-')} ({halted.get('compatible', '-')}): {halted.get('reason', '-')}, at {halted.get('at', '-')}"
+
+
 def main(argv: list[str] | None = None):
     ap = argparse.ArgumentParser(description="URBAN OS update packages of the control centre")
     ap.add_argument("--dir", default=None, help=f"the releases folder (default: {c.RELEASES})")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    add = sub.add_parser("add", help="keep a package and offer it to the devices on an older version")
+    add = sub.add_parser("add", help="keep a package and offer it to the devices of its system on an older version")
     add.add_argument("file")
     add.add_argument("--version", type=int, required=True, help="the system version this package installs")
-    add.add_argument("--devices", help="offer only to these device ids (comma-separated); default: every unit and district")
+    first = add.add_mutually_exclusive_group()
+    first.add_argument("--devices", help="a first wave of these device ids only (comma-separated); default: every unit "
+                                         "and district")
+    first.add_argument("--wave", type=int, help="a first wave of this share of the fleet, in percent (chosen by device id)")
     sub.add_parser("list")
-    sub.add_parser("withdraw", help="stop offering a release").add_argument("version", type=int)
+    pr = sub.add_parser("promote", help="widen a release's wave: a larger share of the fleet, or every device")
+    pr.add_argument("version", type=int)
+    to = pr.add_mutually_exclusive_group(required=True)
+    to.add_argument("--wave", type=int, help="this share of the fleet, in percent (the devices of the first wave stay)")
+    to.add_argument("--all", action="store_true", help="every unit and district")
+    pr.add_argument("--arch", help="only the package for x86_64 or aarch64 (default: every package of that version)")
+    sub.add_parser("resume", help="a halted release is offered again to its wave").add_argument("version", type=int)
+    wd = sub.add_parser("withdraw", help="stop offering a release")
+    wd.add_argument("version", type=int)
+    wd.add_argument("--arch", help="only the package for x86_64 or aarch64 (default: every package of that version)")
     fl = sub.add_parser("floor", help="the minimum system version the centre commands: show it, set it, or --clear it")
     fl.add_argument("version", type=int, nargs="?", help="devices that do not report this version or newer get no commands")
     fl.add_argument("--clear", action="store_true", help="no minimum: devices of every system version get commands again")
@@ -262,13 +421,29 @@ def main(argv: list[str] | None = None):
             devices = [d.strip() for d in args.devices.split(",") if d.strip()] if args.devices is not None else None
             if args.devices is not None and not devices:
                 raise ReleaseError("--devices is empty")
-            note = check_bundle(Path(args.file), args.version)
-            rel = store.add(Path(args.file), args.version, devices)
-            print(f"added release {rel['version']}: {rel['size']} bytes, sha256 {rel['sha256'][:12]}..., "
-                  f"to {', '.join(devices) if devices else 'every unit and district'}; {note}")
+            if args.wave is not None and not 1 <= args.wave <= 100:
+                raise ReleaseError("--wave: a share of the fleet in percent, 1 to 100")
+            compatible, note = check_bundle(Path(args.file), args.version)
+            rel = store.add(Path(args.file), args.version, devices, compatible=compatible, wave=args.wave)
+            whom = (f"a first wave: {', '.join(devices)}" if devices is not None
+                    else f"a first wave: {wave_text(rel)}" if args.wave is not None else wave_text(rel))
+            print(f"added release {rel['version']} for {compatible}: {rel['size']} bytes, sha256 {rel['sha256'][:12]}..., "
+                  f"to {whom}; {note}")
+            if rel["halted"]:
+                print(f"halted: release {rel['version']} was halted by {halt_text(rel['halted'])}; nothing of it is "
+                      f"offered until `release resume {rel['version']}`")
+        elif args.cmd == "promote":
+            for rel in store.promote(args.version, None if args.all else args.wave, compatible_arg(args.arch)):
+                print(f"promoted release {rel['version']} for {compatible_of(rel)}: now to {wave_text(rel)}")
+                if rel.get("halted"):
+                    print(f"halted: release {rel['version']} was halted by {halt_text(rel['halted'])}; nothing of it "
+                          f"is offered until `release resume {rel['version']}`")
+        elif args.cmd == "resume":
+            halted = store.resume(args.version)
+            print(f"resumed release {args.version}: offered again to its wave (it was halted by {halt_text(halted)})")
         elif args.cmd == "withdraw":
-            store.withdraw(args.version)
-            print(f"withdrawn release {args.version}: it is no longer offered or served")
+            for rel in store.withdraw(args.version, compatible_arg(args.arch)):
+                print(f"withdrawn release {rel['version']} for {compatible_of(rel)}: it is no longer offered or served")
         elif args.cmd == "floor":
             if args.clear and args.version is not None:
                 raise ReleaseError("give a version or --clear, not both")
@@ -287,10 +462,13 @@ def main(argv: list[str] | None = None):
                 print(floor_text(store.floor_record()))
         else:
             rows = store.releases()
-            for r in sorted(rows, key=lambda r: r["version"]):
-                to = ", ".join(r["devices"]) if r.get("devices") is not None else "all"
-                print(f"{r['version']:5} {'WITHDRAWN' if r.get('withdrawn') else 'offered  '} {r['size']:>11} bytes  "
+            for r in sorted(rows, key=lambda r: (r["version"], compatible_of(r))):
+                to = "all" if r.get("devices") is None and r.get("wave") is None else wave_text(r)
+                state = "WITHDRAWN" if r.get("withdrawn") else "HALTED   " if r.get("halted") else "offered  "
+                print(f"{r['version']:5} {state} {compatible_of(r):<18} {r['size']:>11} bytes  "
                       f"{str(r.get('sha256', ''))[:12]}  {r.get('added', '')}  to {to}")
+                if r.get("halted") and not r.get("withdrawn"):
+                    print(f"      halted by {halt_text(r['halted'])}")
             if not rows:
                 print("no releases")
             print(floor_text(store.floor_record()))
