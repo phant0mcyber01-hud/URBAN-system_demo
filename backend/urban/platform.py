@@ -273,6 +273,7 @@ class Platform:
                 # it showed in its current session, fl: the floor
                 "bf": int(bool(row.get("below_floor"))), "fl": row.get("floor"), "po": row.get("os_proven"),
                 **({"cab": row["cabinet"]} if row.get("cabinet") else {}),  # a lighting unit: its cabinet
+                **({"site": row["site"]} if row.get("site") else {}),  # a pump station's unit: its station
                 # its tunnel to the district (DeviceHub._wg_row): a district's always, a unit's once it is routed through
                 # a district or has reported a tunnel key (a unit straight to the centre on an older system has none)
                 **({"wg": wg} if (wg := row.get("wg")) and ("index" in wg or wg.get("district") or wg.get("fingerprint")

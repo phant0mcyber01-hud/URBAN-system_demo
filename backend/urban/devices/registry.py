@@ -30,11 +30,12 @@ from cryptography.x509.oid import NameOID
 
 from ..net import wireguard
 from . import crypto, trust
-from .enrolment import CABINET, DEVICE, LIGHT_DEVICE, SERIAL, check_address
+from .enrolment import CABINET, DEVICE, LIGHT_DEVICE, SERIAL, SITE, WATER_DEVICE, check_address
 
 ACTIVE, REVOKED = "active", "revoked"
-UNIT, DISTRICT, LIGHTING = "unit", "district", "lighting"  # kinds of record: a junction's unit, a district server
-# units connect through, or the unit in a street-lighting cabinet (the lighting module, urban/modules/lighting)
+UNIT, DISTRICT, LIGHTING, WATER = "unit", "district", "lighting", "water"  # kinds of record: a junction's unit, a
+# district server units connect through, the unit in a street-lighting cabinet (the lighting module,
+# urban/modules/lighting), or the unit in a pump station (the water module, urban/modules/water: it only reads)
 WG_MODES = ("allow", "only")  # a district's relay: still open to units outside the tunnel, or only through it
 
 
@@ -167,6 +168,49 @@ class Registry:
         if rec.get("public_key") != public.strip().lower():
             rec.pop("first_seen", None)
         rec.update({"id": device, "kind": LIGHTING, "cabinet": cabinet, "lon": lon, "lat": lat, "junction": None,
+                    "tls": None, "name": "", "public_key": public.strip().lower(), "status": ACTIVE,
+                    "serial": serial or rec.get("serial") or f"URB-{secrets.token_hex(3).upper()}",
+                    "enrolled": datetime.date.today().isoformat()})
+        self.devices[device] = rec
+        self._save()
+        return rec
+
+    def enroll_water(self, device: str, site: str, public: str, serial: str = "", lon: float | None = None,
+                     lat: float | None = None, p_min: float | None = None, p_max: float | None = None) -> dict:
+        """Enrol the unit of a pump station: id pump-<name>, the station it reads (one active unit per station),
+        optionally where it stands and the pressure limits (bar) the centre raises alerts against. The limits are the
+        centre's, set here by the administrator, never the station's. A water record is nobody's junction, goes
+        through no district server and has no tunnel. A known device gets the new key."""
+        crypto.check_public(public)
+        if not isinstance(device, str) or not WATER_DEVICE.fullmatch(device):
+            raise ValueError("pump station unit id must look like pump-<site> (letters, digits, . _ -)")
+        if not isinstance(site, str) or not SITE.fullmatch(site):
+            raise ValueError("site (the station) is letters, digits, . _ - (up to 40), e.g. S-01")
+        if not isinstance(serial, str) or not SERIAL.fullmatch(serial):
+            raise ValueError("serial: letters, digits, . _ - (up to 40)")
+        for name, value, lo, hi in (("lon", lon, -180, 180), ("lat", lat, -90, 90), ("p_min", p_min, -1, 100),
+                                    ("p_max", p_max, -1, 100)):
+            if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))
+                                      or not math.isfinite(value) or not lo <= value <= hi):
+                raise ValueError(f"{name} must be a number from {lo} to {hi}")
+        if (lon is None) != (lat is None):
+            raise ValueError("give both --lon and --lat, or neither")
+        if p_min is not None and p_max is not None and not p_min < p_max:
+            raise ValueError("p_min must be below p_max")
+        self._reload()
+        self._check_key(device, public)
+        for other in self.devices.values():
+            if (other["id"] != device and kind_of(other) == WATER and other.get("site") == site
+                    and other["status"] == ACTIVE):
+                raise ValueError(f"site {site} already has unit {other['id']}; revoke and remove it first")
+        rec = self.devices.get(device, {})
+        if rec and kind_of(rec) != WATER:
+            raise ValueError(f"{device} is already enrolled as a {kind_of(rec)}")
+        if rec.get("public_key") != public.strip().lower():
+            rec.pop("first_seen", None)
+        rec.update({"id": device, "kind": WATER, "site": site, "lon": lon, "lat": lat,
+                    "p_min": float(p_min) if p_min is not None else None,
+                    "p_max": float(p_max) if p_max is not None else None, "junction": None,
                     "tls": None, "name": "", "public_key": public.strip().lower(), "status": ACTIVE,
                     "serial": serial or rec.get("serial") or f"URB-{secrets.token_hex(3).upper()}",
                     "enrolled": datetime.date.today().isoformat()})
@@ -497,9 +541,24 @@ def provision(junctions: list[dict], pki: Path, host: str | None = None, demo_de
                           "status": ACTIVE, "serial": f"LGT-{secrets.token_hex(3).upper()}",
                           "enrolled": datetime.date.today().isoformat()}
         created = True
+    # and a few pump stations (City OS module water, read only), next to its first junctions too
+    for n, j in enumerate(placed[:DEMO_STATIONS], start=1):
+        site = f"S-{n:02d}"
+        ident = f"pump-{site}"
+        if ident in devices and (pki / "edge" / f"{ident}.key").exists():
+            continue
+        key = crypto.new_key()
+        (pki / "edge" / f"{ident}.key").write_text(crypto.private_hex(key))
+        devices[ident] = {"id": ident, "kind": WATER, "site": site,
+                          "lon": round(j["lon"] - 0.0009, 6), "lat": round(j["lat"] - 0.0005, 6),
+                          "p_min": 2.0, "p_max": 6.0, "junction": None, "tls": None, "name": "",
+                          "public_key": crypto.public_hex(key), "status": ACTIVE,
+                          "serial": f"WTR-{secrets.token_hex(3).upper()}", "enrolled": datetime.date.today().isoformat()}
+        created = True
     if created:
         save(path, devices)
     return created
 
 
 DEMO_CABINETS = 4  # street-lighting cabinets the demo twin gets
+DEMO_STATIONS = 3  # pump stations the demo twin gets (the water module runs them emulated, one with a pump fault)

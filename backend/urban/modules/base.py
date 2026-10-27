@@ -2,7 +2,7 @@
 
 URBAN is a City OS: one core (devices and their keys, signed commands, accounts and roles, the audit log, updates
 from the centre, the district relay) and modules for city services on top of it. Traffic is the first module,
-street lighting the second; a module owns one kind of device and one part of the interface, and never touches
+street lighting the second, water (pump stations, read only: it sends no command at all) the third; a module owns one kind of device and one part of the interface, and never touches
 another module's devices. docs/city-os-modules.md is the guide for writing one.
 
 Rules every module keeps (the core enforces the first three, the module the rest):
@@ -13,7 +13,8 @@ Rules every module keeps (the core enforces the first three, the module the rest
 - everything a person or the module decides goes into the core's audit log (Core.audit);
 - every command is a lease: it says for how long it holds, the device returns to its own safe behaviour when it
   runs out or the link is lost, and the module renews it only while it is still wanted;
-- a device is trusted only for its own object (a lighting cabinet for its cabinet, a unit for its junction).
+- a device is trusted only for its own object (a lighting cabinet for its cabinet, a pump station's unit for its
+  station, a unit for its junction).
 """
 from __future__ import annotations
 
@@ -40,9 +41,9 @@ class Core:
 
 
 class Module(Protocol):
-    id: str                 # "traffic", "lighting": [a-z]+, also the URL prefix /api/<id>/ and the UI tab
+    id: str                 # "traffic", "lighting", "water": [a-z]+, also the URL prefix /api/<id>/ and the UI tab
     title: str              # Russian, for the UI
-    device_kind: str | None  # the registry kind it owns ("unit" for traffic, "lighting"), None if it owns none
+    device_kind: str | None  # the registry kind it owns ("unit" for traffic, "lighting", "water"), None if none
 
     def attach(self, core: Core) -> None:
         """Called once at start, before any report."""

@@ -80,7 +80,7 @@ passwd -S root | grep -q ' L ' || fail+=("root has a usable password")
 systemctl is-active --quiet urban-prepare || fail+=("urban-prepare failed")
 unit=$(sed -n 's/^UNIT=//p' /var/lib/urban/etc/unit.conf 2>/dev/null)
 role=$(sed -n 's/^ROLE=//p' /var/lib/urban/etc/unit.conf 2>/dev/null); role=${role:-unit}
-module=$(sed -n 's/^MODULE=//p' /var/lib/urban/etc/unit.conf 2>/dev/null)  # lighting: a street-lighting cabinet
+module=$(sed -n 's/^MODULE=//p' /var/lib/urban/etc/unit.conf 2>/dev/null)  # lighting: a street-lighting cabinet; water: a pump station
 if [ -z "$unit" ]; then
   unit=none
 elif [ "$role" = unit ]; then
@@ -112,6 +112,7 @@ python_ok urban.edge.__main__ urban.node.power urban.node.district urban.platfor
   urban.net.wireguard urban.net.wghelper || fail+=("URBAN software does not start")
 systemctl cat urban-edge@check.service >/dev/null 2>&1 || fail+=("urban-edge@ service missing")
 systemctl cat urban-lighting@check.service urban-lighting-screen.timer urban-lighting-screen.service >/dev/null 2>&1 || fail+=("lighting services missing")
+systemctl cat urban-water@check.service urban-water-screen.timer urban-water-screen.service >/dev/null 2>&1 || fail+=("water services missing")
 systemctl cat urban-relay.service urban-district@check.service >/dev/null 2>&1 || fail+=("district services missing")
 if [ "$role" = district ]; then
   { [ -f "/var/lib/urban/etc/pki/edge/$unit.key" ] || [ -d "/var/lib/urban/etc/pki/edge/$unit.tpm" ]; } || fail+=("district $unit has no key")
@@ -139,10 +140,10 @@ command -v wg >/dev/null || fail+=("wireguard-tools missing")
 ip link del urban-wgchk >/dev/null 2>&1 || true  # one left by a check that was cut short
 { ip link add urban-wgchk type wireguard && ip link del urban-wgchk; } >/dev/null 2>&1 || fail+=("the WireGuard module does not load")
 if [ -e /var/lib/urban/wg-inbox ] && [ ! -e /run/urban/wg.json ]; then fail+=("the tunnel helper wrote no status"); fi
-# the tunnel's state for the OK line: - where this machine has no tunnel (the pilot, a centre, a lighting cabinet)
+# the tunnel's state for the OK line: - where this machine has no tunnel (the pilot, a centre, a lighting cabinet, a pump station)
 wg=-
 case "$(sed -n 's/^ROLE=//p' /var/lib/urban/etc/unit.conf 2>/dev/null | tail -n 1):$module" in
-  unit:lighting) ;;
+  unit:lighting|unit:water) ;;
   unit:*|district:*)
     wg=$(sed -n 's/.*"state": *"\([a-z]*\)".*/\1/p' /run/urban/wg.json 2>/dev/null | head -n 1)
     case "$wg" in none|clock|up|down) ;; *) wg=none ;; esac ;;
@@ -152,6 +153,12 @@ if [ "$role" = unit ] && [ "$module" = lighting ]; then
   python_ok urban.modules.lighting.__main__ || fail+=("the lighting software does not start")
   if [ -f "/var/lib/urban/etc/edge-$unit.env" ]; then
     service_check "urban-lighting@$unit.service" "the cabinet service urban-lighting@$unit"
+  fi
+elif [ "$role" = unit ] && [ "$module" = water ]; then
+  # a pump station runs its water program (read only) instead of the junction unit (and has no cameras)
+  python_ok urban.modules.water.__main__ || fail+=("the water software does not start")
+  if [ -f "/var/lib/urban/etc/edge-$unit.env" ]; then
+    service_check "urban-water@$unit.service" "the station service urban-water@$unit"
   fi
 elif [ "$role" = unit ] && [ -f "/var/lib/urban/etc/edge-$unit.env" ]; then
   service_check "urban-edge@$unit.service" "the unit service urban-edge@$unit"

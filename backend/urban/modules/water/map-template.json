@@ -1,0 +1,13 @@
+{
+  "pressure_in":  {"table": "input",   "address": 0, "type": "u16", "scale": 0.01},
+  "pressure_out": {"table": "input",   "address": 1, "type": "u16", "scale": 0.01},
+  "flow":         {"table": "input",   "address": 2, "type": "u16", "scale": 0.1},
+  "power":        {"table": "input",   "address": 3, "type": "u16", "scale": 0.1},
+  "energy":       {"table": "holding", "address": 10, "type": "u32", "scale": 1, "word_order": "big"},
+  "level":        {"table": "input",   "address": 4, "type": "i16", "scale": 0.01},
+  "door":         {"table": "discrete", "address": 0, "open": true},
+  "pumps": [
+    {"run": {"table": "discrete", "address": 8}, "fault": {"table": "discrete", "address": 9}},
+    {"run": {"table": "discrete", "address": 10}, "fault": {"table": "discrete", "address": 11}}
+  ]
+}

@@ -175,7 +175,7 @@ chroot "$ROOT" python3 -m venv /opt/urban/.venv
 chroot "$ROOT" /opt/urban/.venv/bin/pip install --quiet --upgrade pip
 chroot "$ROOT" /opt/urban/.venv/bin/pip install --quiet -e "/opt/urban/backend[edge,vision]"
 chroot "$ROOT" /opt/urban/.venv/bin/python -m compileall -q /opt/urban/backend/urban >/dev/null
-chroot "$ROOT" /opt/urban/.venv/bin/python -c "import urban.edge.__main__, urban.vision.__main__, urban.modules.lighting.__main__, urban.devices.signer, urban.net.wireguard, urban.net.wghelper, cv2, onnxruntime"
+chroot "$ROOT" /opt/urban/.venv/bin/python -c "import urban.edge.__main__, urban.vision.__main__, urban.modules.lighting.__main__, urban.modules.water.__main__, urban.devices.signer, urban.net.wireguard, urban.net.wghelper, cv2, onnxruntime"
 # the TPM tools the signer drives must be in the image and start (no TPM here: --version never opens a device)
 for t in tpm2_createprimary tpm2_create tpm2_load tpm2_sign; do
   chroot "$ROOT" "$t" --version >/dev/null || { echo "tpm2-tools: $t does not run in the image" >&2; exit 1; }
@@ -195,7 +195,8 @@ fi
 # ---- the operating system around it
 log "system configuration"
 cp -r /work/os/rootfs/. "$ROOT/"
-cp /work/deploy/urban-edge@.service /work/deploy/urban-vision@.service /work/deploy/urban-lighting@.service "$ROOT/etc/systemd/system/"
+cp /work/deploy/urban-edge@.service /work/deploy/urban-vision@.service /work/deploy/urban-lighting@.service \
+  /work/deploy/urban-water@.service "$ROOT/etc/systemd/system/"
 # the data partition is mounted from the boot disk's link /dev/disk/urban/data-fs (fstab): the plain partition or the
 # LUKS volume urban-grow opened; systemd-cryptsetup needs the dm-crypt module early
 echo dm_crypt >> "$ROOT/etc/modules"

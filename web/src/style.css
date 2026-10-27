@@ -350,6 +350,19 @@ input.num:focus { border-color: var(--accent); outline: none; }
 .lt-form .btns { margin-top: 0; }
 .lt-form .btns button, .lt-fly { border-radius: 0; }
 .lt-safety { margin-top: 14px; color: var(--text-2); }
+/* the water utility's pump stations (read only: no controls) */
+.wt-st { position: relative; }
+.wt-st[data-wt-fly] { cursor: pointer; }
+.wt-st[data-wt-fly]:hover { background: var(--surface-3); }
+.wt-st.wt-warn { box-shadow: inset 3px 0 0 var(--warn); background: var(--warn-weak); padding-left: 10px; }
+.wt-st.wt-bad { box-shadow: inset 3px 0 0 var(--bad); background: var(--bad-weak); padding-left: 10px; }
+.wt-st.focus { outline: 1px solid var(--line-3); outline-offset: -1px; }
+.wt-st .meta { flex-wrap: wrap; justify-content: flex-start; gap: 2px 14px; margin-top: 3px; color: var(--text-2); font-size: 12px; }
+.wt-st .wt-p.bad { color: var(--bad); }
+.wt-st .wt-pumps { align-items: center; gap: 4px 6px; }
+.wt-st b { font-family: var(--mono); font-weight: 500; color: var(--accent); }
+.wt-alert { margin-top: 3px; }
+.wt-note { margin-top: 14px; color: var(--text-2); }
 @media (max-width: 900px) {
   #rail { display: flex; align-items: center; gap: 10px; }
   #modsw { margin: 0; flex: none; }

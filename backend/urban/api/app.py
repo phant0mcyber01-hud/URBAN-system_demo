@@ -38,7 +38,7 @@ from ..accounts import Accounts, CodeRequired, allows, keep_first_password
 from ..core.bus import PLATFORM_FRAME, SOURCE_FRAME, Bus
 from ..devices import crypto
 from ..devices.hub import DeviceHub
-from ..devices.enrolment import is_district, is_lighting, make_kit, parse_code
+from ..devices.enrolment import is_district, is_lighting, is_water, make_kit, parse_code
 from ..devices.registry import ACTIVE, REVOKED, Registry, device_id, provision
 from ..city.passport import PassportError, Passports, problems
 from ..modules import ModuleError, describe, load_modules, mount_routes, report_router, startup_all, tick_all
@@ -569,7 +569,7 @@ def history_queues(junction: str, hours: float = 24, who: str = Depends(viewer))
 @app.get("/api/devices")
 def devices(who: str = Depends(viewer)):
     """The registry with live health: enrolment data, session, last report and alerts per unit; wg: the tunnel of a
-    unit or district server (DeviceHub._wg_row), null for a lighting cabinet."""
+    unit or district server (DeviceHub._wg_row), null for a lighting cabinet or a pump station."""
     from ..devices.health import assess
     return [{**row, "alerts": assess(row)} for row in hub.status()]
 
@@ -610,8 +610,11 @@ class CodeEnrolment(BaseModel):
     district: str | None = None  # a unit: the district server it connects through (its next kit points there)
     address: str = ""         # a district server: the host name or IP its units connect to
     cabinet: str = ""         # a lighting unit: the cabinet it controls, e.g. C-01
-    lon: float | None = None  # a lighting unit: where the cabinet stands (for its astronomical schedule)
-    lat: float | None = None
+    lon: float | None = None  # a lighting unit: where the cabinet stands (for its astronomical schedule); a pump
+    lat: float | None = None  # station's unit: where the station stands (for the map)
+    site: str = ""            # a pump station's unit: the station it reads, e.g. S-01
+    p_min: float | None = None  # a pump station's unit: outlet pressure limits, bar (the centre's alerts)
+    p_max: float | None = None
 
 
 class Assignment(BaseModel):
@@ -656,6 +659,23 @@ async def device_enroll_code(body: CodeEnrolment, who: str = Depends(admin)):
                                       actor=who, mode="approval")
         return {"id": rec["id"], "kind": "lighting", "cabinet": rec["cabinet"], "serial": rec["serial"],
                 "fingerprint": fp, "replaced": replaced}
+    if is_water(code["device"]):
+        if not body.site.strip():
+            raise HTTPException(400, "для блока насосной станции нужна станция, которую он читает (например S-01)")
+        before = hub.registry.devices.get(code["device"])
+        try:
+            rec = await hub.enroll_water(code["device"], body.site.strip(), code["public"], code["serial"],
+                                         body.lon, body.lat, body.p_min, body.p_max)
+        except ValueError as err:
+            raise HTTPException(400, str(err))
+        fp = crypto.fingerprint(rec["public_key"])
+        replaced = before is not None and before["public_key"] != rec["public_key"]
+        limits = "" if rec["p_min"] is None and rec["p_max"] is None else f" pressure {rec['p_min']}..{rec['p_max']}"
+        platform.gateway.audit.append(platform.t, "device-enrolled", "-", "-", rec["id"],
+                                      f"site {rec['site']}{limits} key {fp}{' (box replaced)' if replaced else ''}",
+                                      actor=who, mode="approval")
+        return {"id": rec["id"], "kind": "water", "site": rec["site"], "p_min": rec["p_min"], "p_max": rec["p_max"],
+                "serial": rec["serial"], "fingerprint": fp, "replaced": replaced}
     junction = next((j for j in junctions if j["id"] == body.junction), None)
     if junction is None:
         raise HTTPException(404, "нет такого перекрёстка")

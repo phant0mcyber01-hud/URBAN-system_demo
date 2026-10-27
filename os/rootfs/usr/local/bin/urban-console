@@ -50,19 +50,39 @@ if [ "$module" = lighting ]; then
   fi
   lightline=${lightline:-waiting for the lighting program}
 fi
+# A pump station's own state (urban-water@, user urban, writes /run/urban/water/water.json), read the same way:
+# untrusted text, never through a link, only letters, digits and . _ - of it reach the screen.
+waterline=""
+if [ "$module" = water ]; then
+  wf=/run/urban/water/water.json
+  if [ -f "$wf" ] && [ ! -L "$wf" ]; then
+    wj=$(head -c 4096 "$wf" 2>/dev/null | tr -d '\n')
+    wjv() { printf '%s' "$wj" | sed -n "s/.*\"$1\": *\"\{0,1\}\([A-Za-z0-9._-]\{1,16\}\)\"\{0,1\}[,} ].*/\1/p" | head -n 1; }
+    wage=$(( $(date +%s) - $(stat -c %Y "$wf" 2>/dev/null || echo 0) ))
+    wsite=$(wjv site); wp=$(wjv pressure_out); wq=$(wjv flow); wkw=$(wjv power_kw); wlink=$(wjv link)
+    if printf '%s' "$wj" | grep -q '"source_error": *"'; then wsrc="NO LINK TO THE AUTOMATION"; else wsrc="automation ok"; fi
+    if [ -n "$wsite" ] && [ "$wage" -le 60 ]; then
+      waterline="${wsite}: pressure ${wp:-?} bar, flow ${wq:-?} m3/h, power ${wkw:-?} kW, ${wsrc}, centre ${wlink:-?} (read only)"
+    elif [ -n "$wsite" ]; then
+      waterline="no fresh state (the program wrote last ${wage} s ago)"
+    fi
+  fi
+  waterline=${waterline:-waiting for the water program}
+fi
 # The WireGuard tunnel to the district (a junction unit) or to the district's units (a district server): the line its
 # root helper urban-wg writes (state, addresses, handshake, the tunnel key's fingerprint). Only plain characters of it
 # reach the screen (a backslash would be a getty escape).
 tunnelline=""
 case "$(conf ROLE | tail -n 1):$module" in
-  unit:lighting) ;;
+  unit:lighting|unit:water) ;;
   unit:*|district:*)
     tunnelline=$(head -n 1 /run/urban/wg.txt 2>/dev/null | head -c 200 | tr -cd 'A-Za-z0-9 .,:()>_-')
     tunnelline=${tunnelline:-no status yet (the tunnel helper urban-wg writes it at boot)} ;;
 esac
 case "$role" in
   unit) what="junction unit"; [ "$vision" = off ] && what="junction unit, light (no cameras)"
-        [ "$module" = lighting ] && what="street-lighting cabinet (module lighting)" ;;
+        [ "$module" = lighting ] && what="street-lighting cabinet (module lighting)"
+        [ "$module" = water ] && what="pump station (module water, read only)" ;;
   district) what="district server" ;;
   center) what="control centre" ;;
   district,center) what="district server and control centre" ;;
@@ -79,6 +99,8 @@ esac
     printf "  enrolment     %s\n" "${code:-}"
     if [ "$module" = lighting ]; then
       printf "                (the centre enrols it: urban.provision enroll-lighting %s --cabinet <id> --public <key>)\n" "$unit"
+    elif [ "$module" = water ]; then
+      printf "                (the centre enrols it: urban.provision enroll-water %s --site <id> --public <key>)\n" "$unit"
     else
       printf "                (paste it in the platform: Devices -> Enrol a unit; compare the key above)\n"
     fi
@@ -100,6 +122,7 @@ esac
     echo "                on the URBAN-ESP partition of this disk, then restart"
   fi
   [ -z "$lightline" ] || printf "  lighting      %s\n" "$lightline"
+  [ -z "$waterline" ] || printf "  water         %s\n" "$waterline"
   [ -z "$tunnelline" ] || printf "  tunnel        %s\n" "$tunnelline"
   printf "  system        URBAN OS %s, slot %s\n" "$version" "$slot"
   # the signed boot chain, as urban-os-check found it (the redraws from sandboxes cannot read the firmware variables)

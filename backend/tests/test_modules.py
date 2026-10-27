@@ -1,7 +1,8 @@
 """The City OS core side of modules: the registry of built-in modules (MODULES, an unknown name refused), the report
 router (a device's report reaches only the module of its kind), GET /api/modules's body, the traffic module over the
-existing platform, and lighting cabinets as devices (enrolment, kit, CLI, hub: no traffic plans, OS updates offered).
-The lighting module itself is tested in test_lighting.py; here fakes stand in for it."""
+existing platform, and lighting cabinets and pump stations as devices (enrolment, kit, CLI, hub: no traffic plans,
+OS updates offered). The lighting and water modules themselves are tested in test_lighting.py and test_water.py; here
+fakes stand in for them."""
 import asyncio
 import json
 import sys
@@ -96,8 +97,8 @@ def test_modules_are_loaded_in_the_order_named_and_attached(fakes):
 
 
 def test_an_unknown_or_repeated_module_name_is_refused_with_a_clear_error(fakes):
-    with pytest.raises(ModuleError, match="unknown module 'water'.*lighting, traffic"):
-        load_modules(["traffic", "water"], make_core())
+    with pytest.raises(ModuleError, match="unknown module 'power'.*lighting, traffic"):
+        load_modules(["traffic", "power"], make_core())
     with pytest.raises(ModuleError, match="named twice"):
         load_modules(["traffic", "traffic"], make_core())
 
@@ -119,9 +120,16 @@ def test_two_modules_cannot_own_the_same_kind_of_device(monkeypatch, fakes):
         load_modules(["traffic", "twin"], make_core())
 
 
-def test_the_built_ins_are_traffic_and_lighting_and_both_are_on_by_default():
-    assert set(modules_pkg.BUILTIN) == {"traffic", "lighting"}
-    assert c.MODULES == ["traffic", "lighting"]  # MODULES in .env or the environment overrides this on purpose
+def test_the_built_ins_are_traffic_lighting_and_water_and_all_are_on_by_default():
+    assert set(modules_pkg.BUILTIN) == {"traffic", "lighting", "water"}
+    assert modules_pkg.BUILTIN["water"] == ("urban.modules.water", "WaterModule")
+    assert c.MODULES == ["traffic", "lighting", "water"]  # MODULES in .env or the environment overrides this on purpose
+
+
+def test_the_real_built_ins_load_together_each_owning_its_own_kind():
+    mods = load_modules(["lighting", "water"], make_core())
+    assert [(m.id, m.device_kind) for m in mods] == [("lighting", "lighting"), ("water", "water")]
+    assert mods[1].title == "Водоканал"
 
 
 # ---------------------------------------------------------------- reports go to the module of the device's kind
@@ -147,8 +155,8 @@ def test_a_kind_nobody_owns_is_ignored_with_one_log_line(fakes):
     route = report_router([traffic], log=lines.append)
     for _ in range(3):
         route({"id": "light-C-01", "kind": "lighting"}, {})   # lighting is not loaded here
-    route({"id": "x-1", "kind": "water"}, {})
-    assert traffic.reports == [] and len(lines) == 2 and "'lighting'" in lines[0] and "'water'" in lines[1]
+    route({"id": "x-1", "kind": "power"}, {})
+    assert traffic.reports == [] and len(lines) == 2 and "'lighting'" in lines[0] and "'power'" in lines[1]
 
 
 def test_the_hub_hands_a_lighting_cabinets_report_to_the_lighting_module_only(pki, fakes):
@@ -476,7 +484,8 @@ def test_the_hub_offers_an_os_update_to_a_lighting_device_but_never_to_an_unknow
     assert hub.pending_release("light-C-01", rec) is None                  # up to date: nothing to offer
     hub.seen["light-C-01"] = {"at": 0, "health": {"os": 1}}
     assert hub.pending_release("light-C-01", rec)["version"] == 2
-    assert hub.pending_release("light-C-01", {**rec, "kind": "water"}) is None
+    assert hub.pending_release("light-C-01", {**rec, "kind": "water"})["version"] == 2  # a pump station runs URBAN OS
+    assert hub.pending_release("light-C-01", {**rec, "kind": "power"}) is None
 
 
 def test_the_hub_lists_lighting_cabinets_with_their_kind_and_cabinet_and_serves_them_by_kind(pki):
@@ -606,3 +615,220 @@ def test_hub_enroll_lighting_closes_the_old_session(pki):
     ws = hub.sessions["light-C-01"] = WS()
     rec = asyncio.run(hub.enroll_lighting("light-C-01", "C-01", new_pub(), "URB-2", 71.0, 40.0))
     assert rec["cabinet"] == "C-01" and ws.closed == 4403 and "light-C-01" not in hub.sessions
+
+
+# ---------------------------------------------------------------- pump stations (the water module) in the registry
+
+def test_enroll_water_makes_a_water_record_that_is_nobodys_junction_with_the_centres_limits(pki):
+    reg = Registry(pki / "devices.json")
+    rec = reg.enroll_water("pump-S-01", "S-01", new_pub(), "WTR-1", 71.78, 40.38, 2.0, 6.5)
+    assert rec["kind"] == "water" == kind_of(rec) and rec["site"] == "S-01" and rec["status"] == ACTIVE
+    assert (rec["lon"], rec["lat"], rec["p_min"], rec["p_max"], rec["serial"], rec["junction"], rec["tls"]) == \
+        (71.78, 40.38, 2.0, 6.5, "WTR-1", None, None)
+    assert Registry(pki / "devices.json").devices["pump-S-01"]["site"] == "S-01"          # saved
+    assert reg.assign("pump-S-01", None) is None                                         # never through a district
+    plain = reg.enroll_water("pump-S-02", "S-02", new_pub())                             # no place, no limits
+    assert (plain["lon"], plain["p_min"], plain["p_max"]) == (None, None, None) and plain["serial"].startswith("URB-")
+    assert reg.enroll_water("pump-S-03", "S-03", new_pub(), p_min=1)["p_min"] == 1.0     # one limit alone is fine
+    assert reg.wg_report("pump-S-01", "x" * 44) == ("none", None)                        # no tunnel, ever
+
+
+@pytest.mark.parametrize("device", ["edge-S-01", "pump-", "pump-a b", "pump-a/b", "pump-" + "x" * 55, "light-S-01", ""])
+def test_enroll_water_refuses_a_bad_device_id(pki, device):
+    with pytest.raises(ValueError, match="pump-<site>"):
+        Registry(pki / "devices.json").enroll_water(device, "S-01", new_pub())
+
+
+@pytest.mark.parametrize("site", ["", "S 01", "S/01", "S-01;x", "x" * 41, "Ш-1", None])
+def test_enroll_water_refuses_a_bad_site(pki, site):
+    with pytest.raises(ValueError, match="site"):
+        Registry(pki / "devices.json").enroll_water("pump-S-01", site, new_pub())
+
+
+@pytest.mark.parametrize("kw", [{"p_min": 6, "p_max": 2}, {"p_min": 3, "p_max": 3}, {"p_min": float("nan")},
+                                {"p_max": float("inf")}, {"p_min": -2}, {"p_max": 101}, {"p_min": "2"}, {"p_max": True},
+                                {"lon": 181, "lat": 40}, {"lon": 71}, {"lat": 40}, {"lon": float("nan"), "lat": 1}])
+def test_enroll_water_refuses_bad_limits_and_a_bad_place(pki, kw):
+    with pytest.raises(ValueError):
+        Registry(pki / "devices.json").enroll_water("pump-S-01", "S-01", new_pub(), **kw)
+
+
+def test_one_active_unit_per_site_one_key_one_device_and_no_takeover(pki):
+    reg = Registry(pki / "devices.json")
+    pub = new_pub()
+    reg.enroll_water("pump-S-01", "S-01", pub)
+    with pytest.raises(ValueError, match="site S-01 already has unit pump-S-01"):
+        reg.enroll_water("pump-S-01b", "S-01", new_pub())
+    with pytest.raises(ValueError, match="already enrolled as pump-S-01"):
+        reg.enroll_water("pump-S-02", "S-02", pub)
+    again = reg.enroll_water("pump-S-01", "S-01", new_pub(), p_min=2.5)              # a replaced box: allowed
+    assert again["public_key"] != pub and again["p_min"] == 2.5
+    reg.set_status("pump-S-01", REVOKED)
+    reg.enroll_water("pump-S-01b", "S-01", new_pub())                                 # free once revoked
+    reg.enroll_lighting("light-X", "C-09", new_pub())
+    reg.devices["pump-X"] = {**reg.devices["light-X"], "id": "pump-X", "public_key": new_pub()}
+    with pytest.raises(ValueError, match="already enrolled as a lighting"):
+        reg.enroll_water("pump-X", "S-09", new_pub())
+
+
+def test_a_water_units_kit_carries_its_site_place_and_limits_and_no_junction(pki):
+    rec = Registry(pki / "devices.json").enroll_water("pump-S-01", "S-01", new_pub(), "WTR-1", 71.78, 40.38, 2.0, 6.0)
+    kit = make_kit(rec, pki, "centre.city", 8443)
+    assert kit["kind"] == "water" and kit["unit"] == "pump-S-01" and kit["junction"] is None and kit["via"] is None
+    assert (kit["site"], kit["lon"], kit["lat"], kit["p_min"], kit["p_max"]) == ("S-01", 71.78, 40.38, 2.0, 6.0)
+    assert "cabinet" not in kit and kit["approaches"] == []
+
+
+def test_provision_enroll_water_list_and_kit(monkeypatch, pki, capsys):
+    pub = new_pub()
+    code, out = run_cli(monkeypatch, pki, capsys, "enroll-water", "pump-S-01", "--site", "S-01", "--public", pub,
+                        "--serial", "WTR-1", "--lon", "71.78", "--lat", "40.38", "--p-min", "2", "--p-max", "6")
+    assert code == 0 and "enrolled water pump-S-01 for site S-01 (WTR-1), pressure 2.0..6.0 bar" in out
+    assert crypto.fingerprint(pub) in out
+    code, out = run_cli(monkeypatch, pki, capsys, "list")
+    line = next(ln for ln in out.splitlines() if ln.startswith("pump-S-01"))
+    assert "water" in line and "site S-01" in line and "active" in line
+    code, out = run_cli(monkeypatch, pki, capsys, "kit", "pump-S-01")
+    assert json.loads(out)["site"] == "S-01"
+    code, _ = run_cli(monkeypatch, pki, capsys, "enroll-water", "pump-S-02", "--site", "S-02", "--public", new_pub(),
+                      "--p-min", "6", "--p-max", "2")
+    assert "p_min must be below p_max" in code
+    code, _ = run_cli(monkeypatch, pki, capsys, "enroll-water", "pump-S-03", "--site", "S-01", "--public", new_pub())
+    assert "site S-01 already has unit pump-S-01" in code
+
+
+def test_a_pump_station_authenticates_gets_its_site_no_plans_and_an_os_update(pki, tmp_path):
+    reg = Registry(pki / "devices.json")
+    key = crypto.new_key()
+    reg.enroll_water("pump-S-01", "S-01", crypto.public_hex(key))
+    store = ReleaseStore(tmp_path / "releases")
+    pack = tmp_path / "bundle.raucb"
+    pack.write_bytes(b"bytes of a bundle")
+    store.add(pack, 2)
+    seen = []
+    hub = DeviceHub(reg, crypto.load_private((pki / "gateway.key").read_text()), on_report=lambda rec, r: seen.append(rec),
+                    plans={"T1": {1}, None: {7}}, releases=store)
+    ws = LightWS(key, "pump-S-01", [{"type": "report", "t": 1, "health": {"os": 1}, "water": {"site": "S-01"}}])
+    asyncio.run(hub.serve(ws))
+    welcome = ws.sent[1]
+    assert welcome["plans"] == [] and welcome["tls"] is None and welcome["site"] == "S-01" and "cabinet" not in welcome
+    assert [r["id"] for r in seen] == ["pump-S-01"] and kind_of(seen[0]) == "water"
+    offer = next(m for m in ws.sent if m["type"] == "cmd")
+    assert set(offer["body"]) == {"update"} and offer["body"]["update"]["version"] == 2   # the only thing sent down
+    rows = {r["id"]: r for r in hub.status()}
+    assert rows["pump-S-01"]["kind"] == "water" and rows["pump-S-01"]["site"] == "S-01" and rows["pump-S-01"]["wg"] is None
+    assert hub.floor_verdict("pump-S-01") is None and [d["id"] for d in hub.devices_of("water")] == ["pump-S-01"]
+
+
+def test_hub_enroll_water_closes_the_old_session(pki):
+    class WS:
+        closed = None
+
+        async def close(self, code=1000):
+            self.closed = code
+    hub = DeviceHub(Registry(pki / "devices.json"), crypto.new_key(), on_report=lambda rec, r: None)
+    ws = hub.sessions["pump-S-01"] = WS()
+    rec = asyncio.run(hub.enroll_water("pump-S-01", "S-01", new_pub(), "WTR-2", 71.0, 40.0, 1.5, 5.0))
+    assert rec["site"] == "S-01" and rec["p_max"] == 5.0 and ws.closed == 4403 and "pump-S-01" not in hub.sessions
+
+
+def test_the_platform_shows_a_pump_station_as_a_device_of_its_own_not_a_junction():
+    p = Platform([71.78, 40.38], 1000, [CAM])
+    p.devices([{"id": "pump-S-01", "kind": "water", "site": "S-01", "junction": None, "tls": None, "status": "active",
+                "online": True, "age": 1, "health": {}, "fingerprint": "9999-0000-1111-2222"}], 10)
+    assert p.dev["pump-S-01"]["k"] == "water" and p.dev["pump-S-01"]["site"] == "S-01" and "cab" not in p.dev["pump-S-01"]
+    p.on_report({"id": "pump-S-01", "kind": "water", "tls": None}, {"queues": {"a": 1}, "water": {}})
+    assert p.sensors == {}
+
+
+def test_the_demo_twin_gets_three_pump_stations_with_limits_next_to_its_junctions(tmp_path):
+    placed = [{"id": f"J-0{n}", "tls": f"T{n}", "name": "x", "lon": 71.78 + n / 100, "lat": 40.38} for n in range(1, 6)]
+    provision(placed, tmp_path)
+    reg = Registry(tmp_path / "devices.json")
+    water = sorted(d["id"] for d in reg.devices.values() if kind_of(d) == "water")
+    assert water == ["pump-S-01", "pump-S-02", "pump-S-03"]
+    rec = reg.devices["pump-S-01"]
+    assert (rec["site"], rec["p_min"], rec["p_max"], rec["junction"]) == ("S-01", 2.0, 6.0, None)
+    assert all((tmp_path / "edge" / f"{d}.key").exists() for d in water)
+    assert provision(placed, tmp_path) is False                                            # idempotent
+
+
+def water_unit(tmp_path, pki, **place):
+    from urban.edge.__main__ import keygen
+    unit_pki = tmp_path / "unit" / "pki"
+    keygen(SimpleNamespace(unit="pump-S-01", key=None, pki=str(unit_pki), serial="WTR-1"))
+    key_path = unit_pki / "edge" / "pump-S-01.key"
+    public = crypto.public_hex(crypto.load_private(key_path.read_text()))
+    rec = Registry(pki / "devices.json").enroll_water("pump-S-01", "S-01", public, "WTR-1", **place)
+    return unit_pki, key_path, rec
+
+
+def test_a_pump_unit_prints_a_urban1_code_that_parses(tmp_path, capsys):
+    from urban.devices.enrolment import is_water, make_code, parse_code
+    from urban.edge.__main__ import keygen
+    keygen(SimpleNamespace(unit="pump-S-01", key=None, pki=str(tmp_path / "pki"), serial="WTR-1"))
+    code = parse_code(next(line for line in capsys.readouterr().out.splitlines() if "URBAN1:" in line))
+    assert code["device"] == "pump-S-01" and code["serial"] == "WTR-1" and is_water(code["device"])
+    for bad in ("pump-", "pump-a b", "pumps-S-01", "pump-" + "x" * 55):
+        with pytest.raises(ValueError):
+            make_code(bad, "", code["public"])
+
+
+def test_install_kit_writes_a_water_env_file_0600_and_no_junction_file_and_keeps_the_installers_lines(tmp_path, pki):
+    import os
+    from urban.devices.enrolment import install_kit
+    unit_pki, key_path, rec = water_unit(tmp_path, pki, lon=71.78, lat=40.38, p_min=2.0, p_max=6.0)
+    kit = make_kit(rec, pki, "centre.city", 8443)
+    env = tmp_path / "unit" / "edge-pump-S-01.env"
+    written = install_kit(kit, "pump-S-01", key_path, unit_pki, env)
+    assert written == [str(unit_pki / "ca.pem"), str(unit_pki / "root.pub"), str(env)]
+    assert not list(env.parent.glob("*.junction.json"))
+    if os.name == "posix":
+        assert env.stat().st_mode & 0o777 == 0o600
+    lines = [ln for ln in env.read_text(encoding="utf-8").splitlines() if ln and not ln.startswith("#")]
+    assert lines == ["PLATFORM=centre.city:8443", "SERVER_NAME=centre.city", "SITE=S-01", "LON=71.78", "LAT=40.38",
+                     "ADAPTER=emulated", "MAP=", "MODBUS_HOST=", "MODBUS_PORT=502", "SLAVE=1", "SERIAL=", "BAUD=9600"]
+    text = env.read_text(encoding="utf-8").replace("ADAPTER=emulated", "ADAPTER=modbus-tcp").replace("MODBUS_HOST=", "MODBUS_HOST=10.0.0.5")
+    env.write_text(text.replace("MAP=", "MAP=/etc/urban/water-map.json"), encoding="utf-8")
+    install_kit({**kit, "platform": "other.city:8443", "server_name": "other.city", "lat": 40.5}, "pump-S-01",
+                key_path, unit_pki, env)
+    lines = [ln for ln in env.read_text(encoding="utf-8").splitlines() if ln and not ln.startswith("#")]
+    assert lines == ["PLATFORM=other.city:8443", "SERVER_NAME=other.city", "SITE=S-01", "LON=71.78", "LAT=40.5",
+                     "ADAPTER=modbus-tcp", "MAP=/etc/urban/water-map.json", "MODBUS_HOST=10.0.0.5", "MODBUS_PORT=502", "SLAVE=1",
+                     "SERIAL=", "BAUD=9600"]
+    env.write_text("PLATFORM=x\nSERVER_NAME=y\n", encoding="utf-8")                   # an env file with no ADAPTER yet
+    install_kit({**kit, "lon": None, "lat": None}, "pump-S-01", key_path, unit_pki, env)
+    assert env.read_text(encoding="utf-8").splitlines() == ["PLATFORM=centre.city:8443", "SERVER_NAME=centre.city",
+                                                            "SITE=S-01", "ADAPTER=emulated"]
+
+
+def test_install_kit_refuses_a_bad_water_kit(tmp_path, pki):
+    from urban.devices.enrolment import install_kit
+    unit_pki, key_path, rec = water_unit(tmp_path, pki, lon=71.78, lat=40.38)
+    kit = make_kit(rec, pki, "centre.city", 8443)
+    env = tmp_path / "unit" / "edge-pump-S-01.env"
+    for bad in ({"site": None}, {"site": "S 01"}, {"site": "S-01\nADAPTER=x"}, {"lon": "71"}, {"lat": 95},
+                {"p_min": "2"}, {"p_max": 1000}, {"platform": "a\nb"}):
+        with pytest.raises(ValueError):
+            install_kit({**kit, **bad}, "pump-S-01", key_path, unit_pki, env)
+    assert not env.exists()
+
+
+def test_enrolment_by_code_takes_a_pump_code_with_its_site_and_limits(pki):
+    """The centre's enrolment by code (api/app.py, POST /api/devices/enroll-code) for a pump station: the code the unit
+    printed, the station and optionally the place and the pressure limits go to DeviceHub.enroll_water, audited. The app
+    module starts a whole platform when imported, so its wiring is read here and the path it takes is run below."""
+    from pathlib import Path
+    import urban.api as api_pkg
+    from urban.devices.enrolment import is_water, make_code, parse_code
+    app = (Path(api_pkg.__file__).parent / "app.py").read_text(encoding="utf-8")
+    assert "site: str = \"\"" in app and "p_min: float | None = None" in app and "p_max: float | None = None" in app
+    assert "if is_water(code[\"device\"]):" in app and "body.site.strip()" in app
+    assert "hub.enroll_water(code[\"device\"], body.site.strip(), code[\"public\"], code[\"serial\"]," in app
+    assert "body.lon, body.lat, body.p_min, body.p_max)" in app and "\"kind\": \"water\"" in app
+    key = crypto.new_key()
+    code = parse_code(make_code("pump-S-01", "WTR-1", crypto.public_hex(key)))
+    assert is_water(code["device"])
+    hub = DeviceHub(Registry(pki / "devices.json"), crypto.new_key(), on_report=lambda rec, r: None)
+    rec = asyncio.run(hub.enroll_water(code["device"], "S-01", code["public"], code["serial"], 71.78, 40.38, 2.0, 6.0))
+    assert (rec["kind"], rec["site"], rec["serial"], rec["p_min"], rec["p_max"]) == ("water", "S-01", "WTR-1", 2.0, 6.0)

@@ -19,6 +19,10 @@ const dist = join(WEB, "dist", "assets");
 const bundle = existsSync(dist) ? readdirSync(dist).filter((f) => f.endsWith(".js")).map((f) => readFileSync(join(dist, f), "utf8")).join("\n") : "";
 for (const s of ["/api/modules", "/api/lighting/state", "/api/lighting/override", "/api/lighting/release"])
   must(bundle.includes(s), `the built interface never calls ${s}`);
+// the water module is read only: the bundle reads /api/water/state and knows no other /api/water/ route
+must(bundle.includes("/api/water/state"), "the built interface never calls /api/water/state");
+const waterRoutes = [...bundle.matchAll(/\/api\/water\/[A-Za-z0-9_\-/]*/g)].map((m) => m[0]).filter((r) => r !== "/api/water/state");
+must(!waterRoutes.length && !/\/api\/water\/(?!state\b)/.test(bundle), `the built interface has a water route other than /api/water/state: ${waterRoutes.join(", ")}`);
 
 // 2. the pure render functions
 const L = await import(pathToFileURL(join(WEB, "src", "ui", "lighting.js")).href);
@@ -109,6 +113,82 @@ must(typeof L.createLighting === "function", "createLighting is missing");
 const main = readFileSync(join(WEB, "src", "main.js"), "utf8");
 must(/api\.get\('\/api\/modules'\)/.test(main) && main.includes("renderModuleSwitch") && main.includes("lightingLayers"), "main.js does not fetch the modules, draw the switch and the map layer");
 must(existsSync(join(WEB, "src", "scene", "lightingLayer.js")), "the lighting map layer is missing");
+
+// 3. the water module (read only): web/src/ui/water.js
+const W = await import(pathToFileURL(join(WEB, "src", "ui", "water.js")).href);
+const st = (id, over = {}) => ({ id: `pump-${id}`, site: id, lon: 71.78, lat: 40.38, online: true, age: 2, p_min: 2.0, p_max: 6.0,
+  pressure_in: 0.8, pressure_out: 4.2, flow: 118.5, power_kw: 37.2, energy_kwh: 1203344, level: 3.1,
+  pumps: [{ run: true, fault: false }, { run: false, fault: false }], door: "closed", kwh_per_m3: 0.31,
+  night_min_flow: 41.0, night_baseline: 38.5, source_error: null, refused: null, alerts: [], ...over });
+const LEAK = "возможна утечка: ночной минимум 55.0 м³/ч против обычных 38.5";
+const water = { alerts: 4, sites: [
+  st("S-01"),
+  st("S-02", { pumps: [{ run: true, fault: false }, { run: false, fault: true }],
+    alerts: [{ kind: "pump-fault", level: "alert", text: "авария насоса 2" }] }),
+  st("S-03", { night_min_flow: 55.0, alerts: [{ kind: "leak", level: "warn", text: LEAK }] }),
+  st("S-04", { online: false, age: 95, pressure_in: null, pressure_out: null, flow: null, power_kw: null, energy_kwh: null, level: null,
+    pumps: [], door: null, kwh_per_m3: null, night_min_flow: null, night_baseline: null, p_min: null, p_max: null,
+    alerts: [{ kind: "offline", level: "warn", text: "нет связи" }] }),
+  st("S-05", { pressure_out: 1.4, door: "open", alerts: [{ kind: "door", level: "alert", text: "шкаф открыт" },
+    { kind: "pressure-low", level: "alert", text: "давление ниже нормы: 1.40 бар (норма от 2.00)" }] }),
+] };
+const wp = W.renderWaterPanel(water, {});
+const wRow = (html, id) => {
+  const i = html.indexOf(`data-station="${id}"`);
+  if (i < 0) return "";
+  const start = html.lastIndexOf('<div class="item wt-st', i);
+  const next = html.indexOf('<div class="item wt-st', i);
+  return html.slice(start, next < 0 ? html.length : next);
+};
+for (const s of water.sites) must(wRow(wp, s.id) !== "", `the water panel does not list station ${s.site}`);
+must(wp.includes("Водоканал"), "the water panel has no title");
+const r1 = wRow(wp, "pump-S-01");
+must(r1.includes("4.20 бар") && r1.includes("0.80 бар"), "the station pressures are not shown");
+must(r1.includes("норма 2.00–6.00"), "the pressure thresholds are not shown");
+must(r1.includes("118.5 м³/ч") && r1.includes("37.2 кВт") && r1.includes("0.31 кВт·ч/м³"), "flow, power or kWh/m³ are not shown");
+must(r1.includes("1203344 кВт·ч") && r1.includes("3.10 м"), "the energy counter or level is not shown");
+must(r1.includes("Н1 работает") && r1.includes("Н2 стоит") && r1.includes("работает 1"), "the pumps are not shown");
+must(r1.includes("шкаф закрыт") && wRow(wp, "pump-S-05").includes("шкаф открыт"), "the door is not shown");
+must(r1.includes("ночной минимум 41.0 м³/ч") && r1.includes("обычно 38.5 м³/ч"), "the night minimum vs baseline is not shown");
+must(r1.includes("на связи") && !/data-alert="1"/.test(r1), "a healthy station is not shown as healthy");
+must(wRow(wp, "pump-S-02").includes("Н2 авария") && wRow(wp, "pump-S-02").includes("авария насоса 2"), "a pump fault is not shown");
+must(wRow(wp, "pump-S-03").includes(LEAK), "the leak alert text is not shown");
+must(wRow(wp, "pump-S-05").includes("давление ниже нормы"), "the low-pressure alert is not shown");
+const r4 = wRow(wp, "pump-S-04");
+must(r4.includes("нет связи") && r4.includes("1 мин"), "an offline station does not say it has no link and since when");
+must((r4.match(/—/g) || []).length >= 10 && !/\b0\.0+ (бар|м³\/ч|кВт)/.test(r4) && !r4.includes("NaN") && !r4.includes("null") && !r4.includes("undefined"),
+  "null readings are not shown as «—» (or a number was invented)");
+must(r4.includes("порог не задан"), "a station without thresholds does not say so");
+// the worst alert colours the station; the worst stations come first
+must(W.stationTone(water.sites[0]) === "ok" && W.stationTone(water.sites[1]) === "bad" && W.stationTone(water.sites[2]) === "warn"
+  && W.stationTone(water.sites[3]) === "warn" && W.stationTone(water.sites[4]) === "bad", "a station's worst alert level is wrong");
+must(W.stationTone(st("X", { online: false })) === "warn", "an offline station without a server alert is not a warning");
+must(wp.indexOf('data-station="pump-S-02"') < wp.indexOf('data-station="pump-S-03"') && wp.indexOf('data-station="pump-S-03"') < wp.indexOf('data-station="pump-S-01"'),
+  "stations are not listed worst first");
+const s5alerts = W.stationAlerts(st("Y", { alerts: [{ kind: "leak", level: "warn", text: "w" }, { kind: "door", level: "alert", text: "a" }] }));
+must(s5alerts[0].tone === "bad" && s5alerts[1].tone === "warn", "a station's alerts are not sorted worst first");
+must(W.waterSummary(water) === "5 станций, 4 на связи, 4 с тревогой", `the water summary is wrong: ${W.waterSummary(water)}`);
+must(W.waterSummary(null) === "нет данных" && W.waterSummary({ sites: [] }) === "станций нет", "the water summary of no data is wrong");
+// read only: no controls anywhere in the water panel
+for (const t of ["<button", "<input", "<form", "<select", "<textarea"]) must(!wp.toLowerCase().includes(t), `the water panel has a control (${t})`);
+// escaping: device text is data
+const HOSTILE = "<img src=x onerror=alert(1)>";
+const evilW = W.renderWaterPanel({ sites: [st(HOSTILE, { id: HOSTILE, door: HOSTILE, alerts: [{ kind: HOSTILE, level: HOSTILE, text: HOSTILE }] })] }, { focus: HOSTILE });
+must(!evilW.includes("<img") && evilW.includes("&lt;img src=x onerror=alert(1)&gt;"), "water station text is not escaped");
+// empty and failed states
+must(W.renderWaterPanel({ sites: [] }).includes("Насосных станций пока нет"), "an empty station list is not explained");
+must(W.renderWaterPanel(null, { error: "нет связи с центром" }).includes("нет связи с центром"), "a failed water fetch is not shown");
+must(typeof W.createWater === "function", "createWater is missing");
+// the switch shows «Водоканал» when /api/modules lists water, and not otherwise
+const mods3 = [...modules, { id: "water", title: "Водоканал", device_kind: "water", summary: "3 станции" }];
+must(L.renderModuleSwitch(mods3, "traffic").includes(">Водоканал<"), "the module switch has no «Водоканал» tab when water is listed");
+must(/data-module="water"[^>]*aria-selected="true"/.test(L.renderModuleSwitch(mods3, "water")), "switching to water does not mark it");
+must(L.renderModuleSwitch([{ id: "traffic" }, { id: "water" }]).includes(">Водоканал<"), "the water module without a title gets no default title");
+must(!L.renderModuleSwitch(modules).includes("Водоканал"), "the «Водоканал» tab shows although water is not listed");
+must(main.includes("waterLayers") && main.includes("createWater"), "main.js does not wire the water panel and map layer");
+must(existsSync(join(WEB, "src", "scene", "waterLayer.js")), "the water map layer is missing");
+const wsrc = readFileSync(join(WEB, "src", "ui", "water.js"), "utf8");
+must(!/api\.post|method:\s*['"]POST/i.test(wsrc), "water.js sends something");
 
 if (problems.length) fail(problems.map((p) => "- " + p).join("\n"));
 console.log("WEB MODULES CHECK PASSED");

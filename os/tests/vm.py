@@ -12,6 +12,9 @@
     python3 vm.py lighting              a street-lighting cabinet (MODULE=lighting) and its centre: enrol, an operator's
                                         override reaches the cabinet and its screen, a foreign cabinet is refused, the
                                         cabinet returns to its schedule by itself when the centre's listener stops
+    python3 vm.py water                 a pump station (MODULE=water) reading a fake PLC and its centre: the readings,
+                                        alerts for a pump fault, a low pressure and a silent PLC, no command route,
+                                        and the PLC sent nothing but reads (Modbus functions 01-04)
     python3 vm.py hardened [lighting]   an intruder on a junction unit (or a lighting cabinet): root, the hijacked service,
                                         the device key inside the TPM and useless when copied to another machine; on the
                                         unit also the tunnel's key, interface and inbox
@@ -76,6 +79,7 @@ import re
 import shlex
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -852,7 +856,8 @@ def roles_in(slot, listing, triplet="x86_64-linux-gnu"):
         if role not in prepare:
             raise Fail(f"urban-prepare does not know the role {role}")
     for need in ("urban-relay.service", "urban-district@$UNIT.service", "VISION", "update-inbox", "urban-update.path",
-                 "MODULE", "urban-lighting@$UNIT.service", "/run/urban/light", "--keygen", "--tpm auto"):
+                 "MODULE", "urban-lighting@$UNIT.service", "/run/urban/light", "urban-water@$UNIT.service", "/run/urban/water",
+                 "--keygen", "--tpm auto"):
         if need not in prepare:
             raise Fail(f"urban-prepare does not start or open {need}")
     # step 8: the tunnel's pieces at every boot of a tunnel role (its inbox, key, helper and firewall fragment), and
@@ -1641,7 +1646,7 @@ ATTACK = r"""
 set -u
 unit=$(sed -n 's/^UNIT=//p' /var/lib/urban/etc/unit.conf)
 # the jailed service: a junction unit's, or a street-lighting cabinet's program
-if [ "$(sed -n 's/^MODULE=//p' /var/lib/urban/etc/unit.conf)" = lighting ]; then svc=urban-lighting@$unit; else svc=urban-edge@$unit; fi
+case "$(sed -n 's/^MODULE=//p' /var/lib/urban/etc/unit.conf)" in lighting) svc=urban-lighting@$unit ;; water) svc=urban-water@$unit ;; *) svc=urban-edge@$unit ;; esac
 pid=$(systemctl show -p MainPID --value $svc.service)
 say() { echo "$1 $2"; }
 try() { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }
@@ -2978,6 +2983,327 @@ def lighting():
                 os.remove(vm.disk)
 
 
+# ---------------------------------------------------------------- the water module (step 15)
+
+PLC_PORT = 15020  # the fake automation of the pump station, on the host side of the station's user network (10.0.2.2)
+WATER_MAP = {
+    "pressure_in": {"table": "input", "address": 0, "type": "u16", "scale": 0.01},
+    "pressure_out": {"table": "input", "address": 1, "type": "u16", "scale": 0.01},
+    "flow": {"table": "input", "address": 2, "type": "u16", "scale": 0.1},
+    "power": {"table": "input", "address": 3, "type": "u16", "scale": 0.1},
+    "energy": {"table": "holding", "address": 10, "type": "u32", "scale": 1, "word_order": "big"},
+    "level": {"table": "input", "address": 4, "type": "i16", "scale": 0.01},
+    "door": {"table": "discrete", "address": 0, "open": True},
+    "pumps": [{"run": {"table": "discrete", "address": 8}, "fault": {"table": "discrete", "address": 9}},
+              {"run": {"table": "discrete", "address": 10}, "fault": {"table": "discrete", "address": 11}}],
+}
+
+
+class FakePlc:
+    """A pump station's automation that is not there: a Modbus TCP server with input and holding registers, coils and
+    discrete inputs. It answers the read functions 01-04 and records every function code it is sent, so the check
+    can prove the station never asked for anything else (a write would be answered with exception 01 and recorded)."""
+
+    def __init__(self, port=PLC_PORT):
+        self.port = port
+        self.input = {0: 80, 1: 420, 2: 1185, 3: 372, 4: 310}
+        self.holding = {10: 0, 11: 52000}
+        self.coils = {}
+        self.discrete = {0: False, 8: True, 9: False, 10: False, 11: False}
+        self.functions: dict[int, int] = {}
+        self.lock = threading.Lock()
+        self.server = None
+        self.thread = None
+        self.conns: set = set()  # the open connections: a stopped PLC closes them too, as a powered-off one would
+
+    def start(self):
+        import socketserver
+        plc = self
+
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self):
+                sock = self.request
+                sock.settimeout(60)
+                with plc.lock:
+                    plc.conns.add(sock)
+                try:
+                    while True:
+                        head = _recv_exact(sock, 7)
+                        if head is None:
+                            return
+                        tid, _proto, length, unit = struct.unpack(">HHHB", head)
+                        pdu = _recv_exact(sock, length - 1)
+                        if pdu is None:
+                            return
+                        reply = plc.answer(pdu)
+                        sock.sendall(struct.pack(">HHHB", tid, 0, len(reply) + 1, unit) + reply)
+                except OSError:
+                    return
+                finally:
+                    with plc.lock:
+                        plc.conns.discard(sock)
+
+        class Server(socketserver.ThreadingTCPServer):
+            allow_reuse_address = True
+            daemon_threads = True
+
+        self.server = Server(("0.0.0.0", self.port), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        """Silent, as a PLC without power: no new connection, and the open ones (the station keeps its own) cut."""
+        if self.server is not None:
+            self.server.shutdown()
+            self.server.server_close()
+            self.server = None
+        with self.lock:
+            conns, self.conns = list(self.conns), set()
+        for sock in conns:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            sock.close()
+
+    def answer(self, pdu: bytes) -> bytes:
+        fc = pdu[0]
+        with self.lock:
+            self.functions[fc] = self.functions.get(fc, 0) + 1
+            if fc not in (1, 2, 3, 4) or len(pdu) < 5:
+                return bytes([fc | 0x80, 1])  # illegal function
+            start, count = struct.unpack(">HH", pdu[1:5])
+            if not 1 <= count <= 125:
+                return bytes([fc | 0x80, 3])
+            if fc in (1, 2):
+                table = self.coils if fc == 1 else self.discrete
+                bits = [bool(table.get(start + i, False)) for i in range(count)]
+                data = bytearray((count + 7) // 8)
+                for i, on in enumerate(bits):
+                    if on:
+                        data[i // 8] |= 1 << (i % 8)
+                return bytes([fc, len(data)]) + bytes(data)
+            table = self.holding if fc == 3 else self.input
+            words = [int(table.get(start + i, 0)) & 0xFFFF for i in range(count)]
+            return bytes([fc, 2 * count]) + struct.pack(f">{count}H", *words)
+
+    def tick_energy(self):
+        """The station's energy counter goes on as a real meter would (a few kWh per poll)."""
+        with self.lock:
+            value = (self.holding[10] << 16 | self.holding[11]) + 3
+            self.holding[10], self.holding[11] = value >> 16, value & 0xFFFF
+
+    def seen(self) -> dict:
+        with self.lock:
+            return dict(self.functions)
+
+
+def _recv_exact(sock, n):
+    out = b""
+    while len(out) < n:
+        chunk = sock.recv(n - len(out))
+        if not chunk:
+            return None
+        out += chunk
+    return out
+
+
+def water_site(api, name="S-01"):
+    """This station's row of GET /api/water/state, or None (the platform not up yet counts as no row)."""
+    try:
+        code, data = api.call("GET", "/api/water/state")
+    except Exception:  # connection refused while the platform restarts
+        return None
+    if code != 200 or not isinstance(data, dict):
+        return None
+    return next((r for r in data.get("sites", []) if name in (r.get("site"), r.get("id"))), None)
+
+
+def wait_site(api, what, ok, timeout, name="S-01"):
+    """Poll the centre's row of the station until ok(row) holds; returns (row, seconds waited)."""
+    start = time.time()
+    end, row = start + timeout, None
+    while time.time() < end:
+        row = water_site(api, name)
+        if row and ok(row):
+            return row, time.time() - start
+        time.sleep(4)
+    raise Fail(f"{what}: not within {timeout} s; the centre's row is {json.dumps(row, sort_keys=True)[:600]}")
+
+
+def alert_kinds(row):
+    return sorted(a.get("kind") for a in (row or {}).get("alerts") or [] if isinstance(a, dict))
+
+
+def water():
+    """A pump station (URBAN OS, MODULE=water, pump-S-01) reading a fake PLC over Modbus TCP, and its control centre
+    (role center), each its own machine; the station reaches the centre's device listener directly.
+      a. the centre shows S-01 online with the PLC's readings (pressures, flow, power, level, pumps, door)
+      b. a pump fault and a pressure under the centre's threshold set in the PLC become alerts; cleared, they go
+      c. the PLC stops answering: a source alert while the station stays online; back, the alert clears
+      d. the centre has no route that commands a station (POST answers 404/405)
+      e. for the whole run the PLC was sent no function but 01-04 (and was read)
+    The station's service is hardened, and no junction or vision service runs on it."""
+    plc = FakePlc()
+    plc.start()
+    centre = VM("water-center", unit="center", serial="PILOT-1", role="center", host="urban-center", grow_mb=2048,
+                forward=[(2443, 443), (28443, 8443)], ssh_port=2222)
+    station = VM("water-station", unit="pump-S-01", serial="WTR-1", module="water", ssh_port=2223, mem=1024)
+    unit = "pump-S-01"
+    stop = threading.Event()
+
+    def meter():
+        while not stop.wait(5):
+            plc.tick_energy()
+    threading.Thread(target=meter, daemon=True).start()
+    try:
+        for vm in (centre, station):
+            vm.start()
+        centre.booted("1", "A")
+        station.wait(rf"URBAN-ROLE role=unit name={unit} module=water vision=off")
+        line = station.booted("1", "A")
+        conf = station.ssh("cat /var/lib/urban/etc/unit.conf").stdout
+        if "MODULE=water" not in conf or "VISION=off" not in conf:
+            raise Fail(f"unit.conf of the station has no MODULE=water and VISION=off:\n{conf}")
+        screen = station.ssh("cat /run/urban/console.issue").stdout
+        if "pump station" not in screen:
+            raise Fail(f"the station's screen does not say what it is:\n{screen}")
+        got = [g.strip() for g in station.ssh("stat -c '%U:%G %a' /run/urban /run/urban/water").stdout.split(chr(10)) if g.strip()]
+        if got != ["root:root 755", "urban:urban 755"]:
+            raise Fail(f"station: /run/urban and /run/urban/water are {got!r}, want root:root 755 and urban:urban 755")
+        if station.ssh("test -e /run/urban/light", check=False).returncode == 0:
+            raise Fail("a pump station has the lighting cabinet's folder /run/urban/light")
+
+        ctx = centre_ca(centre)
+        health(ctx)
+        # A TEST SETTING, not the product's default: no second factor (as in the lighting scenario), so that the admin
+        # the centre made at its first start can read the API here
+        centre.ssh("echo 'MFA_ROLES=' >> /var/lib/urban/etc/platform.env && systemctl restart urban-platform")
+        health(ctx)
+        api = CentreApi(centre, ctx)
+
+        # enrol the station the way the administrator does, by the centre's CLI, with the centre's pressure thresholds
+        code = station.ssh("urban-unit code").stdout.strip()
+        if not code.startswith(f"URBAN1:{unit}:"):
+            raise Fail(f"the station printed no enrolment code for {unit}: {code!r}")
+        public = code.split(":")[3]
+        out = centre.ssh(f"{PROVISION} enroll-water {unit} --site S-01 --public {public} --serial WTR-1 "
+                         f"--lon 71.79 --lat 40.38 --p-min 3.0 --p-max 6.0").stdout
+        kit = centre.ssh(f"{PROVISION} kit {unit}").stdout
+        if '"urban_kit"' not in kit:
+            raise Fail(f"no kit for {unit}: {kit[-300:]} (enrol said: {out[-200:]})")
+        with open("/tmp/kit-water.json", "w") as f:
+            f.write(kit)
+        station.put("/tmp/kit-water.json", f"{STAGE}/kit.json")
+        r = station.ssh(f"urban-unit setup {STAGE}/kit.json", check=False)
+        if r.returncode != 0:
+            raise Fail(f"urban-unit setup on the station: {(r.stderr or r.stdout).strip()[-300:]}")
+        # the station's automation: the fake PLC on the host side of its network, through the register map; the
+        # centre by its forwarded device port (the certificate is still checked for urban-center)
+        with open("/tmp/water-map.json", "w") as f:
+            json.dump(WATER_MAP, f)
+        station.put("/tmp/water-map.json", "/var/lib/urban/etc/water-map.json")
+        station.ssh("chown urban:urban /var/lib/urban/etc/water-map.json && chmod 640 /var/lib/urban/etc/water-map.json")
+        env = f"/etc/urban/edge-{unit}.env"
+        station.ssh(f"sed -i 's|^PLATFORM=.*|PLATFORM=10.0.2.2:28443|' {env} && sed -i '/^ADAPTER=/d; /^MAP=/d; /^MODBUS_HOST=/d; /^MODBUS_PORT=/d; /^SLAVE=/d' {env} && "
+                    f"printf 'ADAPTER=modbus-tcp\\nMAP=/etc/urban/water-map.json\\nMODBUS_HOST=10.0.2.2\\n"
+                    f"MODBUS_PORT={PLC_PORT}\\nSLAVE=1\\n' >> {env} && systemctl restart urban-water@{unit}")
+        time.sleep(5)
+        if station.ssh(f"systemctl is-active urban-water@{unit}", check=False).stdout.strip() != "active":
+            log = station.ssh(f"journalctl -u urban-water@{unit} --no-pager -n 20 -o cat", check=False).stdout
+            raise Fail(f"urban-water@{unit} is not running after the kit:\n{log}")
+        for service in (f"urban-edge@{unit}", f"urban-vision@{unit}", f"urban-lighting@{unit}"):
+            if station.ssh(f"systemctl is-active {service}", check=False).stdout.strip() == "active":
+                raise Fail(f"{service} runs on a pump station")
+        exposure = station.ssh(f"systemd-analyze security --no-pager urban-water@{unit}.service | "
+                               "sed -n 's/.*Overall exposure level for [^:]*: \\([0-9.]*\\).*/\\1/p'").stdout.strip()
+        if not exposure or float(exposure) > EXPOSURE_MAX:
+            raise Fail(f"urban-water@ is exposed at {exposure or '?'} (want {EXPOSURE_MAX} or less)")
+
+        # (a) the centre shows the PLC's readings
+        def readings(row):
+            pumps = row.get("pumps") or []
+            return (row.get("online") and row.get("pressure_out") == 4.2 and row.get("pressure_in") == 0.8
+                    and row.get("flow") == 118.5 and row.get("power_kw") == 37.2 and row.get("level") == 3.1
+                    and row.get("door") == "closed" and len(pumps) == 2 and pumps[0].get("run") is True
+                    and pumps[1].get("run") is False and not any(p.get("fault") for p in pumps)
+                    and not row.get("source_error"))
+        try:
+            row, waited = wait_site(api, "S-01 online with the PLC's readings", readings, 420)
+        except Fail:
+            log = station.ssh(f"journalctl -u urban-water@{unit} --no-pager -n 20 -o cat", check=False).stdout
+            raise Fail(f"the centre never showed S-01 with the PLC's readings: {water_site(api)}\nstation's journal:\n{log}")
+        if row.get("p_min") != 3.0 or row.get("p_max") != 6.0:
+            raise Fail(f"the centre does not show its thresholds 3.0/6.0 for S-01: {row}")
+        if alert_kinds(row):
+            raise Fail(f"S-01 has alerts with healthy readings: {row.get('alerts')}")
+        seen = wait_screen(station, r"water\s+S-01: pressure 4\.2 bar.*", 90)
+        print(f"   OK (a) GET /api/water/state: S-01 online after {waited:.0f} s with the PLC's readings (out 4.2 bar, "
+              f"in 0.8, flow 118.5 m3/h, 37.2 kW, level 3.1 m, pump 1 running, door closed), thresholds 3.0-6.0, "
+              f"no alerts; its screen: {seen!r}", flush=True)
+
+        # (b) a pump fault and a low pressure in the PLC become alerts, and go when cleared
+        with plc.lock:
+            plc.discrete[11] = True
+            plc.input[1] = 250
+        row, waited = wait_site(api, "the pump-fault and pressure-low alerts",
+                                lambda r: {"pump-fault", "pressure-low"} <= set(alert_kinds(r)), 120)
+        texts = [a.get("text") for a in row.get("alerts") or []]
+        with plc.lock:
+            plc.discrete[11] = False
+            plc.input[1] = 420
+        row2, waited2 = wait_site(api, "the alerts' clearing",
+                                  lambda r: not ({"pump-fault", "pressure-low"} & set(alert_kinds(r))), 120)
+        print(f"   OK (b) pump 2 fault and 2.5 bar set in the PLC: alerts after {waited:.0f} s {texts}; cleared in the "
+              f"PLC, gone after {waited2:.0f} s", flush=True)
+
+        # (c) the PLC stops answering: a source alert, the station stays online; back, it clears
+        plc.stop()
+        row, waited = wait_site(api, "the source alert", lambda r: "source" in alert_kinds(r) and r.get("online"), 120)
+        if row.get("pressure_out") is not None:
+            raise Fail(f"with the PLC silent the centre still shows a pressure (invented, not read): {row}")
+        plc.start()
+        row2, waited2 = wait_site(api, "the source alert's clearing",
+                                  lambda r: "source" not in alert_kinds(r) and r.get("pressure_out") == 4.2, 120)
+        print(f"   OK (c) PLC stopped: S-01 still online with a source alert after {waited:.0f} s "
+              f"({row.get('source_error')!r}), readings null; PLC back: readings again after {waited2:.0f} s", flush=True)
+
+        # (d) nothing at the centre commands a station
+        refused = {}
+        for path, body in (("/api/water/state", {}), ("/api/water/set", {"sites": ["S-01"], "pump": 1, "run": False}),
+                           ("/api/water/override", {"sites": ["S-01"]}), ("/api/water/command", {"site": "S-01"})):
+            c, _ = api.call("POST", path, body)
+            if c not in (404, 405):
+                raise Fail(f"POST {path} answered {c}: the water module must have no command route")
+            refused[path] = c
+        print(f"   OK (d) no command route at the centre: {refused}", flush=True)
+
+        # (e) the PLC was only read
+        fcs = plc.seen()
+        if not fcs or set(fcs) - {1, 2, 3, 4}:
+            raise Fail(f"the PLC was sent function codes {fcs} (want only 01-04, and some)")
+        print(f"   OK (e) function codes the PLC was sent over the whole run: {dict(sorted(fcs.items()))} - reads only",
+              flush=True)
+
+        state = station.ssh(f"systemctl is-active urban-water@{unit}", check=False).stdout.strip()
+        if state != "active":
+            raise Fail(f"urban-water@{unit} is {state} at the end")
+        power_alive(station, "station")
+        power_alive(centre, "centre")
+        for vm, name in ((centre, "center"), (station, "station")):
+            vm.screendump(f"{LOGS}/water-{name}-screen.ppm")
+        print(f"   {unit}: {line[line.index('URBAN-OS-CHECK'):][:90]}; systemd exposure of urban-water@ {exposure}",
+              flush=True)
+        print("WATER CHECK PASSED", flush=True)
+    finally:
+        stop.set()
+        plc.stop()
+        for vm in (centre, station):
+            vm.stop()
+            if os.path.exists(vm.disk):
+                os.remove(vm.disk)
+
+
 # ---------------------------------------------------------------- over the air
 
 OTA_TIMEOUT = 5400 if os.environ.get("URBAN_KVM") != "1" else 1500  # a package of hundreds of MB crosses two emulated hops
@@ -3717,6 +4043,8 @@ if __name__ == "__main__":
             chain()
         elif what == "lighting":
             lighting()
+        elif what == "water":
+            water()
         elif what == "ota":
             ota()
         elif what == "demo":

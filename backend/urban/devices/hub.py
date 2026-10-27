@@ -49,8 +49,8 @@ from .registry import ACTIVE, DISTRICT, REVOKED, UNIT, Registry, kind_of
 HELLO_TIMEOUT = 10  # seconds a connection may stay unauthenticated
 LINK_TTL = 3600     # seconds a download link for an update package stays valid
 REOFFER = 600       # seconds before the same release is offered to the same device again (it may be downloading)
-FLOOR_KINDS = ("unit", "district", "lighting")  # the devices that run URBAN OS: the version floor applies to them
-WG_KINDS = (UNIT, DISTRICT)  # the records with a tunnel; a lighting cabinet and the centre have none
+FLOOR_KINDS = ("unit", "district", "lighting", "water")  # the devices that run URBAN OS: the version floor applies
+WG_KINDS = (UNIT, DISTRICT)  # the records with a tunnel; a lighting cabinet, a pump station and the centre have none
 WG_PLAN = wireguard.Plan.of()  # 10.77.0.0/16: the district is 10.77.<number>.1, its units .2 to .254
 WG_RESEND, WG_RESEND_MAX = 30, 960  # seconds: a tunnel message not applied goes again, the pause doubling up to 960
 # what halts a rollout (DeviceHub._watch_rollout): a refusal by the device's update helper (any but "restart pending":
@@ -174,7 +174,7 @@ class DeviceHub:
         return device in self.sessions
 
     def devices_of(self, kind: str) -> list[dict]:
-        """Copies of the registry records of one kind ("unit", "district", "lighting"), as the registry is now."""
+        """Copies of the registry records of one kind ("unit", "district", "lighting", "water"), as the registry is now."""
         self._sync()
         return [dict(rec) for rec in self.registry.devices.values() if kind_of(rec) == kind]
 
@@ -221,7 +221,8 @@ class DeviceHub:
     def floor_verdict(self, device: str, rec: dict | None = None) -> tuple[int, int | None] | None:
         """(floor, the version it showed) when the centre must not command this device, else None. The rule:
         - no floor set: no device is below it (the default; nothing changes until an admin sets one);
-        - only units, district servers and lighting cabinets are judged (FLOOR_KINDS: they run URBAN OS);
+        - only units, district servers, lighting cabinets and pump stations are judged (FLOOR_KINDS: they run
+          URBAN OS);
         - a device is judged by the system version it reported in its current session (`os` in its health report,
           a whole number), below the floor -> below it. A version from an earlier session does not count: the box may
           have been started from another disk since. Offline, the version of its last session stands;
@@ -341,10 +342,10 @@ class DeviceHub:
         return self.seen.get(device, {}).get("health", {}).get("compatible") or DEFAULT_COMPATIBLE
 
     def pending_release(self, device: str, rec: dict) -> dict | None:
-        """The release this device should be offered now, or None: it must be a unit, a district server or a
-        lighting cabinet's unit that reported a system version (an integer) older than the newest release for its own
+        """The release this device should be offered now, or None: it must be a unit, a district server, a
+        lighting cabinet's or a pump station's unit that reported a system version (an integer) older than the newest release for its own
         compatible that is not withdrawn or halted and whose current wave includes it (ReleaseStore.newest_for)."""
-        if self.releases is None or kind_of(rec) not in ("unit", "district", "lighting") or device in self.own:
+        if self.releases is None or kind_of(rec) not in FLOOR_KINDS or device in self.own:
             return None
         have = self.seen.get(device, {}).get("health", {}).get("os")
         rel = self.releases.newest_for(device, self.compatible(device))
@@ -781,6 +782,8 @@ class DeviceHub:
                        "gateway": self.gateway_cert}
             if kind_of(rec) == "lighting":
                 welcome["cabinet"] = rec.get("cabinet")
+            elif kind_of(rec) == "water":
+                welcome["site"] = rec.get("site")
             await ws.send_text(json.dumps(welcome))
             self._offered.pop(device, None)  # a new session may have a device that lost its download
             self._wg_session(device)  # its tunnel message goes again after its first report
@@ -852,6 +855,14 @@ class DeviceHub:
             await _close(ws)
         return rec
 
+    async def enroll_water(self, device: str, site: str, public: str, serial: str = "", lon: float | None = None,
+                           lat: float | None = None, p_min: float | None = None, p_max: float | None = None) -> dict:
+        rec = self.registry.enroll_water(device, site, public, serial, lon, lat, p_min, p_max)
+        ws = self.sessions.pop(device, None)
+        if ws is not None:
+            await _close(ws)
+        return rec
+
     def assign(self, device: str, district: str | None) -> dict | None:
         return self.registry.assign(device, district)
 
@@ -890,7 +901,8 @@ class DeviceHub:
     def status(self) -> list[dict]:
         """One row per device; below_floor: it gets no commands now (floor_verdict), floor: the minimum or None,
         os_proven: the system version it reported in its current (or last) session; compatible: the system it runs
-        (what it reported, x86 if it never did: compatible()); wg: its tunnel (_wg_row), None for a lighting cabinet."""
+        (what it reported, x86 if it never did: compatible()); wg: its tunnel (_wg_row), None for a lighting cabinet or a
+        pump station; cabinet / site: the object of a lighting or a water unit, else None."""
         self._sync()
         now = time.time()
         floor = self.floor()
@@ -898,7 +910,7 @@ class DeviceHub:
         for rec in self.registry.devices.values():
             seen = self.seen.get(rec["id"], {})
             out.append({"id": rec["id"], "kind": kind_of(rec), "junction": rec.get("junction"), "tls": rec.get("tls"),
-                        "name": rec.get("name", ""), "address": rec.get("address"), "cabinet": rec.get("cabinet"), "district": rec.get("district"),
+                        "name": rec.get("name", ""), "address": rec.get("address"), "cabinet": rec.get("cabinet"), "site": rec.get("site"), "district": rec.get("district"),
                         "serial": rec.get("serial", ""), "enrolled": rec.get("enrolled", ""),
                         "first_seen": rec.get("first_seen"),
                         "fingerprint": crypto.fingerprint(rec["public_key"]),

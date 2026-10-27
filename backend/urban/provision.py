@@ -8,6 +8,9 @@
                                                     a district server: its key and the address its units connect to
     python -m urban.provision enroll-lighting light-C-01 --cabinet C-01 --public <hex> [--serial ...] [--lon .. --lat ..]
                                                     the unit of a street-lighting cabinet (the lighting module)
+    python -m urban.provision enroll-water pump-S-01 --site S-01 --public <hex> [--serial ..] [--lon .. --lat ..]
+                                          [--p-min 2.0 --p-max 6.0]
+                                                    the unit of a pump station (the water module, read only)
     python -m urban.provision assign edge-J-21 --district district-1   (or --direct)
                                                     route a unit through a district: its next kit points there
     python -m urban.provision kit edge-J-21         the device's kit as JSON (what the UI's "download kit" gives)
@@ -53,6 +56,15 @@ def main():
     light.add_argument("--serial", default="", help="serial number printed on the box")
     light.add_argument("--lon", type=float, help="longitude of the cabinet (for its astronomical schedule)")
     light.add_argument("--lat", type=float, help="latitude of the cabinet")
+    water = sub.add_parser("enroll-water", help="enrol the unit of a pump station (reads only)")
+    water.add_argument("device", help="pump-<site>, e.g. pump-S-01")
+    water.add_argument("--site", required=True, help="station id, e.g. S-01")
+    water.add_argument("--public", required=True, help="the unit's public key (hex)")
+    water.add_argument("--serial", default="", help="serial number printed on the box")
+    water.add_argument("--lon", type=float, help="longitude of the station (for the map)")
+    water.add_argument("--lat", type=float, help="latitude of the station")
+    water.add_argument("--p-min", type=float, help="pressure below this (bar, outlet) is an alert")
+    water.add_argument("--p-max", type=float, help="pressure above this (bar, outlet) is an alert")
     assign = sub.add_parser("assign", help="route a unit through a district server, or directly")
     assign.add_argument("device", help="edge-<junction>")
     assign.add_argument("--district", help="district-<name>")
@@ -92,6 +104,17 @@ def main():
         except ValueError as err:
             raise SystemExit(str(err))
         print(f"enrolled lighting {rec['id']} for cabinet {rec['cabinet']} ({rec['serial']}), key {crypto.fingerprint(rec['public_key'])}")
+        print("compare this fingerprint with the one the unit printed; a running platform picks it up within seconds")
+        return
+    if args.cmd == "enroll-water":
+        try:
+            rec = Registry(c.PKI / "devices.json").enroll_water(args.device, args.site, args.public, args.serial,
+                                                                args.lon, args.lat, args.p_min, args.p_max)
+        except ValueError as err:
+            raise SystemExit(str(err))
+        limits = "" if rec["p_min"] is None and rec["p_max"] is None else f", pressure {rec['p_min']}..{rec['p_max']} bar"
+        print(f"enrolled water {rec['id']} for site {rec['site']} ({rec['serial']}){limits}, "
+              f"key {crypto.fingerprint(rec['public_key'])}")
         print("compare this fingerprint with the one the unit printed; a running platform picks it up within seconds")
         return
     if args.cmd == "assign":
@@ -139,7 +162,8 @@ def main():
     if args.cmd == "list":
         for d in Registry(c.PKI / "devices.json").devices.values():
             where = (d.get("address") if kind_of(d) == "district"
-                     else f"cabinet {d.get('cabinet')}" if kind_of(d) == "lighting" else (d.get("junction") or "-"))
+                     else f"cabinet {d.get('cabinet')}" if kind_of(d) == "lighting"
+                     else f"site {d.get('site')}" if kind_of(d) == "water" else (d.get("junction") or "-"))
             via = f" via {d['district']}" if d.get("district") else ""
             print(f"{d['id']:16} {kind_of(d):8} {where:16} {d['status']:8} {d.get('serial', ''):12} "
                   f"{crypto.fingerprint(d['public_key'])}{via}")

@@ -1,0 +1,11 @@
+# A pump station's screen follows its water program: the line "water" of the machine's own screen
+# is redrawn every 15 s from /run/urban/water/water.json. Started by urban-prepare for MODULE=water (the root
+# is read-only, so it cannot be "enabled"). The redraw itself is urban-water-screen.service.
+[Unit]
+Description=URBAN OS: redraw the pump station's screen line
+
+[Timer]
+OnActiveSec=5s
+OnUnitActiveSec=15s
+AccuracySec=1s
+Unit=urban-water-screen.service

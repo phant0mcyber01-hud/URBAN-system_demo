@@ -1,0 +1,75 @@
+# One pump station (a pump-<site> device, module water) on its computer in the station's cabinet:
+#   systemctl enable --now urban-water@pump-S-01
+# Its key, ca.pem and gateway.pub live in /etc/urban/pki; parameters in /etc/urban/edge-<id>.env (the kit from
+# `python -m urban.provision kit pump-S-01`, written by `python -m urban.edge --setup`). On URBAN OS this unit is
+# started by urban-prepare for a unit with MODULE=water in urban-unit.txt.
+# The program only READS the station's automation (Modbus functions 01-04) and reports to the centre; it takes no
+# command. The env file says PLATFORM, SERVER_NAME, SITE, LON, LAT, ADAPTER=emulated|modbus-tcp|modbus-rtu and the
+# adapter's settings: MAP (the register map, e.g. /etc/urban/water-map.json), MODBUS_HOST and MODBUS_PORT (TCP), SERIAL
+# and BAUD (RTU), SLAVE (the Modbus unit id); EXTRA= adds more options of the program. An empty value is "not given".
+[Unit]
+Description=URBAN pump station %i (read only)
+# no wait for the network: the program starts at once and keeps trying the automation and the centre
+After=network.target
+
+[Service]
+User=urban
+Group=urban
+WorkingDirectory=/opt/urban
+# systemd has no ${VAR:-default}: the defaults are set here, and the env file (read after) overrides them. An empty
+# SITE means "the id after pump-"; LON and LAT default to Fergana, the pilot city.
+Environment=ADAPTER=emulated SITE= LON=71.78 LAT=40.39 MAP= MODBUS_HOST= MODBUS_PORT=502 SLAVE=1 SERIAL= BAUD=9600 EXTRA=
+EnvironmentFile=/etc/urban/edge-%i.env
+# the env file is data the unit's own user can write: it must not be a way to inject code into the interpreter or
+# the loader (python -I below ignores PYTHON* as well)
+UnsetEnvironment=PYTHONPATH PYTHONHOME LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GCONV_PATH OPENSSL_CONF OPENSSL_MODULES
+ExecStart=/opt/urban/.venv/bin/python -I -m urban.modules.water --unit %i --platform ${PLATFORM} --server-name ${SERVER_NAME} \
+    --pki /etc/urban/pki --adapter ${ADAPTER} --site "${SITE}" --lon ${LON} --lat ${LAT} \
+    --map "${MAP}" --host "${MODBUS_HOST}" --port "${MODBUS_PORT}" --slave "${SLAVE}" --serial "${SERIAL}" --baud "${BAUD}" \
+    --status /run/urban/water/water.json $EXTRA
+Restart=always
+RestartSec=2
+# The sandbox (as urban-lighting@): a hacked program reaches its own key folder (its observations live there too),
+# the update inbox, its status folder and the network, nothing else. Its state goes to /run/urban/water (the only
+# place of /run/urban it may write; the "-" keeps a server install without that folder working).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/etc/urban/pki -/var/lib/urban/update-inbox -/run/urban/water
+InaccessiblePaths=-/var/lib/urban/ssh -/var/lib/urban/update -/var/lib/urban/rauc -/var/lib/urban/platform -/boot -/var/lib/urban/wg
+ProtectHome=yes
+PrivateTmp=yes
+# the station's automation on a serial line (Modbus RTU over RS-485): those devices only; and the TPM's resource
+# manager, through which the station signs with its device key (group tss owns /dev/tpmrm0). No GPIO: the station
+# drives nothing.
+DevicePolicy=closed
+DeviceAllow=char-ttyUSB rw
+DeviceAllow=char-ttyACM rw
+DeviceAllow=char-ttyS rw
+DeviceAllow=/dev/tpmrm0 rw
+SupplementaryGroups=dialout tss
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+KeyringMode=private
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

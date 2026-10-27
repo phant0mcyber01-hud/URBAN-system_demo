@@ -305,8 +305,9 @@ class Helper:
 
     # ---- who this machine is
     def identity(self) -> bool:
-        """Role and name from unit.conf. True only on a tunnel machine: exactly ROLE=unit without MODULE=lighting, or
-        exactly ROLE=district (the pilot's district,center, a centre and a lighting cabinet have no tunnel)."""
+        """Role and name from unit.conf. True only on a tunnel machine: exactly ROLE=unit without MODULE=lighting or
+        MODULE=water, or exactly ROLE=district (the pilot's district,center, a centre, a lighting cabinet and a pump
+        station have no tunnel)."""
         try:
             text = read_hostile(self.p.etc / "unit.conf", MAX_SMALL).decode("utf-8")
         except (OSError, BadFile, ValueError):
@@ -317,7 +318,7 @@ class Helper:
             if sep and name in ("UNIT", "ROLE", "MODULE"):
                 values[name] = value.strip()
         role, unit = values.get("ROLE"), values.get("UNIT", "")
-        if role == "unit" and values.get("MODULE") == "lighting":
+        if role == "unit" and values.get("MODULE") in ("lighting", "water"):
             return False
         if role not in DEVICE_NAME or not DEVICE_NAME[role].fullmatch(unit):
             return False

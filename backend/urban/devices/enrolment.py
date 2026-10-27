@@ -26,9 +26,12 @@ from .signer import SignerError, load_signer
 PREFIX = "URBAN1"
 KIT_VERSION = 1
 SERIAL = re.compile(r"^[A-Za-z0-9._-]{0,40}$")
-DEVICE = re.compile(r"^(edge|district|light)-[A-Za-z0-9._-]{1,54}$")  # a junction unit, a district server, a lighting cabinet's unit
+# a junction unit, a district server, a lighting cabinet's unit, a pump station's unit (the water module)
+DEVICE = re.compile(r"^(edge|district|light|pump)-[A-Za-z0-9._-]{1,54}$")
 LIGHT_DEVICE = re.compile(r"^light-[A-Za-z0-9._-]{1,54}$")
+WATER_DEVICE = re.compile(r"^pump-[A-Za-z0-9._-]{1,54}$")
 CABINET = re.compile(r"^[A-Za-z0-9._-]{1,40}$")
+SITE = CABINET  # a pump station: letters, digits, . _ - (up to 40), e.g. S-01
 DEFAULT_PORT = 8443
 HOST_PORT = re.compile(r"[A-Za-z0-9.-]+(:\d{1,5})?")      # name or IPv4, optional port
 IPV6_PORT = re.compile(r"\[([0-9A-Fa-f:]+)\](:\d{1,5})?")  # [address], optional port
@@ -40,6 +43,10 @@ def is_district(device: str) -> bool:
 
 def is_lighting(device: str) -> bool:
     return device.startswith("light-")
+
+
+def is_water(device: str) -> bool:
+    return device.startswith("pump-")
 
 
 def check_address(address) -> str:
@@ -69,7 +76,7 @@ def _check(body: str) -> str:
 
 def make_code(device: str, serial: str, public: str) -> str:
     if not DEVICE.fullmatch(device) or not SERIAL.fullmatch(serial):
-        raise ValueError("device id is edge-<junction>, district-<name> or light-<cabinet>, serial: letters, digits, . _ - (up to 40)")
+        raise ValueError("device id is edge-<junction>, district-<name>, light-<cabinet> or pump-<site>, serial: letters, digits, . _ - (up to 40)")
     body = f"{PREFIX}:{device}:{serial}:{public.lower()}"
     return f"{body}:{_check(body)}"
 
@@ -116,6 +123,8 @@ def make_kit(rec: dict, pki: Path, server_name: str, port: int, approaches: list
         "approaches": [{k: a.get(k) for k in ("id", "name", "from", "lanes", "zone")} for a in approaches or []],
         **({"cabinet": rec.get("cabinet"), "lon": rec.get("lon"), "lat": rec.get("lat")}
            if rec.get("kind") == "lighting" else {}),  # a lighting unit: the cabinet it controls and where it stands
+        **({k: rec.get(k) for k in ("site", "lon", "lat", "p_min", "p_max")}
+           if rec.get("kind") == "water" else {}),  # a pump station's unit: its station, place and pressure limits
     }
 
 
@@ -137,6 +146,26 @@ SERVER_NAME={server_name}
 CABINET={cabinet}
 {place}# emulated (demo, checks) | relay (the contactor output of the cabinet)
 ADAPTER=emulated
+"""
+
+WATER_ENV_TEMPLATE = """# URBAN pump station unit {unit}, station {site}: reads the station's automation, commands nothing (urban-water@{unit}.service)
+# made by `python -m urban.edge --setup`; PLATFORM, SERVER_NAME, SITE, LON and LAT are rewritten by the next setup,
+# the rest is kept. systemd reads this file: comments only on their own lines, never after a value.
+PLATFORM={platform}
+SERVER_NAME={server_name}
+SITE={site}
+{place}# emulated (demo, checks) | modbus-tcp | modbus-rtu (the station's automation, read only)
+ADAPTER=emulated
+# modbus-*: the station's register map (JSON; template: urban/modules/water/map-template.json)
+MAP=
+# modbus-tcp: the automation's address and port
+MODBUS_HOST=
+MODBUS_PORT=502
+# modbus-*: the Modbus unit id
+SLAVE=1
+# modbus-rtu: the serial port (e.g. /dev/ttyUSB0) and its speed
+SERIAL=
+BAUD=9600
 """
 
 ENV_TEMPLATE = """# URBAN Edge unit {unit} at {junction} {name}
@@ -181,6 +210,28 @@ def _lighting_env(kit: dict, unit: str, env_path: Path) -> None:
     env_path.parent.mkdir(parents=True, exist_ok=True)
     _put(env_path, LIGHTING_ENV_TEMPLATE.format(unit=unit, cabinet=kit["cabinet"], platform=kit["platform"],
                                                 server_name=kit["server_name"], place=place), 0o600)
+
+
+def _water_env(kit: dict, unit: str, env_path: Path) -> None:
+    """The env file of a pump station's unit: made on first setup, then only the lines the kit decides are rewritten
+    (PLATFORM, SERVER_NAME, SITE and, if the kit has them, LON and LAT); ADAPTER, the Modbus settings and anything
+    else the installer wrote stay."""
+    values = {"PLATFORM": kit["platform"], "SERVER_NAME": kit["server_name"], "SITE": kit["site"]}
+    for name in ("lon", "lat"):
+        if kit.get(name) is not None:
+            values[name.upper()] = repr(float(kit[name]))
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    if env_path.exists():
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+        out = [f"{k}={values.pop(k)}" if (k := line.split("=", 1)[0].strip()) in values else line for line in lines]
+        out += [f"{k}={v}" for k, v in values.items()]
+        if not any(line.split("=", 1)[0].strip() == "ADAPTER" for line in out):
+            out.append("ADAPTER=emulated")
+        _put(env_path, "\n".join(out) + "\n", 0o600)
+        return
+    place = "".join(f"{k}={values[k]}\n" for k in ("LON", "LAT") if k in values)
+    _put(env_path, WATER_ENV_TEMPLATE.format(unit=unit, site=kit["site"], platform=kit["platform"],
+                                             server_name=kit["server_name"], place=place), 0o600)
 
 
 def _put(path: Path, text: str, mode: int = 0o644):
@@ -230,6 +281,14 @@ def install_kit(kit: dict, unit: str, key_path: Path, pki: Path, env_path: Path)
             v = kit.get(field)
             if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or not -limit <= v <= limit):
                 raise ValueError(f"the kit's {field} is not a coordinate")
+    water = kit.get("kind") == "water"
+    if water:
+        if not isinstance(kit.get("site"), str) or not SITE.fullmatch(kit["site"]) or not WATER_DEVICE.fullmatch(unit):
+            raise ValueError("the kit of a pump station's unit needs its station (letters, digits, . _ -) and a unit id pump-<site>")
+        for field, limit in (("lon", 180), ("lat", 90), ("p_min", 100), ("p_max", 100)):
+            v = kit.get(field)
+            if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or not -limit <= v <= limit):
+                raise ValueError(f"the kit's {field} is not a number within +-{limit}")
     for field in ("platform", "server_name", "unit", "junction"):  # these land in the env file: one line each
         value = kit.get(field)
         if value is not None and (not isinstance(value, str) or any(ord(ch) < 32 or ord(ch) == 127 for ch in value)):
@@ -246,6 +305,8 @@ def install_kit(kit: dict, unit: str, key_path: Path, pki: Path, env_path: Path)
             written.append(str(pki / name))
     if lighting:
         _lighting_env(kit, unit, env_path)
+    elif water:
+        _water_env(kit, unit, env_path)
     elif env_path.exists():
         lines = env_path.read_text(encoding="utf-8").splitlines()
         values = {"PLATFORM": kit["platform"], "SERVER_NAME": kit["server_name"]}
@@ -262,8 +323,8 @@ def install_kit(kit: dict, unit: str, key_path: Path, pki: Path, env_path: Path)
     except OSError:
         pass
     written.append(str(env_path))
-    if kit.get("kind") in ("district", "lighting"):
-        return written  # a district and a lighting cabinet have no junction of their own
+    if kit.get("kind") in ("district", "lighting", "water"):
+        return written  # a district, a lighting cabinet and a pump station have no junction of their own
     junction = env_path.parent / f"{unit}.junction.json"  # for the camera calibration page
     junction.write_text(json.dumps({"junction": kit.get("junction"), "name": title,
                                     "approaches": kit.get("approaches") or []}, ensure_ascii=False, indent=1),

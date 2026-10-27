@@ -19,6 +19,8 @@ import { createPlaceCard, describe } from './map/placeCard.js';
 import { createPanel, clock, esc, setClockMode } from './ui/panel.js';
 import { createLighting, normalizeModules, renderModuleSwitch } from './ui/lighting.js';
 import { lightingLayers } from './scene/lightingLayer.js';
+import { createWater } from './ui/water.js';
+import { waterLayers } from './scene/waterLayer.js';
 import { createState } from './state.js';
 import qrcode from 'qrcode-generator';
 import * as api from './api.js';
@@ -67,6 +69,7 @@ const { map, overlay, flyTo } = createMap(scene, {
   onClick: ({ object, layer, coordinate }) => {
     if (!object || !layer) { card.hide(); S.pin = null; return; }
     if (layer.id === 'lighting') { lighting.pick(object.cabinet ?? object.id); return; }
+    if (layer.id === 'water') { water.pick(String(object.id ?? object.site)); return; }
     if (layer.id === 'cams') { panel.setTab('cameras'); cameras.open(object.id); return; }
     select(layer.id, object, coordinate ? [coordinate[0], coordinate[1]] : null);
   },
@@ -323,6 +326,17 @@ const lighting = createLighting({
   onAuthLost: () => signedOut(),
   toast: (t) => toast(t),
 });
+// the water utility's pump stations: read only, no command route (docs/water-module.md)
+const water = createWater({
+  root: $('panel'),
+  api,
+  onData: (s) => { S.water = s; S.waterVersion++; },
+  onFocus: (id) => {
+    const s = S.water?.sites?.find((x) => String(x.id ?? x.site) === id);
+    if (s && Number.isFinite(Number(s.lon)) && Number.isFinite(Number(s.lat)) && s.lon != null && s.lat != null) flyTo([Number(s.lon), Number(s.lat)], 17);
+  },
+  onAuthLost: () => signedOut(),
+});
 function drawModules() {
   const html = renderModuleSwitch(S.modules, S.module);
   $('modsw').innerHTML = html;
@@ -335,7 +349,9 @@ function setModule(id) {
   card.hide();
   S.pin = null;
   drawModules();
-  if (id === 'lighting') lighting.start(); else { lighting.stop(); panel.refresh(); }
+  lighting.stop();
+  water.stop();
+  if (id === 'lighting') lighting.start(); else if (id === 'water') water.start(); else panel.refresh();
 }
 $('modsw').onclick = (e) => { const b = e.target.closest('[data-module]'); if (b) setModule(b.dataset.module); };
 // what the centre runs, asked after sign-in; if it cannot say, or runs only traffic, nothing changes on screen
@@ -409,9 +425,11 @@ async function bootLines() {
 function signedOut() {
   S.user = null;
   lighting.stop();
+  water.stop();
   S.module = 'traffic';
   S.modules = [];
   S.lighting = null;
+  S.water = null;
   $('tabs').hidden = false;
   drawModules();
   panel.refresh();
@@ -597,7 +615,8 @@ function frame(now) {
   const pulse = 0.5 + 0.5 * Math.sin(now / 300);
   overlay.setProps({
     layers: [...base, ...overlayLayers(scene, S, show, { main: true, pulse }), ...live.layers(show.traffic),
-      ...(S.module === 'lighting' ? lightingLayers(S, pulse) : [])],
+      ...(S.module === 'lighting' ? lightingLayers(S, pulse) : []),
+      ...(S.module === 'water' ? waterLayers(S, pulse) : [])],
   });
   const camOverlay = cameras.overlay;
   if (camOverlay) {

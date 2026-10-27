@@ -1,6 +1,6 @@
 """City OS modules: the registry of built-in modules and the core's wiring of them (see base.py, docs/city-os-modules.md).
 
-    load_modules(["traffic", "lighting"], core)   -> instances, attached, in the order named
+    load_modules(["traffic", "lighting", "water"], core) -> instances, attached, in the order named
     report_router(modules)                        -> on_report(rec, report) for the device hub: a device's report
                                                      reaches only the module that owns its device kind
     describe(modules)                             -> what GET /api/modules returns
@@ -18,7 +18,8 @@ from .base import Core, Module
 # built-in modules: name -> (module path, class). Imported only when named, so a missing or broken optional
 # module cannot stop a centre that does not use it.
 BUILTIN = {"traffic": ("urban.modules.traffic", "TrafficModule"),
-           "lighting": ("urban.modules.lighting", "LightingModule")}
+           "lighting": ("urban.modules.lighting", "LightingModule"),
+           "water": ("urban.modules.water", "WaterModule")}
 NAME = re.compile(r"^[a-z]+$")
 # a record of this kind is served by the module of the other kind: districts relay the units' reports to traffic
 SERVED_AS = {"district": "unit"}

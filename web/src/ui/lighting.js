@@ -11,7 +11,7 @@ const plural = (n, one, few, many) => (n % 10 === 1 && n % 100 !== 11 ? one
 
 // ---- module switch ----------------------------------------------------------------------------------
 // The modules this interface has a screen for, with the title used when the server did not send one.
-export const UI_MODULES = { traffic: 'Светофоры и пробки', lighting: 'Уличное освещение' };
+export const UI_MODULES = { traffic: 'Светофоры и пробки', lighting: 'Уличное освещение', water: 'Водоканал' };
 
 /** /api/modules answer -> [{id, title}] for the modules that have a screen here, in the server's order. */
 export function normalizeModules(raw) {
@@ -23,7 +23,8 @@ export function normalizeModules(raw) {
     if (typeof id !== 'string' || !(id in UI_MODULES) || seen.has(id)) continue;
     seen.add(id);
     const title = typeof m?.title === 'string' && m.title.trim() ? m.title.trim() : UI_MODULES[id];
-    out.push({ id, title });
+    const summary = typeof m?.summary === 'string' && m.summary.trim() ? m.summary.trim() : null;
+    out.push(summary ? { id, title, summary } : { id, title });
   }
   return out;
 }
@@ -33,7 +34,7 @@ export function renderModuleSwitch(modules, active = 'traffic') {
   const list = normalizeModules(modules);
   if (list.length < 2) return '';
   return `<div class="modsw-box" role="tablist" aria-label="Службы города">${list.map((m) =>
-    `<button role="tab" data-module="${esc(m.id)}" aria-selected="${m.id === active}" class="${m.id === active ? 'sel' : ''}">${esc(m.title)}</button>`).join('')}</div>`;
+    `<button role="tab" data-module="${esc(m.id)}" aria-selected="${m.id === active}" class="${m.id === active ? 'sel' : ''}"${m.summary ? ` title="${esc(m.summary)}"` : ''}>${esc(m.title)}</button>`).join('')}</div>`;
 }
 
 // ---- one cabinet -------------------------------------------------------------------------------------

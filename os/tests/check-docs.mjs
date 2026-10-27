@@ -504,4 +504,27 @@ if (!/камеры пилотной машины \(шаг 14\) проверен�
 const next14 = sectionOf(context, /^## Что дальше.*$/m);
 if (/камеры самой пилотной машины/.test(next14)) fail("the «Что дальше» list of CONTEXT.md still lists the pilot machine's cameras");
 
+// step 15: the water module (pump stations), read only by construction; its own guide, the modules guide, README and
+// CONTEXT.md say so, and say what is not tried
+const waterPath = join(ROOT, "docs", "water-module.md");
+if (!existsSync(waterPath)) fail("docs/water-module.md is missing");
+const water = readFileSync(waterPath, "utf8");
+for (const must of ["только чтение", "MODULE=water", "enroll-water", "urban-water@", "python -m urban.modules.water",
+  "ReadOnlyModbus", "01, 02, 03, 04", "/api/water/state", "ни одного `POST`", "night_min_flow", "kwh_per_m3", "p_min",
+  "check-water.mjs", "## Почему он не может ничего записать", "## Что не сделано и не проверено"])
+  if (!water.includes(must)) fail(`docs/water-module.md never says ${JSON.stringify(must)}`);
+if (!/Ни одна настоящая станция[^.]*не подключал/.test(water))
+  fail("docs/water-module.md does not say plainly that no real pump station was connected");
+for (const must of ["water", "docs/water-module.md", "enroll-water"])
+  if (!mod.includes(must)) fail(`docs/city-os-modules.md never says ${JSON.stringify(must)} (step 15)`);
+if (!/водоканал/i.test(readme) || !readme.includes("docs/water-module.md"))
+  fail("README.md does not mention the water module and docs/water-module.md");
+const ctx15 = sectionOf(context, /^## Водоканал \(шаг 15\).*$/m);
+if (!ctx15 || !/\| \d+ октября \| шаг 15:/.test(context)) fail("CONTEXT.md does not record step 15 (section and history row)");
+for (const must of ["только чтение", "MODULE=water", "urban-water@", "check-water.mjs", "только в QEMU", "01–04"])
+  if (!ctx15.includes(must)) fail(`the «Водоканал (шаг 15)» section of CONTEXT.md never says ${JSON.stringify(must)}`);
+const todo15 = /\*\*Не сделано[^\n]*(?:\n(?!\n)[^\n]*)*/.exec(context)[0];
+if (!/модуль водоканала \(шаг 15\) проверен только в QEMU/.test(todo15))
+  fail("the «Не сделано» paragraph of CONTEXT.md does not say the water module is checked only in QEMU");
+
 console.log("DOCS CHECK PASSED");

@@ -306,3 +306,58 @@ def test_one_key_cannot_be_enrolled_under_two_ids(field_pki):
     reg.enroll_district("district-1", "10.1.0.2", pub())
     with pytest.raises(ValueError, match="already enrolled"):
         reg.enroll_district("district-2", "10.1.0.3", reg.devices["district-1"]["public_key"])
+
+
+# ---------------------------------------------------------------- a pump station's unit (the water module)
+
+def test_a_pump_stations_code_survives_copying_and_its_id_is_checked_everywhere(field_pki):
+    public = pub()
+    code = make_code("pump-S-01", "WTR-1", public)
+    assert parse_code(code[:30] + "\n  " + code[30:]) == {"device": "pump-S-01", "serial": "WTR-1", "public": public}
+    with pytest.raises(ValueError, match="контрольная сумма"):
+        parse_code(code.replace("pump-S-01", "pump-S-02"))
+    reg = Registry(field_pki / "devices.json")
+    for bad in ("pump-", "pump-a b", "pump-x\n", "pump-../x", "pump-ü", "pump-" + "x" * 60):
+        with pytest.raises(ValueError):
+            reg.enroll_water(bad, "S-01", pub())
+    for bad in ("S-01\n", "../S", ""):
+        with pytest.raises(ValueError):
+            reg.enroll_water("pump-S-01", bad, pub())
+    assert reg.devices == {}
+
+
+def test_running_hub_picks_up_a_pump_stations_enrolment_from_another_process(field_pki):
+    reg = Registry(field_pki / "devices.json")
+    old = crypto.new_key()
+    reg.enroll_water("pump-S-01", "S-01", crypto.public_hex(old), p_min=2.0, p_max=6.0)
+    hub = DeviceHub(reg, crypto.new_key(), on_report=lambda rec, rep: None)
+    ws = FakeWS()
+    hub.sessions["pump-S-01"] = ws
+    time.sleep(0.01)
+    new = crypto.new_key()
+    Registry(field_pki / "devices.json").enroll_water("pump-S-01", "S-01", crypto.public_hex(new), p_min=2.5)  # the CLI
+
+    async def tick():
+        rows = hub.status()
+        await asyncio.sleep(0)
+        return rows
+    rows = asyncio.run(tick())
+    assert ws.closed == 4403 and "pump-S-01" not in hub.sessions
+    assert rows[0]["fingerprint"] == crypto.fingerprint(crypto.public_hex(new)) and rows[0]["site"] == "S-01"
+    assert hub.devices_of("water")[0]["p_min"] == 2.5 and hub.devices_of("water")[0]["p_max"] is None
+
+
+def test_a_water_kit_cannot_put_extra_lines_into_the_env_file(tmp_path, field_pki):
+    unit_pki = tmp_path / "unit" / "pki"
+    keygen(SimpleNamespace(unit="pump-S-01", key=None, pki=str(unit_pki), serial=""))
+    key = crypto.load_private((unit_pki / "edge" / "pump-S-01.key").read_text())
+    rec = Registry(field_pki / "devices.json").enroll_water("pump-S-01", "S-01", crypto.public_hex(key))
+    kit = make_kit(rec, field_pki, "city.example", 8443)
+    env = tmp_path / "unit" / "water.env"
+    for field in ("platform", "server_name", "site"):
+        with pytest.raises(ValueError):
+            install_kit({**kit, field: "x\nADAPTER=modbus-tcp"}, "pump-S-01", unit_pki / "edge" / "pump-S-01.key",
+                        unit_pki, env)
+        assert not env.exists() and not (unit_pki / "ca.pem").exists()  # refused before anything was written
+    with pytest.raises(ValueError, match="pump-<site>"):
+        install_kit({**kit, "unit": "light-S-01"}, "light-S-01", unit_pki / "edge" / "pump-S-01.key", unit_pki, env)

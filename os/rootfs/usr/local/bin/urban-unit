@@ -3,7 +3,8 @@
 #   urban-unit status          identity, key, slot, version, services
 #   urban-unit code            the enrolment code again
 #   urban-unit setup KIT.json  the kit from the platform (Устройства -> Комплект); then the unit starts working
-#                              (a street-lighting cabinet, light-<name>: its lighting program starts)
+#                              (a street-lighting cabinet, light-<name>: its lighting program starts;
+#                              a pump station, pump-<site>: its water program, read only)
 #   urban-unit update BUNDLE   install a signed update into the other slot and reboot into it
 #                              (copy bundles to /var/lib/urban/update: the root is read-only, /tmp is small)
 #   urban-unit apply-update    the root helper behind updates the control centre delivers: run by
@@ -138,6 +139,11 @@ case "${1:-status}" in
         # the unit's, the program is the lighting module's
         systemctl restart "urban-lighting@$UNIT"
         echo "cabinet $UNIT started; it appears online in the platform under Устройства (lighting module)" ;;
+      pump-*)
+        # a pump station (MODULE=water, urban-prepare only gives that role a pump-... name): the program only reads
+        # the station's automation and reports it
+        systemctl restart "urban-water@$UNIT"
+        echo "station $UNIT started; it appears online in the platform under Водоканал (water module, read only)" ;;
       *)
         systemctl restart "urban-edge@$UNIT"
         if [ -f /etc/urban/cameras.json ] && ! grep -qx 'VISION=off' "$D/etc/unit.conf"; then systemctl restart "urban-vision@$UNIT"; fi

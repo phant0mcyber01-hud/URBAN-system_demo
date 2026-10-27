@@ -30,6 +30,7 @@ include = ["urban*"]
 
 [tool.setuptools.package-data]
 "urban.equipment" = ["profiles/*.json"]
+"urban.modules.water" = ["map-template.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -45,8 +45,8 @@ USERS = DATA / "users.json"  # operator accounts, see `python -m urban.users`
 DB = STATE / "urban.db"  # history: audit chain, commands, device and queue samples
 MFA_ROLES = {r.strip() for r in os.getenv("MFA_ROLES", "").split(",") if r.strip()}  # e.g. operator,admin
 HISTORY_DAYS = int(os.getenv("HISTORY_DAYS", "90"))  # queue and device samples older than this are pruned; audit and commands are kept
-# City OS modules to load (urban/modules): traffic lights and congestion, street lighting
-MODULES = [m.strip() for m in os.getenv("MODULES", "traffic,lighting").split(",") if m.strip()]
+# City OS modules to load (urban/modules): traffic lights and congestion, street lighting, water (pump stations, read only)
+MODULES = [m.strip() for m in os.getenv("MODULES", "traffic,lighting,water").split(",") if m.strip()]
 # green corridor proposals for emergency units: off by default, the measurement showed no clear benefit
 # from plan selection (docs/corridor.md); on for trials
 GREEN_CORRIDOR = os.getenv("GREEN_CORRIDOR", "off").lower() in ("on", "1", "true", "yes")
